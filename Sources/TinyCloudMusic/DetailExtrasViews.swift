@@ -5,6 +5,7 @@ struct ArtistExtrasView: View {
     let extras: LiveMusicExtras
     let library: LiveMusicLibrary
     let onOpenRoute: (Route) -> Void
+    let onFollowChanged: (Bool) -> Void
     let songList: AnyView
 
     @State private var phase: DetailExtrasPhase<ArtistExtrasSnapshot> = .loading
@@ -19,12 +20,14 @@ struct ArtistExtrasView: View {
         extras: LiveMusicExtras,
         library: LiveMusicLibrary,
         onOpenRoute: @escaping (Route) -> Void,
+        onFollowChanged: @escaping (Bool) -> Void,
         songList: AnyView
     ) {
         self.artistID = artistID
         self.extras = extras
         self.library = library
         self.onOpenRoute = onOpenRoute
+        self.onFollowChanged = onFollowChanged
         self.songList = songList
     }
 
@@ -184,6 +187,7 @@ struct ArtistExtrasView: View {
                     followDay: target ? current.followStatus.followDay : ""
                 )
                 phase = .loaded(current)
+                onFollowChanged(target)
             } catch is CancellationError {
             } catch {
                 followError = error.localizedDescription

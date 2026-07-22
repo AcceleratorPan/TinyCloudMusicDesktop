@@ -2,13 +2,21 @@ import Foundation
 
 enum MusicDownloadState: Equatable, Sendable {
     case queued
-    case running(progress: Double)
+    case running(progress: Double?)
     case completed(audioURL: URL, lyricURL: URL?)
     case failed(String)
     case cancelled
 }
 
-struct MusicDownloadRequest: Sendable {
+struct MusicDownloadItem: Identifiable, Equatable, Sendable {
+    let id: Int64
+    let title: String
+    let artist: String
+    let quality: String
+    let expectedBytes: Int64?
+}
+
+struct MusicDownloadRequest: Equatable, Sendable {
     let songID: Int64
     let songName: String
     let artists: String
@@ -16,9 +24,10 @@ struct MusicDownloadRequest: Sendable {
     let quality: AudioQuality
     let includeLyrics: Bool
     let source: MusicDownloadSource
+    let expectedBytes: Int64?
 }
 
-enum MusicDownloadSource: Sendable {
+enum MusicDownloadSource: Equatable, Sendable {
     case catalog
     case cloud(userID: Int64, fileName: String)
 }
@@ -91,6 +100,23 @@ enum MusicDownloadFiles {
         }
     }
 
+    static func existingDownload(
+        in directory: URL,
+        stem: String,
+        audioExtension: String,
+        fileManager: FileManager = .default
+    ) -> MusicDownloadResult? {
+        let audioURL = directory.appending(path: stem).appendingPathExtension(audioExtension)
+        guard fileManager.fileExists(atPath: audioURL.path),
+              ((try? fileSize(at: audioURL)) ?? 0) > 0
+        else { return nil }
+        let lyricURL = directory.appending(path: stem).appendingPathExtension("lrc")
+        return MusicDownloadResult(
+            audioURL: audioURL,
+            lyricURL: fileManager.fileExists(atPath: lyricURL.path) ? lyricURL : nil
+        )
+    }
+
     static func stageDownloadedFile(
         _ source: URL,
         at partURL: URL,
@@ -138,14 +164,30 @@ enum MusicDownloadFiles {
 }
 
 struct MusicDownloadProgressThrottle {
-    private var lastPercentage = -1
+    private let minimumInterval: TimeInterval
+    private var lastProgress: Double?
+    private var lastUpdateTime: TimeInterval?
 
-    mutating func update(totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) -> Double? {
-        guard totalBytesExpectedToWrite > 0 else { return nil }
-        let value = min(max(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite), 0), 1)
-        let percentage = Int(value * 100)
-        guard percentage > lastPercentage else { return nil }
-        lastPercentage = percentage
+    init(minimumInterval: TimeInterval = 0.1) {
+        self.minimumInterval = max(0, minimumInterval)
+    }
+
+    mutating func update(
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64,
+        responseExpectedContentLength: Int64 = NSURLSessionTransferSizeUnknown,
+        now: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) -> Double? {
+        let expectedBytes = responseExpectedContentLength > 0
+            ? responseExpectedContentLength
+            : totalBytesExpectedToWrite
+        guard expectedBytes > 0 else { return nil }
+        let value = min(max(Double(totalBytesWritten) / Double(expectedBytes), 0), 1)
+        guard lastProgress.map({ value > $0 }) ?? true,
+              value == 1 || lastUpdateTime.map({ now - $0 >= minimumInterval }) ?? true
+        else { return nil }
+        lastProgress = value
+        lastUpdateTime = now
         return value
     }
 }

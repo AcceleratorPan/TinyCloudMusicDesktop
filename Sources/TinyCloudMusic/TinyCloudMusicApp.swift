@@ -66,7 +66,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             cacheRoot: model.cacheFolderURL,
             crossfadeDuration: model.settings.crossfadeDuration
         )
-        model.personalFM = PersonalFMController(library: library, player: player)
+        model.personalFM = PersonalFMController(
+            library: library,
+            player: player,
+            onTrashSucceeded: { [weak model] in model?.showToast("已减少这首歌的推荐") }
+        )
         let rootView = RootView(model: model, player: player) { [weak self] in
             self?.openNowPlaying(model: model, player: player)
         }
@@ -432,10 +436,13 @@ private final class MenuBarPlayerController: NSObject {
         case .queued:
             update(downloadButton, symbol: "clock", label: "等待下载", enabled: true)
         case let .running(progress):
+            let retryAttempt = manager.retryAttempts[song.id] ?? 0
             update(
                 downloadButton,
                 symbol: "arrow.down.circle.fill",
-                label: "取消下载，已完成 \(Int(progress * 100))%",
+                label: retryAttempt > 0
+                    ? "取消下载，正在进行第 \(retryAttempt) 次断点重试"
+                    : progress.map { "取消下载，已完成 \(Int($0 * 100))%" } ?? "取消下载，正在下载",
                 enabled: true
             )
         case .completed:
@@ -499,7 +506,7 @@ private final class MenuBarPlayerController: NSObject {
 
     @objc private func download() {
         guard let song = player.currentSong, let manager = model.downloads else { return }
-        if case .running = manager.states[song.id] {
+        if manager.isActive(songID: song.id) {
             manager.cancel(songID: song.id)
         } else {
             model.download(song)

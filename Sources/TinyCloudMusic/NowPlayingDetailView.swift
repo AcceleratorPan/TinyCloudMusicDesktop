@@ -192,7 +192,7 @@ struct NowPlayingDetailView: View {
             header
         }
         .overlay(alignment: .top) {
-            ArtworkSaveToast(message: model.artworkSaveMessage)
+            InteractionToast(message: model.interactionMessage)
                 .padding(.top, 66)
         }
         .frame(minWidth: 780, idealWidth: 940)

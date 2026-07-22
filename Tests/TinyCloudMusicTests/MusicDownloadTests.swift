@@ -21,7 +21,7 @@ private final class DowngradedDownloadProtocol: URLProtocol, @unchecked Sendable
         case "/eapi/v3/song/detail":
             body = Data(#"{"code":200,"privileges":[{"plLevel":"sky","flLevel":"exhigh","downloadMaxBrLevel":"sky"}]}"#.utf8)
         default:
-            body = Data(#"{"code":200,"data":{"url":"https://example.com/audio.flac","type":"flac","level":"lossless"}}"#.utf8)
+            body = Data(#"{"code":200,"data":{"url":"https://example.com/audio.flac","type":"flac","level":"lossless","size":4096}}"#.utf8)
         }
         let status = [
             "/eapi/song/music/detail/get",
@@ -63,7 +63,8 @@ private func verifyHighestQualityDoesNotDowngrade() async throws {
         destination: FileManager.default.temporaryDirectory,
         quality: .best,
         includeLyrics: false,
-        source: .catalog
+        source: .catalog,
+        expectedBytes: nil
     )
     let highestLevel = try await MusicDownloadManager.downloadLevel(for: request, transport: transport)
     guard highestLevel == "jymaster" else { throw MusicDownloadCheckError.failed }
@@ -77,6 +78,14 @@ private func verifyHighestQualityDoesNotDowngrade() async throws {
         )
         throw MusicDownloadCheckError.failed
     } catch MusicDownloadError.qualityMismatch {}
+
+    let losslessSource = try await MusicDownloadManager.audioSource(
+        songID: 1,
+        level: "lossless",
+        requiresExactLevel: true,
+        transport: transport
+    )
+    guard losslessSource.expectedBytes == 4096 else { throw MusicDownloadCheckError.failed }
 }
 
 private func verifyMusicDownloadFiles() throws {
@@ -98,7 +107,12 @@ private func verifyMusicDownloadFiles() throws {
 
     try MusicDownloadFiles.commit(partURL: targets.audioPart, finalURL: targets.audioFinal)
     guard try Data(contentsOf: targets.audioFinal) == Data([1, 2, 3]),
-          !FileManager.default.fileExists(atPath: targets.audioPart.path)
+          !FileManager.default.fileExists(atPath: targets.audioPart.path),
+          MusicDownloadFiles.existingDownload(
+              in: root,
+              stem: "song",
+              audioExtension: "mp3"
+          )?.audioURL == targets.audioFinal
     else { throw MusicDownloadCheckError.failed }
 
     let emptySource = root.appending(path: "empty.tmp")
@@ -113,20 +127,100 @@ private func verifyMusicDownloadFiles() throws {
           !FileManager.default.fileExists(atPath: emptyPart.path)
     else { throw MusicDownloadCheckError.failed }
 
-    var progress = MusicDownloadProgressThrottle()
-    guard progress.update(totalBytesWritten: 1, totalBytesExpectedToWrite: 100) == 0.01,
-          progress.update(totalBytesWritten: 1, totalBytesExpectedToWrite: 100) == nil,
-          progress.update(totalBytesWritten: 2, totalBytesExpectedToWrite: 100) == 0.02,
-          progress.update(totalBytesWritten: 1, totalBytesExpectedToWrite: 100) == nil
+    var progress = MusicDownloadProgressThrottle(minimumInterval: 0.1)
+    guard progress.update(totalBytesWritten: 1, totalBytesExpectedToWrite: 100, now: 0) == 0.01,
+          progress.update(totalBytesWritten: 2, totalBytesExpectedToWrite: 100, now: 0.05) == nil,
+          progress.update(totalBytesWritten: 3, totalBytesExpectedToWrite: 100, now: 0.1) == 0.03,
+          progress.update(totalBytesWritten: 2, totalBytesExpectedToWrite: 100, now: 0.2) == nil,
+          progress.update(totalBytesWritten: 100, totalBytesExpectedToWrite: 100, now: 0.11) == 1,
+          MusicDownloadManager.overallProgress(audioProgress: 0.5, weight: 0.99) == 0.495,
+          MusicDownloadManager.overallProgress(audioProgress: 0.5, weight: 1) == 0.5,
+          MusicDownloadManager.overallProgress(audioProgress: 2, weight: 0.99) == 0.99
     else { throw MusicDownloadCheckError.failed }
+
+    var responseProgress = MusicDownloadProgressThrottle()
+    guard responseProgress.update(
+        totalBytesWritten: 25,
+        totalBytesExpectedToWrite: 200,
+        responseExpectedContentLength: 100
+    ) == 0.25 else { throw MusicDownloadCheckError.failed }
+
+    var unknownProgress = MusicDownloadProgressThrottle()
+    guard unknownProgress.update(
+        totalBytesWritten: 25,
+        totalBytesExpectedToWrite: NSURLSessionTransferSizeUnknown
+    ) == nil else { throw MusicDownloadCheckError.failed }
 }
+}
+
+private func verifyRetryPolicyAndResumeStore() throws {
+    let policy = MusicDownloadRetryPolicy(maximumAttempts: 4, baseDelay: 0.5, maximumDelay: 1.5)
+    guard policy.maximumRetryCount == 3,
+          policy.delay(forRetry: 1) == 0.5,
+          policy.delay(forRetry: 2) == 1,
+          policy.delay(forRetry: 3) == 1.5,
+          policy.delay(forRetry: 1, retryAfter: 70) == 60,
+          policy.shouldRetry(URLError(.networkConnectionLost)),
+          policy.shouldRetry(MusicDownloadHTTPError(statusCode: 503, retryAfter: nil)),
+          !policy.shouldRetry(MusicDownloadHTTPError(statusCode: 400, retryAfter: nil))
+    else { throw MusicDownloadCheckError.failed }
+
+    let resumeBytes = Data([1, 3, 5, 7])
+    let resumableError = NSError(
+        domain: NSURLErrorDomain,
+        code: URLError.networkConnectionLost.rawValue,
+        userInfo: [NSURLSessionDownloadTaskResumeData: resumeBytes]
+    )
+    guard policy.resumeData(from: resumableError) == resumeBytes else {
+        throw MusicDownloadCheckError.failed
+    }
+
+    let root = FileManager.default.temporaryDirectory
+        .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = MusicDownloadResumeStore(directory: root)
+    let request = MusicDownloadRequest(
+        songID: 99,
+        songName: "Resume",
+        artists: "Artist",
+        destination: root,
+        quality: .lossless,
+        includeLyrics: true,
+        source: .catalog,
+        expectedBytes: 1_024
+    )
+    store.save(resumeBytes, for: request)
+    guard store.load(for: request) == resumeBytes else { throw MusicDownloadCheckError.failed }
+    store.remove(songID: request.songID)
+    guard store.load(for: request) == nil else { throw MusicDownloadCheckError.failed }
+}
+
+@MainActor
+private func verifyDuplicateQualityIsSkipped() throws {
+    let manager = MusicDownloadManager()
+    let song = Song(
+        id: 7,
+        name: "Queue",
+        artists: [ArtistSummary(id: 1, name: "Artist")],
+        album: AlbumSummary(id: 1, name: "Album", artwork: Artwork(symbol: "music.note", accent: .red)),
+        duration: .seconds(1)
+    )
+    let destination = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    guard manager.enqueue(song: song, to: destination, quality: .standard, includeLyrics: false),
+          !manager.enqueue(song: song, to: destination, quality: .standard, includeLyrics: false),
+          manager.enqueue(song: song, to: destination, quality: .lossless, includeLyrics: false)
+    else { throw MusicDownloadCheckError.failed }
+    manager.cancelAll()
 }
 
 #if MUSIC_DOWNLOAD_CHECK
 @main
 private enum MusicDownloadCheck {
+    @MainActor
     static func main() async throws {
         try verifyMusicDownloadFiles()
+        try verifyRetryPolicyAndResumeStore()
+        try verifyDuplicateQualityIsSkipped()
         try await verifyHighestQualityDoesNotDowngrade()
         print("Music download checks passed")
     }
@@ -142,6 +236,17 @@ struct MusicDownloadTests {
     @Test("Highest available quality never accepts a downgraded source")
     func highestQualityDoesNotDowngrade() async throws {
         try await verifyHighestQualityDoesNotDowngrade()
+    }
+
+    @Test("Retries use exponential backoff and persist matching resume data")
+    func retryPolicyAndResumeStore() throws {
+        try verifyRetryPolicyAndResumeStore()
+    }
+
+    @MainActor
+    @Test("Duplicate quality is skipped while a different quality replaces the task")
+    func duplicateQualityIsSkipped() throws {
+        try verifyDuplicateQualityIsSkipped()
     }
 }
 #endif

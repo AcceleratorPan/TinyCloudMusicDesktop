@@ -75,10 +75,11 @@ final class AppModel {
     private(set) var detailLoads: [Route: DetailLoad] = [:]
     private(set) var loadingPlaylistIDs: Set<Int64> = []
     private(set) var playlistLoadMoreErrors: [Int64: String] = [:]
+    private(set) var playlistContentRevision = 0
     var settings: AppSettings
     var settingsMessage: String?
     var libraryMessage: String?
-    var artworkSaveMessage: String?
+    var interactionMessage: String?
     var likedSongIDs: Set<Int64> = []
     var playlistSubscriptionOverrides: [Int64: Bool] = [:]
     var albumSubscriptionOverrides: [Int64: Bool] = [:]
@@ -106,6 +107,9 @@ final class AppModel {
     @ObservationIgnored private var homeCache: [String: HomeSection] = [:]
     @ObservationIgnored private var homeTasks: [String: HomeTaskEntry] = [:]
     @ObservationIgnored private var detailCache: [Route: DetailCacheEntry] = [:]
+    @ObservationIgnored private var staleDetailRoutes: Set<Route> = []
+    @ObservationIgnored private var cachedPlaylistRevision = -1
+    @ObservationIgnored private var cachedPlaylistsLoadedAt: Date?
     @ObservationIgnored private var searchHintCache: [String: SearchHintCacheEntry] = [:]
     @ObservationIgnored private var searchTask: Task<Void, Never>?
     @ObservationIgnored private var searchHintTask: Task<Void, Never>?
@@ -113,7 +117,7 @@ final class AppModel {
     @ObservationIgnored private var searchDirectMatchTask: Task<Void, Never>?
     @ObservationIgnored private var detailTasks: [Route: Task<Void, Never>] = [:]
     @ObservationIgnored private var playlistLoadMoreTasks: [Int64: Task<Void, Never>] = [:]
-    @ObservationIgnored private var artworkSaveMessageTask: Task<Void, Never>?
+    @ObservationIgnored private var interactionMessageTask: Task<Void, Never>?
 
     init(
         repository: any MusicRepository,
@@ -140,9 +144,13 @@ final class AppModel {
         let storedCrossfadeDuration = defaults.object(forKey: "crossfadeDuration") == nil
             ? 3
             : defaults.double(forKey: "crossfadeDuration")
+        let storedDownloadConcurrency = defaults.object(forKey: "downloadConcurrency") == nil
+            ? 3
+            : defaults.integer(forKey: "downloadConcurrency")
         settings = AppSettings(
             appearance: Appearance(rawValue: defaults.string(forKey: "appearance") ?? "") ?? .system,
             quality: AudioQuality(rawValue: defaults.string(forKey: "quality") ?? "") ?? .standard,
+            downloadConcurrency: min(max(storedDownloadConcurrency, 1), 5),
             playbackQuality: AudioQuality(rawValue: defaults.string(forKey: "playbackQuality") ?? "") ?? .standard,
             crossfadeDuration: min(max(storedCrossfadeDuration, 0), 12),
             homeSectionIDs: storedSections.isEmpty ? defaultSections : storedSections,
@@ -150,6 +158,7 @@ final class AppModel {
             imageBookmark: defaults.data(forKey: "imageBookmark"),
             cacheBookmark: defaults.data(forKey: "cacheBookmark")
         )
+        downloads?.setMaximumConcurrentDownloads(settings.downloadConcurrency)
         rebuildHomeSlots()
     }
 
@@ -410,9 +419,10 @@ final class AppModel {
 
     func loadDetail(_ route: Route, reload: Bool = false) {
         guard path.contains(route) else { return }
-        if !reload, case .loaded? = detailLoads[route] { return }
+        let needsRefresh = reload || staleDetailRoutes.contains(route)
+        if !needsRefresh, case .loaded? = detailLoads[route] { return }
 
-        if reload, case let .playlist(id) = route {
+        if needsRefresh, case let .playlist(id) = route {
             playlistLoadMoreTasks[id]?.cancel()
             playlistLoadMoreTasks[id] = nil
             loadingPlaylistIDs.remove(id)
@@ -421,7 +431,7 @@ final class AppModel {
 
         let now = Date()
         let cached = detailCache[route]
-        if !reload, var cached, now.timeIntervalSince(cached.loadedAt) < 5 * 60 {
+        if !needsRefresh, var cached, now.timeIntervalSince(cached.loadedAt) < 5 * 60 {
             cached.lastAccess = now
             detailCache[route] = cached
             detailLoads[route] = .loaded(cached.content)
@@ -441,9 +451,17 @@ final class AppModel {
                       self.path.contains(route)
                 else { return }
                 self.storeDetail(detail, for: route)
+                self.staleDetailRoutes.remove(route)
                 self.detailLoads[route] = .loaded(detail)
                 self.detailTasks[route] = nil
             } catch is CancellationError {
+                guard let self,
+                      !Task.isCancelled,
+                      self.detailGenerations[route] == generation,
+                      self.path.contains(route)
+                else { return }
+                self.detailTasks[route] = nil
+                self.loadDetail(route, reload: true)
             } catch {
                 guard let self,
                       !Task.isCancelled,
@@ -472,11 +490,65 @@ final class AppModel {
         else { throw CancellationError() }
 
         storeDetail(detail, for: route)
+        staleDetailRoutes.remove(route)
         if path.contains(route) { detailLoads[route] = .loaded(detail) }
         if let index = librarySnapshot?.playlists.firstIndex(where: { $0.id == playlistID }) {
             librarySnapshot?.playlists[index] = playlist
         }
         return playlist
+    }
+
+    func playlistContentsDidChange(_ playlistID: Int64? = nil) {
+        playlistSummariesDidChange()
+        let knownID = playlistID ?? cachedFavoritePlaylistID
+        let routes = if let knownID {
+            Set([Route.playlist(knownID)])
+        } else {
+            Set(detailCache.keys)
+                .union(detailLoads.keys)
+                .union(path)
+                .filter { if case .playlist = $0 { true } else { false } }
+        }
+
+        for route in routes where detailCache[route] != nil || detailLoads[route] != nil || path.contains(route) {
+            staleDetailRoutes.insert(route)
+            if path.contains(route) { loadDetail(route, reload: true) }
+        }
+    }
+
+    func playlistSummariesDidChange() {
+        playlistContentRevision &+= 1
+    }
+
+    func cachedPlaylistsAreFresh(at now: Date = Date()) -> Bool {
+        librarySnapshot != nil
+            && cachedPlaylistRevision == playlistContentRevision
+            && cachedPlaylistsLoadedAt.map { now.timeIntervalSince($0) < 90 } == true
+    }
+
+    func storeLibrarySnapshot(
+        _ snapshot: LibrarySnapshot,
+        playlistRevision: Int,
+        loadedAt: Date = Date()
+    ) {
+        librarySnapshot = snapshot
+        cachedPlaylistRevision = playlistRevision
+        cachedPlaylistsLoadedAt = loadedAt
+    }
+
+    @discardableResult
+    func storeCachedPlaylists(
+        _ playlists: [Playlist],
+        playlistRevision: Int,
+        loadedAt: Date = Date()
+    ) -> Bool {
+        guard playlistRevision == playlistContentRevision, var snapshot = librarySnapshot else { return false }
+        cachedPlaylistRevision = playlistRevision
+        cachedPlaylistsLoadedAt = loadedAt
+        guard snapshot.playlists != playlists else { return true }
+        snapshot.playlists = playlists
+        librarySnapshot = snapshot
+        return true
     }
 
     func loadMorePlaylistSongs(_ playlistID: Int64) {
@@ -547,22 +619,34 @@ final class AppModel {
     func setAppearance(_ appearance: Appearance) {
         settings.appearance = appearance
         defaults.set(appearance.rawValue, forKey: "appearance")
+        showToast("外观设置已保存")
     }
 
     func setQuality(_ quality: AudioQuality) {
         settings.quality = quality
         defaults.set(quality.rawValue, forKey: "quality")
+        showToast("下载音质已保存")
+    }
+
+    func setDownloadConcurrency(_ count: Int) {
+        let count = min(max(count, 1), 5)
+        settings.downloadConcurrency = count
+        defaults.set(count, forKey: "downloadConcurrency")
+        downloads?.setMaximumConcurrentDownloads(count)
+        showToast("下载并发数已保存")
     }
 
     func setPlaybackQuality(_ quality: AudioQuality) {
         settings.playbackQuality = quality
         defaults.set(quality.rawValue, forKey: "playbackQuality")
+        showToast("播放音质已保存")
     }
 
     func setCrossfadeDuration(_ seconds: TimeInterval) {
         let seconds = min(max(seconds, 0), 12)
         settings.crossfadeDuration = seconds
         defaults.set(seconds, forKey: "crossfadeDuration")
+        showToast(seconds == 0 ? "歌曲过渡已关闭" : "歌曲过渡已保存")
     }
 
     func setHomeSection(_ id: String, enabled: Bool) {
@@ -580,6 +664,7 @@ final class AppModel {
         }
         settings.homeSectionIDs = ids
         defaults.set(ids, forKey: "homeSectionIDs")
+        showToast("首页栏目已更新")
         loadHome()
     }
 
@@ -589,6 +674,7 @@ final class AppModel {
             settings.downloadBookmark = bookmark
             defaults.set(bookmark, forKey: "downloadBookmark")
             settingsMessage = nil
+            showToast("下载位置已保存")
         } catch {
             settingsMessage = "无法保存下载目录权限"
         }
@@ -600,6 +686,7 @@ final class AppModel {
             settings.cacheBookmark = bookmark
             defaults.set(bookmark, forKey: "cacheBookmark")
             settingsMessage = nil
+            showToast("缓存位置已保存")
         } catch {
             settingsMessage = "无法保存缓存目录权限"
         }
@@ -611,6 +698,7 @@ final class AppModel {
             settings.imageBookmark = bookmark
             defaults.set(bookmark, forKey: "imageBookmark")
             settingsMessage = nil
+            showToast("图片保存位置已保存")
         } catch {
             settingsMessage = "无法保存图片目录权限"
         }
@@ -624,6 +712,28 @@ final class AppModel {
             quality: settings.quality,
             includeLyrics: true
         )
+    }
+
+    func downloadPlaylist(
+        loadedSongs: [Song],
+        trackIDs: [Int64],
+        quality: AudioQuality
+    ) async throws -> Int {
+        guard let downloads else { return 0 }
+        var songsByID = Dictionary(loadedSongs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let missingIDs = trackIDs.filter { songsByID[$0] == nil }
+        for song in try await repository.songs(ids: missingIDs) { songsByID[song.id] = song }
+
+        return trackIDs.compactMap { songsByID[$0] }.reduce(into: 0) { count, song in
+            if downloads.enqueue(
+                song: song,
+                to: downloadFolderURL,
+                quality: quality,
+                includeLyrics: true
+            ) {
+                count += 1
+            }
+        }
     }
 
     func download(_ song: CloudSong) {
@@ -651,20 +761,20 @@ final class AppModel {
                 let fileExtension = sourceURL.pathExtension.lowercased() == "png" ? "png" : "jpg"
                 let destination = destinationFolder.appending(path: fileName).appendingPathExtension(fileExtension)
                 try data.write(to: destination, options: .atomic)
-                showArtworkSavedMessage()
+                showToast("图片保存成功")
             } catch {
                 libraryMessage = "图片保存失败：\(error.localizedDescription)"
             }
         }
     }
 
-    private func showArtworkSavedMessage() {
-        artworkSaveMessageTask?.cancel()
-        artworkSaveMessage = "图片保存成功"
-        artworkSaveMessageTask = Task { @MainActor [weak self] in
+    func showToast(_ message: String) {
+        interactionMessageTask?.cancel()
+        interactionMessage = message
+        interactionMessageTask = Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: .seconds(2))
-                self?.artworkSaveMessage = nil
+                self?.interactionMessage = nil
             } catch {
             }
         }
@@ -678,10 +788,25 @@ final class AppModel {
                 try await library.setSongLiked(songID, liked: liked)
                 guard let self else { return }
                 if liked { self.likedSongIDs.insert(songID) } else { self.likedSongIDs.remove(songID) }
+                self.playlistContentsDidChange()
+                self.showToast(liked ? "已喜欢歌曲" : "已取消喜欢")
             } catch {
                 self?.libraryMessage = error.localizedDescription
             }
         }
+    }
+
+    func favoriteSongs(_ songIDs: [Int64]) async throws -> Int {
+        guard let library else { return 0 }
+        var count = 0
+        defer { if count > 0 { playlistContentsDidChange() } }
+        for songID in songIDs where songID > 0 && !likedSongIDs.contains(songID) {
+            try Task.checkCancellation()
+            try await library.setSongLiked(songID, liked: true)
+            likedSongIDs.insert(songID)
+            count += 1
+        }
+        return count
     }
 
     func setPlaylistSubscribed(_ id: Int64, subscribed: Bool) {
@@ -691,6 +816,8 @@ final class AppModel {
                 try await library.setPlaylistSubscribed(id, subscribed: subscribed)
                 guard let self else { return }
                 self.playlistSubscriptionOverrides[id] = subscribed
+                self.playlistSummariesDidChange()
+                self.showToast(subscribed ? "歌单已收藏" : "已取消收藏歌单")
             } catch {
                 self?.libraryMessage = error.localizedDescription
             }
@@ -704,6 +831,7 @@ final class AppModel {
                 try await library.setAlbumSubscribed(id, subscribed: subscribed)
                 guard let self else { return }
                 self.albumSubscriptionOverrides[id] = subscribed
+                self.showToast(subscribed ? "专辑已收藏" : "已取消收藏专辑")
             } catch {
                 self?.libraryMessage = error.localizedDescription
             }
@@ -717,6 +845,7 @@ final class AppModel {
                 try await library.setArtistFollowed(id, followed: followed)
                 guard let self else { return }
                 self.artistFollowOverrides[id] = followed
+                self.showToast(followed ? "已关注歌手" : "已取消关注歌手")
             } catch {
                 self?.libraryMessage = error.localizedDescription
             }
@@ -730,6 +859,7 @@ final class AppModel {
                 try await library.setUserFollowed(id, followed: followed)
                 guard let self else { return }
                 self.userFollowOverrides[id] = followed
+                self.showToast(followed ? "已关注用户" : "已取消关注用户")
             } catch {
                 self?.libraryMessage = error.localizedDescription
             }
@@ -806,6 +936,18 @@ final class AppModel {
         detailCache[oldest] = nil
     }
 
+    private var cachedFavoritePlaylistID: Int64? {
+        if let id = librarySnapshot?.playlists.first(where: { $0.specialType == 5 })?.id {
+            return id
+        }
+        return detailCache.values.lazy.compactMap { entry -> Int64? in
+            guard case let .playlist(playlist, _, _, _) = entry.content,
+                  playlist.specialType == 5
+            else { return nil }
+            return playlist.id
+        }.first
+    }
+
     private func resetAccountScopedState(userID: Int64?) {
         downloads?.cancelCloudDownloads()
         homeGeneration &+= 1
@@ -843,6 +985,7 @@ final class AppModel {
         detailGenerations.removeAll()
         detailLoads.removeAll()
         detailCache.removeAll()
+        staleDetailRoutes.removeAll()
         path.removeAll()
 
         likedSongIDs = []
@@ -851,6 +994,9 @@ final class AppModel {
         artistFollowOverrides.removeAll()
         userFollowOverrides.removeAll()
         librarySnapshot = nil
+        playlistContentRevision = 0
+        cachedPlaylistRevision = -1
+        cachedPlaylistsLoadedAt = nil
         playlistPickerSong = nil
         currentUserID = userID
     }

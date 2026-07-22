@@ -13,6 +13,7 @@ final class PersonalFMController {
 
     @ObservationIgnored private let library: LiveMusicLibrary
     @ObservationIgnored let player: PlayerController
+    @ObservationIgnored private let onTrashSucceeded: () -> Void
     @ObservationIgnored private var requestedIDs: Set<Int64> = []
     @ObservationIgnored private var accountID: Int64?
     @ObservationIgnored private var generation = 0
@@ -21,9 +22,10 @@ final class PersonalFMController {
     @ObservationIgnored private var monitorTask: Task<Void, Never>?
     @ObservationIgnored private var pendingSkipSongID: Int64?
 
-    init(library: LiveMusicLibrary, player: PlayerController) {
+    init(library: LiveMusicLibrary, player: PlayerController, onTrashSucceeded: @escaping () -> Void) {
         self.library = library
         self.player = player
+        self.onTrashSucceeded = onTrashSucceeded
     }
 
     isolated deinit {
@@ -82,6 +84,7 @@ final class PersonalFMController {
                     self.tracks.removeAll { $0.id == track.id }
                     self.isTrashing = false
                 }
+                self.onTrashSucceeded()
                 self.trashTask = nil
                 self.loadMoreIfNeeded()
             } catch is CancellationError {

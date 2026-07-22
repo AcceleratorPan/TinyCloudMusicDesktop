@@ -10,11 +10,17 @@ private enum WebLoginPhase: Equatable {
 
 struct NeteaseWebLoginView: View {
     @Bindable var controller: SessionController
+    let onSuccess: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var phase: WebLoginPhase = .loading
     @State private var browserID = UUID()
     @State private var pendingCredentials: SessionCredentials?
+
+    init(controller: SessionController, onSuccess: @escaping () -> Void) {
+        self.controller = controller
+        self.onSuccess = onSuccess
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -100,6 +106,7 @@ struct NeteaseWebLoginView: View {
         Task { @MainActor in
             let saved = await controller.save(cookie: credentials.cookie)
             if saved {
+                onSuccess()
                 dismiss()
             } else if let pendingCredentials, pendingCredentials != credentials {
                 self.pendingCredentials = nil

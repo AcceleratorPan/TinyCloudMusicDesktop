@@ -44,6 +44,16 @@ struct LiveMusicLibrary: Sendable {
         return root.object("data").array("dailySongs").compactMap(songDecoder.decodeLiveSong)
     }
 
+    func userPlaylists(userID: Int64) async throws -> [Playlist] {
+        guard userID > 0 else { throw EAPIError.invalidPayload }
+        let root = try await call(
+            EAPIEndpoint("/eapi/user/playlist", signing: "/api/user/playlist"),
+            payload: ["uid": userID, "offset": 0, "limit": 1_000],
+            cache: .playlistSummaries
+        )
+        return root.array("playlist").compactMap(songDecoder.decodeLivePlaylist)
+    }
+
     func recommendationHistoryDates() async throws -> [RecommendationHistoryDate] {
         decodeRecommendationHistoryDates(
             try decodedJSONObject(try await transport.requestRecommendationHistory())

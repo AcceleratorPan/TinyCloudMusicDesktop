@@ -5,7 +5,7 @@ struct AddSongToPlaylistView: View {
     let userID: Int64
     let extras: LiveMusicExtras
     let library: LiveMusicLibrary
-    let onFinished: () -> Void
+    let onFinished: (Int64) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var phase: AvailablePlaylistPhase = .idle
@@ -18,7 +18,7 @@ struct AddSongToPlaylistView: View {
         userID: Int64,
         extras: LiveMusicExtras,
         library: LiveMusicLibrary,
-        onFinished: @escaping () -> Void
+        onFinished: @escaping (Int64) -> Void
     ) {
         self.song = song
         self.userID = userID
@@ -184,7 +184,7 @@ struct AddSongToPlaylistView: View {
             do {
                 try await library.addSongs([song.id], to: playlistID)
                 addingPlaylistID = nil
-                onFinished()
+                onFinished(playlistID)
                 dismiss()
             } catch is CancellationError {
                 addingPlaylistID = nil

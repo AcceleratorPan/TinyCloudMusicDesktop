@@ -176,7 +176,7 @@ struct RootView: View {
             player.setCrossfadeDuration(duration)
         }
         .overlay(alignment: .top) {
-            ArtworkSaveToast(message: model.artworkSaveMessage)
+            InteractionToast(message: model.interactionMessage)
                 .padding(.top, 12)
         }
         .sheet(item: $model.playlistPickerSong) { song in
@@ -188,7 +188,11 @@ struct RootView: View {
                     userID: userID,
                     extras: extras,
                     library: library,
-                    onFinished: { model.playlistPickerSong = nil }
+                    onFinished: { playlistID in
+                        model.playlistContentsDidChange(playlistID)
+                        model.playlistPickerSong = nil
+                        model.showToast("已加入歌单")
+                    }
                 )
             } else {
                 ContentUnavailableView(
@@ -246,7 +250,6 @@ private struct PrimaryContentView: View {
                     model: model,
                     library: library,
                     extras: extras,
-                    repository: model.repository,
                     player: player,
                     onOpenRoute: { model.open($0) }
                 )
@@ -261,15 +264,13 @@ private struct PrimaryContentView: View {
             }
         case .downloads:
             if let downloads = model.downloads {
-                DownloadsView(manager: downloads) { songID in
-                    player.queue.first(where: { $0.id == songID })?.song?.name ?? "歌曲 \(songID)"
-                }
+                DownloadsView(manager: downloads)
             } else {
                 ContentUnavailableView("下载不可用", systemImage: "arrow.down.circle")
             }
         case .session:
             if let session = model.session {
-                SessionView(controller: session)
+                SessionView(controller: session, showSuccess: model.showToast)
             } else {
                 ContentUnavailableView("会话设置不可用", systemImage: "person.crop.circle")
             }
@@ -1095,6 +1096,9 @@ private struct ArtistDetailContent: View {
                     extras: extras,
                     library: library,
                     onOpenRoute: { model.open($0) },
+                    onFollowChanged: {
+                        model.showToast($0 ? "已关注歌手" : "已取消关注歌手")
+                    },
                     songList: AnyView(Group {
                         if songs.isEmpty {
                             ContentUnavailableView("暂无歌曲", systemImage: "music.note")
@@ -1204,6 +1208,11 @@ private struct PlaylistDetailContent: View {
     @State private var isPublishing = false
     @State private var publishTask: Task<Void, Never>?
     @State private var managementError: String?
+    @State private var showingDownloadConfirmation = false
+    @State private var downloadQuality = AudioQuality.standard
+    @State private var isAddingDownloads = false
+    @State private var showingFavoriteConfirmation = false
+    @State private var isFavoritingAll = false
 
     var body: some View {
         LazyVStack(alignment: .leading, spacing: 24, pinnedViews: [.sectionHeaders]) {
@@ -1245,20 +1254,22 @@ private struct PlaylistDetailContent: View {
                     }
                 }
             } header: {
-                HStack {
-                    Picker("歌单内容", selection: $selectedSection) {
-                        ForEach(visibleSections, id: \.self) { section in
-                            Label(section.rawValue, systemImage: section.symbol)
-                                .tag(section)
+                if visibleSections.count > 1 {
+                    HStack {
+                        Picker("歌单内容", selection: $selectedSection) {
+                            ForEach(visibleSections, id: \.self) { section in
+                                Label(section.rawValue, systemImage: section.symbol)
+                                    .tag(section)
+                            }
                         }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(maxWidth: 360)
+                        Spacer()
                     }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(maxWidth: 360)
-                    Spacer()
+                    .padding(.vertical, 8)
+                    .background(Color(nsColor: .windowBackgroundColor))
                 }
-                .padding(.vertical, 8)
-                .background(Color(nsColor: .windowBackgroundColor))
             }
         }
         .task(id: "\(playlist.id):\(similarPlaylistsReloadID):\(model.library != nil)") {
@@ -1270,13 +1281,40 @@ private struct PlaylistDetailContent: View {
                     playlist: playlist,
                     library: library,
                     reloadPlaylist: { try await model.reloadPlaylist(playlist.id) },
-                    onSaved: { showingMetadataEditor = false },
+                    onSaved: {
+                        showingMetadataEditor = false
+                        model.showToast("歌单信息已保存")
+                    },
                     onCancelDuringSave: {
                         guard playlist.isUserEditable(by: model.currentUserID) else { return }
                         Task { _ = try? await model.reloadPlaylist(playlist.id) }
                     }
                 )
             }
+        }
+        .sheet(isPresented: $showingDownloadConfirmation) {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("全部下载")
+                    .font(.title2.weight(.semibold))
+                Text("将歌单中的 \(trackIDs.count.formatted()) 首歌曲加入下载队列；已下载相同音质的歌曲会自动跳过。")
+                    .foregroundStyle(.secondary)
+                Picker("下载音质", selection: $downloadQuality) {
+                    ForEach(AudioQuality.allCases, id: \.self) { quality in
+                        Text(quality.rawValue).tag(quality)
+                    }
+                }
+                .pickerStyle(.radioGroup)
+                HStack {
+                    Spacer()
+                    Button("取消", role: .cancel) { showingDownloadConfirmation = false }
+                    Button("确认下载", action: downloadAll)
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(24)
+            .frame(width: 420)
+            .onAppear { downloadQuality = model.settings.quality }
         }
         .sheet(isPresented: $showingSongOrder) {
             if let library = model.library {
@@ -1286,7 +1324,8 @@ private struct PlaylistDetailContent: View {
                     loadedSongs: songs,
                     repository: model.repository,
                     library: library,
-                    reload: { _ = try await model.reloadPlaylist(playlist.id) }
+                    reload: { _ = try await model.reloadPlaylist(playlist.id) },
+                    onSaved: { model.showToast("歌曲顺序已保存") }
                 )
             }
         }
@@ -1296,7 +1335,8 @@ private struct PlaylistDetailContent: View {
                     playlistID: playlist.id,
                     cover: coverDraft,
                     library: library,
-                    reload: { _ = try await model.reloadPlaylist(playlist.id) }
+                    reload: { _ = try await model.reloadPlaylist(playlist.id) },
+                    onSaved: { model.showToast("歌单封面已更新") }
                 )
             }
         }
@@ -1311,6 +1351,12 @@ private struct PlaylistDetailContent: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("公开后，本功能不能将它改回私密歌单。")
+        }
+        .confirmationDialog("收藏歌单中的全部歌曲？", isPresented: $showingFavoriteConfirmation) {
+            Button("全部收藏", action: favoriteAll)
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("将收藏尚未收藏的 \(unlikedSongCount) 首歌曲。")
         }
         .alert("歌单操作失败", isPresented: managementErrorPresented) {
             Button("好") { managementError = nil }
@@ -1390,6 +1436,33 @@ private struct PlaylistDetailContent: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
             }
+            if model.downloads != nil {
+                Button {
+                    showingDownloadConfirmation = true
+                } label: {
+                    if isAddingDownloads {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Label("全部下载", systemImage: "arrow.down.circle")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(trackIDs.isEmpty || isAddingDownloads)
+                .accessibilityLabel(isAddingDownloads ? "正在加入下载队列" : "全部下载")
+            }
+            if playlist.specialType != 5, model.library != nil, unlikedSongCount > 0 {
+                Button { showingFavoriteConfirmation = true } label: {
+                    if isFavoritingAll {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Label("全部收藏", systemImage: "heart")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(isFavoritingAll)
+                .help("收藏尚未收藏的 \(unlikedSongCount) 首歌曲")
+                .accessibilityLabel(isFavoritingAll ? "正在全部收藏" : "全部收藏")
+            }
             if playlist.creatorID != 0 {
                 Button { model.open(.user(playlist.creatorID)) } label: {
                     Image(systemName: "person.crop.circle")
@@ -1447,6 +1520,42 @@ private struct PlaylistDetailContent: View {
         )
     }
 
+    private var unlikedSongCount: Int {
+        trackIDs.filter { !model.likedSongIDs.contains($0) }.count
+    }
+
+    private func downloadAll() {
+        showingDownloadConfirmation = false
+        isAddingDownloads = true
+        Task { @MainActor in
+            do {
+                _ = try await model.downloadPlaylist(
+                    loadedSongs: songs,
+                    trackIDs: trackIDs,
+                    quality: downloadQuality
+                )
+            } catch is CancellationError {
+            } catch {
+                managementError = "加入下载队列失败：\(error.localizedDescription)"
+            }
+            isAddingDownloads = false
+        }
+    }
+
+    private func favoriteAll() {
+        isFavoritingAll = true
+        Task { @MainActor in
+            do {
+                let count = try await model.favoriteSongs(trackIDs)
+                model.showToast("已收藏 \(count) 首歌曲")
+            } catch is CancellationError {
+            } catch {
+                managementError = "部分歌曲收藏失败：\(error.localizedDescription)"
+            }
+            isFavoritingAll = false
+        }
+    }
+
     private func prepareCover(_ result: Result<[URL], Error>) {
         guard case let .success(urls) = result, let url = urls.first else {
             if case let .failure(error) = result { managementError = error.localizedDescription }
@@ -1483,6 +1592,7 @@ private struct PlaylistDetailContent: View {
         publishTask = Task { @MainActor in
             do {
                 try await library.makePlaylistPublic(playlist.id)
+                model.showToast("歌单已设为公开")
                 do {
                     _ = try await model.reloadPlaylist(playlist.id)
                 } catch {
@@ -1698,6 +1808,7 @@ private struct PlaylistCoverConfirmation: View {
     let cover: ProcessedPlaylistCover
     let library: LiveMusicLibrary
     let reload: () async throws -> Void
+    let onSaved: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var errorMessage: String?
@@ -1757,6 +1868,7 @@ private struct PlaylistCoverConfirmation: View {
                     uploadCompleted = true
                 }
                 try await reload()
+                onSaved()
                 dismiss()
             } catch is CancellationError {
             } catch {
@@ -1776,6 +1888,7 @@ private struct PlaylistSongOrderEditor: View {
     let repository: any MusicRepository
     let library: LiveMusicLibrary
     let reload: () async throws -> Void
+    let onSaved: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var draft: [Int64]
@@ -1794,13 +1907,15 @@ private struct PlaylistSongOrderEditor: View {
         loadedSongs: [Song],
         repository: any MusicRepository,
         library: LiveMusicLibrary,
-        reload: @escaping () async throws -> Void
+        reload: @escaping () async throws -> Void,
+        onSaved: @escaping () -> Void
     ) {
         self.playlistID = playlistID
         original = trackIDs
         self.repository = repository
         self.library = library
         self.reload = reload
+        self.onSaved = onSaved
         _draft = State(initialValue: trackIDs)
         _songsByID = State(initialValue: Dictionary(
             loadedSongs.map { ($0.id, $0) },
@@ -1909,6 +2024,7 @@ private struct PlaylistSongOrderEditor: View {
                     writeCompleted = true
                 }
                 try await reload()
+                onSaved()
                 dismiss()
             } catch is CancellationError {
             } catch {
@@ -2243,7 +2359,10 @@ struct SongList: View {
                                 songID: song.id,
                                 playlistID: playlistID,
                                 library: library,
-                                onRemoved: { model.loadDetail(.playlist(playlistID), reload: true) }
+                                onRemoved: {
+                                    model.playlistContentsDidChange(playlistID)
+                                    model.showToast("已从歌单移除")
+                                }
                             )
                         }
                     }
@@ -2301,7 +2420,7 @@ struct SettingsView: View {
     private var content: AnyView {
         AnyView(Form {
             if let session = model.session {
-                SessionSettingsSections(controller: session)
+                SessionSettingsSections(controller: session, showSuccess: model.showToast)
             }
 
             Section("外观") {
@@ -2316,9 +2435,27 @@ struct SettingsView: View {
                 Picker("默认播放音质", selection: playbackQualityBinding) {
                     ForEach(AudioQuality.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }
+            }
+
+            Section("下载") {
                 Picker("下载音质", selection: downloadQualityBinding) {
                     ForEach(AudioQuality.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }
+                LabeledContent("同时下载") {
+                    Picker("同时下载", selection: downloadConcurrencyBinding) {
+                        ForEach(1...5, id: \.self) { count in
+                            Text("\(count) 个任务").tag(count)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 132, alignment: .trailing)
+                    .accessibilityLabel("同时进行的下载任务数")
+                    .accessibilityValue("\(model.settings.downloadConcurrency) 个任务")
+                }
+                Text("建议保持 2–3 个任务；较高并发会占用更多带宽，并可能触发服务端限流。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("播放") {
@@ -2388,6 +2525,7 @@ struct SettingsView: View {
                             if session.clearMusicU() {
                                 musicU = ""
                                 musicUError = nil
+                                model.showToast("MUSIC_U 已清除")
                             } else {
                                 musicUError = "MUSIC_U 清除失败，请重试。"
                             }
@@ -2460,6 +2598,13 @@ struct SettingsView: View {
         Binding(get: { model.settings.quality }, set: { model.setQuality($0) })
     }
 
+    private var downloadConcurrencyBinding: Binding<Int> {
+        Binding(
+            get: { model.settings.downloadConcurrency },
+            set: { model.setDownloadConcurrency($0) }
+        )
+    }
+
     private var playbackQualityBinding: Binding<AudioQuality> {
         Binding(get: { model.settings.playbackQuality }, set: { model.setPlaybackQuality($0) })
     }
@@ -2508,6 +2653,7 @@ struct SettingsView: View {
             do {
                 if try await session.verifyAndSaveMusicU(musicU) {
                     musicU = ""
+                    model.showToast("MUSIC_U 已验证并保存")
                 } else {
                     musicUError = session.isVIPVerified
                         ? "新 MUSIC_U 验证失败，已保留原来有效的 MUSIC_U。"
@@ -2534,7 +2680,7 @@ struct SettingsView: View {
             if FileManager.default.fileExists(atPath: streamCache.path) {
                 try FileManager.default.removeItem(at: streamCache)
             }
-            model.settingsMessage = "缓存已清除"
+            model.showToast("缓存已清除")
         } catch {
             model.settingsMessage = "清除缓存失败：\(error.localizedDescription)"
         }
@@ -2598,7 +2744,7 @@ private struct PlayerBar: View {
             currentLyric
                 .frame(minWidth: 0, idealWidth: 220, maxWidth: 300)
 
-            HStack(spacing: 2) {
+            HStack(spacing: 0) {
                 if let song = player.currentSong {
                     PlayerIconButton(
                         symbol: model.likedSongIDs.contains(song.id) ? "heart.fill" : "heart",
@@ -2610,6 +2756,14 @@ private struct PlayerBar: View {
 
                     CommentButton(songID: song.id, library: model.library) {
                         model.open(.comments(song.id))
+                    }
+
+                    PlayerIconButton(
+                        symbol: "text.badge.plus",
+                        label: "添加到歌单",
+                        isDisabled: model.currentUserID == nil
+                    ) {
+                        model.showAddToPlaylist(for: song)
                     }
 
                     if let downloads = model.downloads {
@@ -2704,7 +2858,7 @@ struct DownloadControl: View {
 
     var body: some View {
         Button {
-            if case .running = manager.states[songID] {
+            if manager.isActive(songID: songID) {
                 manager.cancel(songID: songID)
             } else {
                 start()
@@ -2712,8 +2866,13 @@ struct DownloadControl: View {
         } label: {
             switch manager.states[songID] {
             case let .running(progress):
-                ProgressView(value: progress)
-                    .frame(width: 22)
+                if let progress {
+                    ProgressView(value: progress)
+                        .frame(width: 22)
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
+                }
             case .completed:
                 Image(systemName: "checkmark.circle.fill")
             case .failed:
@@ -2734,7 +2893,8 @@ struct DownloadControl: View {
 
     private var downloadHelp: String {
         switch manager.states[songID] {
-        case .running: "取消下载"
+        case .running:
+            (manager.retryAttempts[songID] ?? 0) > 0 ? "取消正在重试的下载" : "取消下载"
         case .completed: "已下载"
         case let .failed(message): "下载失败：\(message)"
         case .queued: "等待下载"
@@ -2868,7 +3028,7 @@ struct ArtworkView: View {
     }
 }
 
-struct ArtworkSaveToast: View {
+struct InteractionToast: View {
     let message: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 

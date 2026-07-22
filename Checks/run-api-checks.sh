@@ -14,6 +14,7 @@ COMMON_SOURCES=(
   Sources/TinyCloudMusic/CredentialStore.swift
   Sources/TinyCloudMusic/EAPITransport.swift
   Sources/TinyCloudMusic/MusicDownloadModels.swift
+  Sources/TinyCloudMusic/MusicDownloadInfrastructure.swift
   Sources/TinyCloudMusic/CloudMusicModels.swift
   Sources/TinyCloudMusic/MusicLibraryModels.swift
   Sources/TinyCloudMusic/MusicExtraModels.swift
@@ -74,5 +75,11 @@ swiftc -D CLOUD_MUSIC_CHECK -warnings-as-errors \
   Tests/TinyCloudMusicTests/CloudMusicTests.swift \
   -o /tmp/tinycloudmusic-cloud-music-check
 /tmp/tinycloudmusic-cloud-music-check
+swiftc -D MUSIC_DOWNLOAD_CHECK -warnings-as-errors \
+  "${COMMON_SOURCES[@]}" \
+  Sources/TinyCloudMusic/MusicDownload.swift \
+  Tests/TinyCloudMusicTests/MusicDownloadTests.swift \
+  -o /tmp/tinycloudmusic-download-check
+/tmp/tinycloudmusic-download-check
 swiftc -warnings-as-errors "${COMMON_SOURCES[@]}" Checks/LiveAPICheck.swift -o /tmp/tinycloudmusic-live-api-check
 /tmp/tinycloudmusic-live-api-check

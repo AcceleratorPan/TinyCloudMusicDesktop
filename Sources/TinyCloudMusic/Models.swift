@@ -809,6 +809,7 @@ enum AudioQuality: String, CaseIterable, Codable, Sendable {
 struct AppSettings: Equatable, Sendable {
     var appearance: Appearance
     var quality: AudioQuality
+    var downloadConcurrency: Int
     var playbackQuality: AudioQuality
     var crossfadeDuration: TimeInterval
     var homeSectionIDs: [String]

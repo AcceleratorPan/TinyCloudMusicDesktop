@@ -12,6 +12,62 @@ private actor CacheLoadCounter {
     func count() -> Int { value }
 }
 
+private actor MutablePlaylistRepository: MusicRepository {
+    nonisolated let homeDescriptors: [HomeSectionDescriptor] = []
+    private var detailValue: DetailContent
+    private var requestCount = 0
+    private var cancellationsRemaining = 0
+
+    init(detail: DetailContent) {
+        detailValue = detail
+    }
+
+    func replaceDetail(_ detail: DetailContent) { detailValue = detail }
+    func cancelNextDetailRequest() { cancellationsRemaining += 1 }
+    func detailRequestCount() -> Int { requestCount }
+
+    func detail(for route: Route) async throws -> DetailContent {
+        requestCount += 1
+        if cancellationsRemaining > 0 {
+            cancellationsRemaining -= 1
+            throw CancellationError()
+        }
+        return detailValue
+    }
+
+    func homeSection(id: String) async throws -> HomeSection { throw AppError.invalidRoute }
+    func search(query: String, scope: SearchScope, offset: Int, limit: Int) async throws -> SearchPage {
+        throw AppError.invalidRoute
+    }
+    func songs(ids: [Int64]) async throws -> [Song] { [] }
+    func lyrics(for songID: Int64) async throws -> SongLyrics { throw AppError.invalidRoute }
+    func playbackSource(for songID: Int64, quality: AudioQuality) async throws -> PlaybackSource {
+        throw AppError.invalidRoute
+    }
+    func playbackSource(for songID: Int64, level: String) async throws -> PlaybackSource {
+        throw AppError.invalidRoute
+    }
+    func songQualityDetails(for songID: Int64) async throws -> [SongQualityDetail] { [] }
+    func recordPlaybackStart(for songID: Int64) async throws {}
+    func recordPlayback(for songID: Int64, playedSeconds: Int) async throws {}
+}
+
+@MainActor
+private func waitForPlaylistTrackCount(
+    _ expected: Int,
+    route: Route,
+    model: AppModel
+) async throws {
+    for _ in 0..<100 {
+        if case let .loaded(.playlist(playlist, _, _, _))? = model.detailLoads[route],
+           playlist.trackCount == expected {
+            return
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    Issue.record("Timed out waiting for playlist track count \(expected)")
+}
+
 @Suite("Phase 0 core behavior")
 struct CoreTests {
     @Test("EAPI request and album cache-key golden vectors")
@@ -268,6 +324,111 @@ struct CoreTests {
         model.path.removeAll()
         model.updateSearchQuery("")
         #expect(model.searchState.query.isEmpty)
+    }
+
+    @Test("Playlist mutation keeps stale detail visible and revalidates it")
+    @MainActor
+    func playlistMutationRevalidation() async throws {
+        let route = Route.playlist(901)
+        var playlist = Playlist(
+            id: 901,
+            name: "Cached",
+            creator: "Owner",
+            description: "",
+            artwork: Artwork(symbol: "music.note.list", accent: .green),
+            trackCount: 1,
+            specialType: 5
+        )
+        let repository = MutablePlaylistRepository(
+            detail: .playlist(playlist, songs: [], trackIDs: [1], loadedTrackCount: 1)
+        )
+        let model = AppModel(
+            repository: repository,
+            defaults: UserDefaults(suiteName: UUID().uuidString)!
+        )
+
+        model.path = [route]
+        model.loadDetail(route)
+        try await waitForPlaylistTrackCount(1, route: route, model: model)
+        var requestCount = await repository.detailRequestCount()
+        #expect(requestCount == 1)
+
+        model.path = []
+        model.path = [route]
+        model.loadDetail(route)
+        requestCount = await repository.detailRequestCount()
+        #expect(requestCount == 1)
+
+        playlist.trackCount = 2
+        await repository.replaceDetail(
+            .playlist(playlist, songs: [], trackIDs: [1, 2], loadedTrackCount: 2)
+        )
+        await repository.cancelNextDetailRequest()
+        model.playlistContentsDidChange(playlist.id)
+        guard case let .loaded(.playlist(stale, _, _, _))? = model.detailLoads[route] else {
+            Issue.record("Cached playlist disappeared during revalidation")
+            return
+        }
+        #expect(stale.trackCount == 1)
+
+        try await waitForPlaylistTrackCount(2, route: route, model: model)
+        requestCount = await repository.detailRequestCount()
+        #expect(requestCount == 3)
+    }
+
+    @Test("Playlist summaries expire by TTL and reject stale refreshes")
+    @MainActor
+    func playlistSummaryFreshness() {
+        let model = AppModel(
+            repository: FixtureMusicRepository(),
+            defaults: UserDefaults(suiteName: UUID().uuidString)!
+        )
+        let loadedAt = Date(timeIntervalSince1970: 1_000)
+        let original = Playlist(
+            id: 902,
+            name: "Liked",
+            creator: "Owner",
+            description: "",
+            artwork: Artwork(symbol: "music.note.list", accent: .green),
+            trackCount: 1,
+            specialType: 5
+        )
+        let user = MusicLibraryUser(
+            id: 1,
+            nickname: "Owner",
+            signature: "",
+            detail: "",
+            avatarURL: nil,
+            gender: 0,
+            level: 0,
+            listenedSongCount: 0,
+            followerCount: 0,
+            followingCount: 0,
+            isFollowed: false,
+            followsCurrentUser: false
+        )
+        model.storeLibrarySnapshot(
+            LibrarySnapshot(
+                user: user,
+                songs: [],
+                playlists: [original],
+                following: [],
+                recommendedUsers: []
+            ),
+            playlistRevision: model.playlistContentRevision,
+            loadedAt: loadedAt
+        )
+        #expect(model.cachedPlaylistsAreFresh(at: loadedAt.addingTimeInterval(89)))
+        #expect(!model.cachedPlaylistsAreFresh(at: loadedAt.addingTimeInterval(90)))
+
+        let staleRevision = model.playlistContentRevision
+        model.playlistSummariesDidChange()
+        var updated = original
+        updated.trackCount = 2
+        #expect(!model.storeCachedPlaylists([updated], playlistRevision: staleRevision))
+        #expect(model.librarySnapshot?.playlists.first?.trackCount == 1)
+        #expect(model.storeCachedPlaylists([updated], playlistRevision: model.playlistContentRevision))
+        #expect(model.librarySnapshot?.playlists.first?.trackCount == 2)
     }
 
     @Test("Large playlists load 200 songs, then 100 at a time")

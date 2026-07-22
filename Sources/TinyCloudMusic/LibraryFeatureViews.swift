@@ -3,14 +3,16 @@ import SwiftUI
 
 struct SessionView: View {
     @Bindable private var controller: SessionController
+    let showSuccess: (String) -> Void
 
-    init(controller: SessionController) {
+    init(controller: SessionController, showSuccess: @escaping (String) -> Void) {
         self.controller = controller
+        self.showSuccess = showSuccess
     }
 
     var body: AnyView {
         AnyView(Form {
-            SessionSettingsSections(controller: controller)
+            SessionSettingsSections(controller: controller, showSuccess: showSuccess)
         }
         .formStyle(.grouped)
         .frame(maxWidth: 680)
@@ -20,6 +22,7 @@ struct SessionView: View {
 
 struct SessionSettingsSections: View {
     @Bindable private var controller: SessionController
+    let showSuccess: (String) -> Void
     @State private var showingQRLogin = false
     @State private var showingWebLogin = false
     @State private var showClearConfirmation = false
@@ -27,8 +30,9 @@ struct SessionSettingsSections: View {
     @State private var isLoggingOut = false
     @State private var sessionMessage: String?
 
-    init(controller: SessionController) {
+    init(controller: SessionController, showSuccess: @escaping (String) -> Void) {
         self.controller = controller
+        self.showSuccess = showSuccess
     }
 
     var body: AnyView {
@@ -97,7 +101,11 @@ struct SessionSettingsSections: View {
             Button("退出", role: .destructive) {
                 isLoggingOut = true
                 Task { @MainActor in
-                    sessionMessage = await controller.logout()
+                    if let warning = await controller.logout() {
+                        sessionMessage = warning
+                    } else {
+                        showSuccess("已退出登录")
+                    }
                     isLoggingOut = false
                 }
             }
@@ -106,10 +114,10 @@ struct SessionSettingsSections: View {
             Text("服务器退出完成后会清除本地登录 Cookie；单独保存的 MUSIC_U 不受影响。")
         }
         .sheet(isPresented: $showingQRLogin) {
-            NativeQRLoginView(session: controller)
+            NativeQRLoginView(session: controller) { showSuccess("登录成功") }
         }
         .sheet(isPresented: $showingWebLogin) {
-            NeteaseWebLoginView(controller: controller)
+            NeteaseWebLoginView(controller: controller) { showSuccess("登录成功") }
         }
         .alert("会话提示", isPresented: sessionMessagePresented) {
             Button("好") { sessionMessage = nil }
@@ -149,9 +157,11 @@ struct SessionSettingsSections: View {
         Task { @MainActor in
             defer { isRefreshing = false }
             do {
-                sessionMessage = try await controller.refresh()
-                    ? "登录已刷新。"
-                    : "返回的会话凭据未通过验证，原登录保持不变。"
+                if try await controller.refresh() {
+                    showSuccess("登录已刷新")
+                } else {
+                    sessionMessage = "返回的会话凭据未通过验证，原登录保持不变。"
+                }
             } catch {
                 sessionMessage = error.localizedDescription
             }
@@ -164,7 +174,6 @@ struct MusicLibraryView: View {
     @Bindable var model: AppModel
     let library: LiveMusicLibrary
     let extras: LiveMusicExtras
-    let repository: any MusicRepository
     @Bindable private var player: PlayerController
     let onOpenRoute: (Route) -> Void
 
@@ -191,19 +200,20 @@ struct MusicLibraryView: View {
         model: AppModel,
         library: LiveMusicLibrary,
         extras: LiveMusicExtras,
-        repository: any MusicRepository,
         player: PlayerController,
         onOpenRoute: @escaping (Route) -> Void
     ) {
         self.model = model
         self.library = library
         self.extras = extras
-        self.repository = repository
         self.player = player
         self.onOpenRoute = onOpenRoute
     }
 
     var body: AnyView { AnyView(content) }
+    private var playlistRefreshID: String {
+        "\(model.librarySnapshot?.user.id ?? 0):\(model.playlistContentRevision)"
+    }
 
     private var content: AnyView {
         AnyView(Group {
@@ -237,6 +247,7 @@ struct MusicLibraryView: View {
         }
         .navigationTitle("我的音乐")
         .task(id: model.currentUserID) { await load() }
+        .task(id: playlistRefreshID) { await refreshPlaylistsIfNeeded() }
         .task(id: player.playbackReportRevision) {
             guard player.playbackReportRevision > 0,
                   let userID = model.librarySnapshot?.user.id
@@ -258,7 +269,8 @@ struct MusicLibraryView: View {
                 PlaylistOrderEditor(
                     playlists: snapshot.playlists.filter { $0.isUserEditable(by: snapshot.user.id) },
                     library: library,
-                    reload: { await load(force: true) }
+                    reload: { await load(force: true) },
+                    onSaved: { model.showToast("歌单顺序已保存") }
                 )
             }
         }
@@ -705,12 +717,13 @@ struct MusicLibraryView: View {
 
     @MainActor
     private func load(force: Bool = false) async {
+        let playlistRevision = model.playlistContentRevision
         if !force, let snapshot = model.librarySnapshot {
             phase = .loaded
             await loadListening(userID: snapshot.user.id)
             return
         }
-        if force { await library.invalidateCachedResponses(in: [.library, .detail]) }
+        if force { await library.invalidateCachedResponses(in: [.library, .detail, .playlistSummaries]) }
         playlistError = nil
         visibleRecommendationCount = 20
         phase = .loading
@@ -722,26 +735,45 @@ struct MusicLibraryView: View {
                 return
             }
             async let songs = library.dailyRecommendations()
-            async let detail = repository.detail(for: .user(user.id))
+            async let playlists = library.userPlaylists(userID: user.id)
             async let following = library.myFollowing()
-            let (loadedSongs, loadedDetail, loadedFollowing) = try await (songs, detail, following)
+            let (loadedSongs, loadedPlaylists, loadedFollowing) = try await (songs, playlists, following)
             let loadedRecommendedUsers = (try? await extras.recommendedUsers()) ?? []
             try Task.checkCancellation()
-            guard case let .user(_, playlists) = loadedDetail else {
-                throw AppError.invalidRoute
-            }
-            model.librarySnapshot = LibrarySnapshot(
+            model.storeLibrarySnapshot(LibrarySnapshot(
                 user: user,
                 songs: loadedSongs,
-                playlists: playlists,
+                playlists: loadedPlaylists,
                 following: loadedFollowing,
                 recommendedUsers: loadedRecommendedUsers
-            )
+            ), playlistRevision: playlistRevision)
             phase = .loaded
             await loadListening(userID: user.id)
         } catch is CancellationError {
+            guard !Task.isCancelled else { return }
+            await load(force: force)
         } catch {
             phase = .failed(error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    private func refreshPlaylistsIfNeeded() async {
+        guard let snapshot = model.librarySnapshot, !model.cachedPlaylistsAreFresh() else { return }
+        let revision = model.playlistContentRevision
+        do {
+            try await Task.sleep(for: .milliseconds(200))
+            let playlists = try await library.userPlaylists(userID: snapshot.user.id)
+            try Task.checkCancellation()
+            guard model.librarySnapshot?.user.id == snapshot.user.id else { return }
+            if model.storeCachedPlaylists(playlists, playlistRevision: revision) {
+                playlistError = nil
+            }
+        } catch is CancellationError {
+            guard !Task.isCancelled else { return }
+            await refreshPlaylistsIfNeeded()
+        } catch {
+            playlistError = error.localizedDescription
         }
     }
 
@@ -806,6 +838,7 @@ struct MusicLibraryView: View {
                 playlistName = ""
                 privatePlaylist = false
                 isCreatingPlaylist = false
+                model.showToast("歌单已创建")
                 await load(force: true)
             } catch {
                 creationError = error.localizedDescription
@@ -822,6 +855,7 @@ struct MusicLibraryView: View {
                 try await library.deletePlaylist(playlist.id)
                 playlistToDelete = nil
                 deletingPlaylistID = nil
+                model.showToast("歌单已删除")
                 await load(force: true)
             } catch {
                 playlistError = error.localizedDescription
@@ -835,6 +869,7 @@ private struct PlaylistOrderEditor: View {
     let original: [Playlist]
     let library: LiveMusicLibrary
     let reload: () async -> Void
+    let onSaved: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var draft: [Playlist]
@@ -842,10 +877,16 @@ private struct PlaylistOrderEditor: View {
     @State private var isSaving = false
     @State private var saveTask: Task<Void, Never>?
 
-    init(playlists: [Playlist], library: LiveMusicLibrary, reload: @escaping () async -> Void) {
+    init(
+        playlists: [Playlist],
+        library: LiveMusicLibrary,
+        reload: @escaping () async -> Void,
+        onSaved: @escaping () -> Void
+    ) {
         original = playlists
         self.library = library
         self.reload = reload
+        self.onSaved = onSaved
         _draft = State(initialValue: playlists)
     }
 
@@ -908,6 +949,7 @@ private struct PlaylistOrderEditor: View {
             do {
                 try await library.updatePlaylistOrder(draft.map(\.id))
                 await reload()
+                onSaved()
                 dismiss()
             } catch is CancellationError {
             } catch {
@@ -1232,7 +1274,7 @@ struct CommentsView: View {
             successTask?.cancel()
         }
         .overlay(alignment: .top) {
-            ArtworkSaveToast(message: successMessage)
+            InteractionToast(message: successMessage)
                 .padding(.top, 12)
         }
         .alert("发表评论失败", isPresented: writeMessagePresented) {
@@ -1452,47 +1494,55 @@ struct CommentsView: View {
 
 struct DownloadsView: View {
     @Bindable private var manager: MusicDownloadManager
-    let songTitle: (Int64) -> String
 
-    init(manager: MusicDownloadManager, songTitle: @escaping (Int64) -> String = { "歌曲 \($0)" }) {
+    init(manager: MusicDownloadManager) {
         self.manager = manager
-        self.songTitle = songTitle
     }
 
     var body: AnyView { AnyView(content) }
 
     private var content: AnyView {
         AnyView(VStack(spacing: 0) {
-            HStack {
-                Text("下载")
-                    .font(.title2.weight(.semibold))
+            HStack(spacing: 12) {
+                Label(summaryText, systemImage: "arrow.down.circle")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
                 Spacer()
-                Button("取消全部") { manager.cancelAll() }
-                    .disabled(!hasActiveDownloads)
+                Button { manager.cancelAll() } label: {
+                    Label("取消全部", systemImage: "xmark.circle")
+                }
+                .disabled(!hasActiveDownloads)
+                .help(hasActiveDownloads ? "取消所有等待中和下载中的任务" : "没有可取消的任务")
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 16)
+            .padding(.horizontal, 28)
+            .padding(.vertical, 12)
             Divider()
 
             if manager.states.isEmpty {
                 ContentUnavailableView(
                     "暂无下载任务",
                     systemImage: "arrow.down.circle",
-                    description: Text("下载歌曲后，进度和文件位置会显示在这里。")
+                    description: Text("从歌曲菜单开始下载后，这里会显示歌曲、歌手和实时进度。")
                 )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(manager.states.keys.sorted(), id: \.self) { songID in
-                            if let state = manager.states[songID] {
-                                DownloadRow(songID: songID, title: songTitle(songID), state: state) {
-                                    manager.cancel(songID: songID)
-                                }
-                                Divider().padding(.leading, 62)
+                        ForEach(orderedSongIDs, id: \.self) { songID in
+                            if let state = manager.states[songID], let item = manager.items[songID] {
+                                DownloadRow(
+                                    item: item,
+                                    state: state,
+                                    retryAttempt: manager.retryAttempts[songID] ?? 0,
+                                    maximumRetryCount: manager.maximumRetryCount,
+                                    cancel: { manager.cancel(songID: songID) },
+                                    retry: { manager.retry(songID: songID) }
+                                )
+                                Divider().padding(.leading, 36)
                             }
                         }
                     }
-                    .padding(.horizontal, 20)
+                    .padding(.horizontal, 28)
                     .padding(.vertical, 8)
                 }
             }
@@ -1500,13 +1550,33 @@ struct DownloadsView: View {
         .navigationTitle("下载"))
     }
 
-    private var hasActiveDownloads: Bool {
-        manager.states.values.contains {
-            switch $0 {
-            case .queued, .running: true
-            case .completed, .failed, .cancelled: false
-            }
+    private var orderedSongIDs: [Int64] {
+        let knownIDs = Set(manager.itemOrder)
+        return manager.itemOrder.filter { manager.states[$0] != nil }
+            + manager.states.keys.filter { !knownIDs.contains($0) }.sorted(by: >)
+    }
+
+    private var summaryText: String {
+        let completed = manager.states.values.filter(\.isCompletedDownload).count
+        let running = manager.runningDownloadCount
+        let queued = manager.queuedDownloadCount
+        if running > 0 || queued > 0 {
+            var parts = ["\(running)/\(manager.maximumConcurrentDownloads) 首下载中"]
+            if queued > 0 { parts.append("\(queued) 首等待") }
+            if completed > 0 { parts.append("\(completed) 首已完成") }
+            return parts.joined(separator: " · ")
         }
+        return completed > 0 ? "\(completed) 首已完成" : "下载任务与文件状态"
+    }
+
+    private var hasActiveDownloads: Bool {
+        manager.runningDownloadCount > 0 || manager.queuedDownloadCount > 0
+    }
+}
+
+private extension MusicDownloadState {
+    var isCompletedDownload: Bool {
+        if case .completed = self { true } else { false }
     }
 }
 
@@ -1853,6 +1923,7 @@ private struct CommentThreadRow: View {
                 } else {
                     replies = replies.map { $0.id == target.id ? updated : $0 }
                 }
+                onWriteSucceeded(liked ? "评论已点赞" : "已取消评论点赞")
             } catch is CancellationError {
             } catch {
                 writeMessage = error.localizedDescription
@@ -1868,6 +1939,7 @@ private struct CommentThreadRow: View {
             defer { writeTasks[target.id] = nil }
             do {
                 try await library.deleteComment(songID: comment.songID, commentID: target.id)
+                onWriteSucceeded("评论已删除")
                 if target.id == comment.id {
                     onCommentDeleted(target.id)
                 } else {
@@ -2007,26 +2079,50 @@ private struct CommentReplySheet: View {
 }
 
 private struct DownloadRow: View {
-    let songID: Int64
-    let title: String
+    let item: MusicDownloadItem
     let state: MusicDownloadState
+    let retryAttempt: Int
+    let maximumRetryCount: Int
     let cancel: () -> Void
+    let retry: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: symbol)
-                .foregroundStyle(symbolColor)
-                .frame(width: 30)
+                .foregroundStyle(stateColor)
+                .frame(width: 24)
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 5) {
-                Text(title)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.title)
+                    .font(.body.weight(.medium))
+                    .lineLimit(1)
+                Text(item.artist.isEmpty ? "未知歌手" : item.artist)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text(downloadMetadataText)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
                 stateDetail
             }
-            Spacer()
+
+            Spacer(minLength: 12)
             stateAction
         }
-        .frame(minHeight: 58)
+        .padding(.vertical, 8)
+        .frame(minHeight: 64)
+        .accessibilityElement(children: .contain)
+    }
+
+    private var downloadMetadataText: String {
+        let size = item.expectedBytes.map {
+            ByteCountFormatter.string(fromByteCount: $0, countStyle: .file)
+        }
+        return [item.quality, size]
+            .compactMap { $0 }
+            .joined(separator: " · ")
     }
 
     private var symbol: String {
@@ -2039,39 +2135,47 @@ private struct DownloadRow: View {
         }
     }
 
-    private var symbolColor: Color {
+    private var stateColor: Color {
         switch state {
         case .failed: .red
         case .completed: .green
-        default: .secondary
+        case .running: .accentColor
+        case .queued, .cancelled: .secondary
         }
     }
 
-    private var stateText: String {
+    @ViewBuilder
+    private var stateDetail: some View {
         switch state {
-        case .queued: "等待下载"
-        case let .running(progress): "已下载 \(Int(progress * 100))%"
-        case let .completed(audioURL, _): "已完成，\(audioURL.lastPathComponent)"
-        case let .failed(message): "下载失败，\(message)"
-        case .cancelled: "已取消"
-        }
-    }
-
-    private var stateDetail: AnyView {
-        AnyView(Group {
-            switch state {
         case .queued, .cancelled:
-            Text(stateText)
+            Text(state == .queued ? "等待下载" : "已取消")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case let .running(progress):
-            HStack(spacing: 8) {
-                ProgressView(value: progress)
-                    .frame(maxWidth: 240)
-                Text("\(Int(progress * 100))%")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(width: 38, alignment: .trailing)
+            if retryAttempt > 0 {
+                Text("重试 \(retryAttempt)/\(maximumRetryCount) · 正在从断点继续")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            if let progress {
+                HStack(spacing: 8) {
+                    ProgressView(value: progress)
+                        .frame(maxWidth: 240)
+                    Text("\(Int(progress * 100))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 38, alignment: .trailing)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("下载进度 \(Int(progress * 100))%")
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("正在下载")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         case let .completed(audioURL, lyricURL):
             Text(lyricURL == nil ? audioURL.lastPathComponent : "\(audioURL.lastPathComponent) · 含歌词")
@@ -2079,36 +2183,45 @@ private struct DownloadRow: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         case let .failed(message):
-            Text(message)
+            Text("下载失败：\(message)")
                 .font(.caption)
                 .foregroundStyle(.red)
-                .lineLimit(2)
-            }
-        })
+                .lineLimit(1)
+        }
     }
 
-    private var stateAction: AnyView {
-        AnyView(Group {
-            switch state {
+    @ViewBuilder
+    private var stateAction: some View {
+        switch state {
         case .queued, .running:
             Button(action: cancel) {
                 Image(systemName: "xmark")
             }
+            .buttonStyle(.borderless)
             .help("取消下载")
-            .accessibilityLabel("取消 \(title) 的下载")
+            .accessibilityLabel("取消 \(item.title) 的下载")
             .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
         case let .completed(audioURL, _):
             Button {
                 NSWorkspace.shared.activateFileViewerSelecting([audioURL])
             } label: {
                 Image(systemName: "folder")
             }
+            .buttonStyle(.borderless)
             .help("在 Finder 中显示")
-            .accessibilityLabel("在 Finder 中显示 \(title)")
+            .accessibilityLabel("在 Finder 中显示 \(item.title)")
             .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
         case .failed, .cancelled:
-            EmptyView()
+            Button(action: retry) {
+                Image(systemName: "arrow.clockwise")
             }
-        })
+            .buttonStyle(.borderless)
+            .help("重新下载")
+            .accessibilityLabel("重新下载 \(item.title)")
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
+        }
     }
 }

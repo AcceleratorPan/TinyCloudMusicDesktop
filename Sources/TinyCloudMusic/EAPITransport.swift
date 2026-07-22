@@ -32,6 +32,7 @@ enum EAPIReadCache: Hashable, Sendable {
     case searchHints
     case detail
     case library
+    case playlistSummaries
     case comments
     case lyrics
 
@@ -41,6 +42,7 @@ enum EAPIReadCache: Hashable, Sendable {
         case .searchHints: .read(ttl: 5 * 60, staleIfError: 30 * 60)
         case .detail: .read(ttl: 5 * 60, staleIfError: 30 * 60)
         case .library: .read(ttl: 90, staleIfError: 15 * 60)
+        case .playlistSummaries: .read(ttl: 0, staleIfError: 15 * 60)
         case .comments: .read(ttl: 30, staleIfError: 2 * 60)
         case .lyrics: .read(ttl: 60 * 60, staleIfError: 24 * 60 * 60)
         }

@@ -194,9 +194,11 @@ struct NativeQRLoginView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var controller: QRLoginController
+    let onSuccess: () -> Void
 
-    init(session: SessionController) {
+    init(session: SessionController, onSuccess: @escaping () -> Void) {
         _controller = State(initialValue: QRLoginController(session: session))
+        self.onSuccess = onSuccess
     }
 
     var body: some View {
@@ -234,7 +236,10 @@ struct NativeQRLoginView: View {
         .onDisappear { controller.cancel() }
         .onChange(of: scenePhase) { _, phase in controller.setActive(phase == .active) }
         .onChange(of: controller.phase) { _, phase in
-            if phase == .succeeded { dismiss() }
+            if phase == .succeeded {
+                onSuccess()
+                dismiss()
+            }
         }
     }
 

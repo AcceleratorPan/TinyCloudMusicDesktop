@@ -186,6 +186,13 @@ private func verifyCloudDownloadWithoutLyricsAndCancellation() async throws {
         addedAt: nil
     )
     manager.enqueue(cloudSong: cloudSong, userID: 7, to: root)
+    guard manager.items[cloudSong.id] == MusicDownloadItem(
+        id: cloudSong.id,
+        title: cloudSong.name,
+        artist: cloudSong.artist,
+        quality: "原文件",
+        expectedBytes: cloudSong.fileSize
+    ) else { throw CloudMusicCheckError.failed("Cloud download metadata was not retained") }
     for _ in 0..<100 {
         if case .completed? = manager.states[cloudSong.id] { break }
         if case let .failed(message)? = manager.states[cloudSong.id] {
@@ -218,6 +225,88 @@ private func verifyCloudDownloadWithoutLyricsAndCancellation() async throws {
     else { throw CloudMusicCheckError.failed("Cancelled cloud download left a part file") }
 }
 
+@MainActor
+private func verifyDownloadConcurrencyLimit() async throws {
+    CloudMusicProtocol.reset(blockAudio: true)
+    let (transport, session) = cloudTransport()
+    let root = FileManager.default.temporaryDirectory
+        .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let manager = MusicDownloadManager(
+        transport: transport,
+        session: session,
+        maximumConcurrentDownloads: 2,
+        retryPolicy: MusicDownloadRetryPolicy(maximumAttempts: 1, baseDelay: 0, maximumDelay: 0),
+        resumeStore: MusicDownloadResumeStore(directory: root.appending(path: "resume")),
+        targetAllocator: MusicDownloadTargetAllocator()
+    )
+
+    for id in Int64(201)...205 {
+        manager.enqueue(
+            cloudSong: CloudSong(
+                id: id,
+                song: nil,
+                name: "Concurrent \(id)",
+                artist: "Artist",
+                album: "",
+                fileName: "\(id).flac",
+                fileSize: 4,
+                addedAt: nil
+            ),
+            userID: 7,
+            to: root,
+            includeLyrics: false
+        )
+    }
+    let duplicateAccepted = manager.enqueue(
+        cloudSong: CloudSong(
+            id: 201,
+            song: nil,
+            name: "Concurrent 201",
+            artist: "Artist",
+            album: "",
+            fileName: "201.flac",
+            fileSize: 4,
+            addedAt: nil
+        ),
+        userID: 7,
+        to: root,
+        includeLyrics: false
+    )
+    guard !duplicateAccepted else {
+        throw CloudMusicCheckError.failed("Duplicate enqueue replaced an active download")
+    }
+
+    for _ in 0..<100 where CloudMusicProtocol.requestCount(for: "/cloud-audio") < 2 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    guard manager.runningDownloadCount == 2,
+          manager.queuedDownloadCount == 3,
+          CloudMusicProtocol.requestCount(for: "/cloud-audio") == 2
+    else { throw CloudMusicCheckError.failed("Download concurrency exceeded the configured limit") }
+
+    manager.setMaximumConcurrentDownloads(4)
+    for _ in 0..<100 where CloudMusicProtocol.requestCount(for: "/cloud-audio") < 4 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    guard manager.runningDownloadCount == 4,
+          manager.queuedDownloadCount == 1,
+          CloudMusicProtocol.requestCount(for: "/cloud-audio") == 4
+    else { throw CloudMusicCheckError.failed("Increasing concurrency did not fill available slots") }
+
+    manager.setMaximumConcurrentDownloads(1)
+    guard manager.maximumConcurrentDownloads == 1, manager.runningDownloadCount == 4 else {
+        throw CloudMusicCheckError.failed("Lowering concurrency interrupted active downloads")
+    }
+    manager.cancelAll()
+    for _ in 0..<100 where manager.runningDownloadCount > 0 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    guard manager.runningDownloadCount == 0, manager.queuedDownloadCount == 0 else {
+        throw CloudMusicCheckError.failed("Cancelling downloads did not release scheduler slots")
+    }
+}
+
 #if CLOUD_MUSIC_CHECK
 @main
 private enum CloudMusicCheck {
@@ -226,6 +315,7 @@ private enum CloudMusicCheck {
         try verifyCloudModelsAndSecurity()
         try await verifyCloudDetailBatchingAndURLCache()
         try await verifyCloudDownloadWithoutLyricsAndCancellation()
+        try await verifyDownloadConcurrencyLimit()
         print("Cloud music checks passed")
     }
 }
@@ -246,6 +336,11 @@ struct CloudMusicTests {
     @Test("Empty lyrics still commit audio and cancellation removes part files")
     func downloadWithoutLyricsAndCancellation() async throws {
         try await verifyCloudDownloadWithoutLyricsAndCancellation()
+    }
+
+    @Test("Concurrent downloads obey the live 1-5 scheduler limit")
+    func concurrencyLimit() async throws {
+        try await verifyDownloadConcurrencyLimit()
     }
 }
 #endif
