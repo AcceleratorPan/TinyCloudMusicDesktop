@@ -1,0 +1,2114 @@
+import AppKit
+import SwiftUI
+
+struct SessionView: View {
+    @Bindable private var controller: SessionController
+
+    init(controller: SessionController) {
+        self.controller = controller
+    }
+
+    var body: AnyView {
+        AnyView(Form {
+            SessionSettingsSections(controller: controller)
+        }
+        .formStyle(.grouped)
+        .frame(maxWidth: 680)
+        .padding(24))
+    }
+}
+
+struct SessionSettingsSections: View {
+    @Bindable private var controller: SessionController
+    @State private var showingQRLogin = false
+    @State private var showingWebLogin = false
+    @State private var showClearConfirmation = false
+    @State private var isRefreshing = false
+    @State private var isLoggingOut = false
+    @State private var sessionMessage: String?
+
+    init(controller: SessionController) {
+        self.controller = controller
+    }
+
+    var body: AnyView {
+        AnyView(Group {
+            Section("会话状态") {
+                Label(stateTitle, systemImage: stateSymbol)
+                    .foregroundStyle(controller.state == .invalid || controller.state == .error ? .red : .primary)
+                    .accessibilityLabel("会话状态：\(stateTitle)")
+                if controller.state == .invalid {
+                    Text("会话无效，请重新扫码登录。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else if controller.state == .error {
+                    Text("无法验证会话，请检查网络后重试。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("账号登录") {
+                HStack(spacing: 12) {
+                    Button {
+                        showingQRLogin = true
+                    } label: {
+                        Label("二维码登录", systemImage: "qrcode")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .help("使用网易云音乐客户端扫码登录")
+
+                    Button {
+                        showingWebLogin = true
+                    } label: {
+                        Label("备用网页登录", systemImage: "safari")
+                    }
+                    .help("打开网易云音乐官方登录页并自动保存 Cookie")
+                }
+                .controlSize(.large)
+
+                HStack(spacing: 12) {
+                    Button(action: refreshSession) {
+                        Label("刷新登录", systemImage: "arrow.clockwise")
+                            .opacity(isRefreshing ? 0 : 1)
+                            .overlay {
+                                if isRefreshing { ProgressView().controlSize(.small) }
+                            }
+                    }
+                    .accessibilityLabel(isRefreshing ? "正在刷新登录" : "刷新登录")
+                    .disabled(controller.state != .authenticated || isRefreshing || isLoggingOut)
+
+                    Button(role: .destructive) {
+                        showClearConfirmation = true
+                    } label: {
+                        Label("退出登录", systemImage: "rectangle.portrait.and.arrow.right")
+                            .opacity(isLoggingOut ? 0 : 1)
+                            .overlay {
+                                if isLoggingOut { ProgressView().controlSize(.small) }
+                            }
+                    }
+                    .accessibilityLabel(isLoggingOut ? "正在退出登录" : "退出登录")
+                    .disabled(controller.state == .guest || isRefreshing || isLoggingOut)
+                }
+                .controlSize(.large)
+            }
+        }
+        .confirmationDialog("确定退出登录？", isPresented: $showClearConfirmation) {
+            Button("退出", role: .destructive) {
+                isLoggingOut = true
+                Task { @MainActor in
+                    sessionMessage = await controller.logout()
+                    isLoggingOut = false
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("服务器退出完成后会清除本地登录 Cookie；单独保存的 MUSIC_U 不受影响。")
+        }
+        .sheet(isPresented: $showingQRLogin) {
+            NativeQRLoginView(session: controller)
+        }
+        .sheet(isPresented: $showingWebLogin) {
+            NeteaseWebLoginView(controller: controller)
+        }
+        .alert("会话提示", isPresented: sessionMessagePresented) {
+            Button("好") { sessionMessage = nil }
+        } message: {
+            Text(sessionMessage ?? "")
+        })
+    }
+
+    private var stateTitle: String {
+        switch controller.state {
+        case .guest: "访客模式"
+        case .authenticated: "已验证"
+        case .invalid: "凭据无效"
+        case .error: "验证失败"
+        }
+    }
+
+    private var stateSymbol: String {
+        switch controller.state {
+        case .guest: "person.crop.circle.badge.questionmark"
+        case .authenticated: "checkmark.shield.fill"
+        case .invalid: "person.crop.circle.badge.exclamationmark"
+        case .error: "wifi.exclamationmark"
+        }
+    }
+
+    private var sessionMessagePresented: Binding<Bool> {
+        Binding(
+            get: { sessionMessage != nil },
+            set: { if !$0 { sessionMessage = nil } }
+        )
+    }
+
+    private func refreshSession() {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        Task { @MainActor in
+            defer { isRefreshing = false }
+            do {
+                sessionMessage = try await controller.refresh()
+                    ? "登录已刷新。"
+                    : "返回的会话凭据未通过验证，原登录保持不变。"
+            } catch {
+                sessionMessage = error.localizedDescription
+            }
+        }
+    }
+
+}
+
+struct MusicLibraryView: View {
+    @Bindable var model: AppModel
+    let library: LiveMusicLibrary
+    let extras: LiveMusicExtras
+    let repository: any MusicRepository
+    @Bindable private var player: PlayerController
+    let onOpenRoute: (Route) -> Void
+
+    @State private var phase: LibraryPhase = .idle
+    @State private var playlistName = ""
+    @State private var privatePlaylist = false
+    @State private var isCreatingPlaylist = false
+    @State private var creationError: String?
+    @State private var playlistToDelete: Playlist?
+    @State private var showDeleteConfirmation = false
+    @State private var deletingPlaylistID: Int64?
+    @State private var playlistError: String?
+    @State private var showingPlaylistOrder = false
+    @State private var visibleRecommendationCount = 20
+    @State private var selectedSection = MusicLibrarySection.recommendations
+    @State private var selectedListeningPeriod = MusicListeningPeriod.week
+    @State private var weeklyListeningRecords: [MusicListeningRecord] = []
+    @State private var allTimeListeningRecords: [MusicListeningRecord] = []
+    @State private var recentPlayedSong: Song?
+    @State private var totalListeningSeconds: Int64?
+    @State private var listeningPhase: LibraryPhase = .idle
+
+    init(
+        model: AppModel,
+        library: LiveMusicLibrary,
+        extras: LiveMusicExtras,
+        repository: any MusicRepository,
+        player: PlayerController,
+        onOpenRoute: @escaping (Route) -> Void
+    ) {
+        self.model = model
+        self.library = library
+        self.extras = extras
+        self.repository = repository
+        self.player = player
+        self.onOpenRoute = onOpenRoute
+    }
+
+    var body: AnyView { AnyView(content) }
+
+    private var content: AnyView {
+        AnyView(Group {
+            if let snapshot = model.librarySnapshot {
+                libraryContent(snapshot)
+            } else {
+                switch phase {
+                case .idle, .loading, .loaded:
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("正在加载音乐库…")
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                case .loggedOut:
+                    ContentUnavailableView(
+                        "需要登录",
+                        systemImage: "person.crop.circle.badge.exclamationmark",
+                        description: Text("扫码登录后再打开音乐库。")
+                    )
+                case let .failed(message):
+                    ContentUnavailableView {
+                        Label("音乐库加载失败", systemImage: "wifi.exclamationmark")
+                    } description: {
+                        Text(message)
+                    } actions: {
+                        Button("重试") { Task { await load(force: true) } }
+                    }
+                }
+            }
+        }
+        .navigationTitle("我的音乐")
+        .task(id: model.currentUserID) { await load() }
+        .task(id: player.playbackReportRevision) {
+            guard player.playbackReportRevision > 0,
+                  let userID = model.librarySnapshot?.user.id
+            else { return }
+            await loadListening(userID: userID, refreshUser: true)
+        }
+        .alert(
+            "删除歌单？",
+            isPresented: $showDeleteConfirmation,
+            presenting: playlistToDelete
+        ) { playlist in
+            Button("删除", role: .destructive) { deletePlaylist(playlist) }
+            Button("取消", role: .cancel) {}
+        } message: { playlist in
+            Text("“\(playlist.name)”将从账号中删除，此操作不可撤销。")
+        }
+        .sheet(isPresented: $showingPlaylistOrder) {
+            if let snapshot = model.librarySnapshot {
+                PlaylistOrderEditor(
+                    playlists: snapshot.playlists.filter { $0.isUserEditable(by: snapshot.user.id) },
+                    library: library,
+                    reload: { await load(force: true) }
+                )
+            }
+        }
+        .onChange(of: model.currentUserID) { _, _ in
+            showingPlaylistOrder = false
+        })
+    }
+
+    private func libraryContent(_ snapshot: LibrarySnapshot) -> AnyView {
+        AnyView(ScrollView {
+            LazyVStack(alignment: .leading, spacing: 24) {
+                HStack(spacing: 14) {
+                    LibraryRemoteImage(url: snapshot.user.avatarURL, symbol: "person.crop.circle.fill", size: 64)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(snapshot.user.nickname)
+                            .font(.title2.weight(.semibold))
+                        if !snapshot.user.signature.isEmpty {
+                            Text(snapshot.user.signature)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Text(profileSummary(snapshot))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Button {
+                        onOpenRoute(.cloudMusic)
+                    } label: {
+                        Label("音乐云盘", systemImage: "externaldrive")
+                    }
+                    .frame(minHeight: 44)
+                    Button("查看主页") { onOpenRoute(.user(snapshot.user.id)) }
+                    Button {
+                        Task { await load(force: true) }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .help("刷新音乐库")
+                    .accessibilityLabel("刷新音乐库")
+                    .frame(minWidth: 44, minHeight: 44)
+                }
+
+                Divider()
+                Picker("音乐库内容", selection: $selectedSection) {
+                    ForEach(MusicLibrarySection.allCases, id: \.self) { section in
+                        Label(section.rawValue, systemImage: section.symbol)
+                            .tag(section)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 680)
+
+                switch selectedSection {
+                case .recommendations:
+                    recommendations(snapshot)
+                case .listening:
+                    listening
+                case .playlists:
+                    playlists(snapshot)
+                    Divider()
+                    createPlaylistForm
+                case .following:
+                    following(snapshot)
+                case .recommendedUsers:
+                    recommendedUsers(snapshot)
+                }
+            }
+            .padding(.horizontal, 28)
+            .padding(.vertical, 24)
+        })
+    }
+
+    private func profileSummary(_ snapshot: LibrarySnapshot) -> String {
+        var values = [
+            "Level \(snapshot.user.level)",
+            "听过 \(snapshot.user.listenedSongCount.formatted()) 首"
+        ]
+        if case .loaded = listeningPhase, !weeklyListeningRecords.isEmpty {
+            values.append("本周 \(weeklyListeningRecords.reduce(0) { $0 + $1.playCount }.formatted()) 次")
+        }
+        if let totalListeningSeconds {
+            values.append("累计 \(listeningDurationText(totalListeningSeconds))")
+        }
+        return values.joined(separator: " · ")
+    }
+
+    private func recommendations(_ snapshot: LibrarySnapshot) -> AnyView {
+        AnyView(LazyVStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                Text("今日推荐")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Button { onOpenRoute(.recommendationHistory) } label: {
+                    Label("历史日推", systemImage: "calendar")
+                }
+            }
+            if snapshot.songs.isEmpty {
+                EmptyLibrarySection(title: "今天暂无推荐", symbol: "music.note")
+            } else {
+                ForEach(snapshot.songs.prefix(visibleRecommendationCount)) { song in
+                    HStack(spacing: 12) {
+                        LibraryRemoteImage(url: song.album.artwork.remoteURL, symbol: "music.note", size: 42)
+                        VStack(alignment: .leading, spacing: 2) {
+                            SongTitleText(song: song)
+                                .lineLimit(1)
+                            Text("\(song.artistsDisplay) · \(song.album.name)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        Text(song.durationText)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                        Button {
+                            player.play(song, in: snapshot.songs)
+                        } label: {
+                            Image(systemName: "play.fill")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("播放 \(song.name)")
+                        .accessibilityLabel("播放 \(song.name)")
+                        .frame(width: 44, height: 44)
+                    }
+                    .frame(minHeight: 48)
+                }
+                if visibleRecommendationCount < snapshot.songs.count {
+                    LoadMoreTrigger(title: "正在显示更多…") {
+                        visibleRecommendationCount = min(visibleRecommendationCount + 20, snapshot.songs.count)
+                    }
+                    .id(visibleRecommendationCount)
+                }
+            }
+        })
+    }
+
+    private var listening: AnyView {
+        let records = selectedListeningPeriod == .week ? weeklyListeningRecords : allTimeListeningRecords
+        let songs = records.map(\.song)
+        let playCount = records.reduce(0) { $0 + $1.playCount }
+
+        return AnyView(VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                Picker("统计周期", selection: $selectedListeningPeriod) {
+                    ForEach(MusicListeningPeriod.allCases, id: \.self) { period in
+                        Text(period.title).tag(period)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 180)
+
+                if case .loaded = listeningPhase {
+                    Text("榜单收录 \(records.count) 首 · \(playCount.formatted()) 次播放")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Spacer()
+            }
+
+            if let recentPlayedSong {
+                HStack(spacing: 12) {
+                    Label("最近播放", systemImage: "clock.arrow.circlepath")
+                        .font(.callout.weight(.medium))
+                        .frame(width: 88, alignment: .leading)
+                    LibraryRemoteImage(
+                        url: recentPlayedSong.album.artwork.remoteURL,
+                        symbol: "music.note",
+                        size: 38
+                    )
+                    VStack(alignment: .leading, spacing: 2) {
+                        SongTitleText(song: recentPlayedSong).lineLimit(1)
+                        Text(recentPlayedSong.artistsDisplay)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Button {
+                        player.play(recentPlayedSong, in: [recentPlayedSong])
+                    } label: {
+                        Image(systemName: "play.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("播放 \(recentPlayedSong.name)")
+                    .accessibilityLabel("播放 \(recentPlayedSong.name)")
+                    .frame(width: 44, height: 44)
+                }
+                .frame(minHeight: 48)
+                Divider()
+            }
+
+            switch listeningPhase {
+            case .idle, .loading:
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text("正在加载听歌排行…").foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 96)
+            case let .failed(message):
+                VStack(spacing: 10) {
+                    Label("听歌排行加载失败", systemImage: "wifi.exclamationmark")
+                    Text(message).font(.caption).foregroundStyle(.secondary)
+                    Button("重试") {
+                        guard let userID = model.librarySnapshot?.user.id else { return }
+                        Task { await loadListening(userID: userID) }
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 120)
+            case .loggedOut:
+                EmptyLibrarySection(title: "登录后查看听歌排行", symbol: "chart.bar")
+            case .loaded:
+                if records.isEmpty {
+                    EmptyLibrarySection(title: "暂无听歌排行", symbol: "chart.bar")
+                } else {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(records.enumerated()), id: \.element.id) { index, record in
+                            HStack(spacing: 12) {
+                                Text("\(index + 1)")
+                                    .font(.callout.monospacedDigit())
+                                    .foregroundStyle(index < 3 ? .primary : .secondary)
+                                    .frame(width: 28, alignment: .trailing)
+                                LibraryRemoteImage(
+                                    url: record.song.album.artwork.remoteURL,
+                                    symbol: "music.note",
+                                    size: 42
+                                )
+                                VStack(alignment: .leading, spacing: 2) {
+                                    SongTitleText(song: record.song).lineLimit(1)
+                                    Text("\(record.song.artistsDisplay) · \(record.song.album.name)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                                Text("\(record.playCount.formatted()) 次")
+                                    .font(.callout.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                    .frame(minWidth: 64, alignment: .trailing)
+                                Button {
+                                    player.play(record.song, in: songs)
+                                } label: {
+                                    Image(systemName: "play.fill")
+                                }
+                                .buttonStyle(.borderless)
+                                .help("播放 \(record.song.name)")
+                                .accessibilityLabel("播放 \(record.song.name)")
+                                .frame(width: 44, height: 44)
+                            }
+                            .frame(minHeight: 48)
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    private func playlists(_ snapshot: LibrarySnapshot) -> AnyView {
+        AnyView(VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("我的歌单")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Button {
+                    showingPlaylistOrder = true
+                } label: {
+                    Label("排序", systemImage: "arrow.up.arrow.down")
+                }
+                .disabled(snapshot.playlists.filter { $0.isUserEditable(by: snapshot.user.id) }.count < 2)
+            }
+            if let playlistError {
+                Label(playlistError, systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+            }
+            if snapshot.playlists.isEmpty {
+                EmptyLibrarySection(title: "还没有歌单", symbol: "music.note.list")
+            } else {
+                ForEach(snapshot.playlists) { playlist in
+                    Button {
+                        onOpenRoute(.playlist(playlist.id))
+                    } label: {
+                        HStack(spacing: 12) {
+                            LibraryRemoteImage(url: playlist.artwork.remoteURL, symbol: "music.note.list", size: 42)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(playlist.name)
+                                    .foregroundStyle(.primary)
+                                Text(playlist.creator)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text("\(playlist.trackCount) 首歌曲")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            Spacer()
+                            if deletingPlaylistID == playlist.id {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .accessibilityLabel("正在删除 \(playlist.name)")
+                            } else {
+                                Image(systemName: "chevron.right")
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                        .frame(minHeight: 48)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("打开歌单详情")
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            playlistToDelete = playlist
+                            showDeleteConfirmation = true
+                        } label: {
+                            Label("删除歌单", systemImage: "trash")
+                        }
+                        .disabled(deletingPlaylistID != nil)
+                    }
+                }
+            }
+        })
+    }
+
+    private func following(_ snapshot: LibrarySnapshot) -> AnyView {
+        AnyView(VStack(alignment: .leading, spacing: 10) {
+            if snapshot.following.isEmpty {
+                EmptyLibrarySection(title: "暂无关注", symbol: "person.2")
+            } else {
+                ForEach(snapshot.following) { item in
+                    let kindTitle = item.kind == .user ? "用户" : "歌手"
+                    Button {
+                        switch item.kind {
+                        case .user: onOpenRoute(.user(item.resourceID))
+                        case .artist: onOpenRoute(.artist(item.resourceID))
+                        }
+                    } label: {
+                        HStack(spacing: 12) {
+                            LibraryRemoteImage(
+                                url: item.imageURL,
+                                symbol: item.kind == .user ? "person.crop.circle" : "music.mic",
+                                size: 42
+                            )
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 8) {
+                                    Text(item.name)
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+                                    Text(kindTitle)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(.quaternary, in: Capsule())
+                                        .fixedSize()
+                                }
+                                if !item.followDay.isEmpty {
+                                    Text(item.followDay)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .foregroundStyle(.tertiary)
+                        }
+                        .frame(minHeight: 48)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("打开\(kindTitle)详情")
+                }
+            }
+        })
+    }
+
+    private func recommendedUsers(_ snapshot: LibrarySnapshot) -> AnyView {
+        AnyView(VStack(alignment: .leading, spacing: 10) {
+            if snapshot.recommendedUsers.isEmpty {
+                EmptyLibrarySection(title: "暂无推荐用户", symbol: "person.badge.plus")
+            } else {
+                ForEach(snapshot.recommendedUsers) { user in
+                    Button { onOpenRoute(.user(user.id)) } label: {
+                        HStack(spacing: 12) {
+                            LibraryRemoteImage(url: user.avatarURL, symbol: "person.crop.circle", size: 42)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(user.nickname).foregroundStyle(.primary)
+                                Text(user.signature.isEmpty ? user.description : user.signature)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+                        }
+                        .frame(minHeight: 48)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("打开用户详情")
+                }
+            }
+        })
+    }
+
+    private var createPlaylistForm: AnyView {
+        AnyView(VStack(alignment: .leading, spacing: 12) {
+            Text("新建歌单")
+                .font(.title3.weight(.semibold))
+            LabeledContent("名称") {
+                TextField("输入歌单名称", text: $playlistName)
+                    .textFieldStyle(.roundedBorder)
+            }
+            Toggle("设为私密歌单", isOn: $privatePlaylist)
+            HStack {
+                Button {
+                    createPlaylist()
+                } label: {
+                    HStack(spacing: 6) {
+                        if isCreatingPlaylist {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("创建中")
+                        } else {
+                            Label("创建歌单", systemImage: "plus")
+                        }
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isCreatingPlaylist || playlistName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if let creationError {
+                    Label(creationError, systemImage: "exclamationmark.triangle")
+                        .font(.callout)
+                        .foregroundStyle(.red)
+                }
+            }
+        }
+        .frame(maxWidth: 560, alignment: .leading))
+    }
+
+    @MainActor
+    private func load(force: Bool = false) async {
+        if !force, let snapshot = model.librarySnapshot {
+            phase = .loaded
+            await loadListening(userID: snapshot.user.id)
+            return
+        }
+        if force { await library.invalidateCachedResponses(in: [.library, .detail]) }
+        playlistError = nil
+        visibleRecommendationCount = 20
+        phase = .loading
+        do {
+            let login = try await library.loginState()
+            guard case let .loggedIn(user) = login else {
+                model.librarySnapshot = nil
+                phase = .loggedOut
+                return
+            }
+            async let songs = library.dailyRecommendations()
+            async let detail = repository.detail(for: .user(user.id))
+            async let following = library.myFollowing()
+            let (loadedSongs, loadedDetail, loadedFollowing) = try await (songs, detail, following)
+            let loadedRecommendedUsers = (try? await extras.recommendedUsers()) ?? []
+            try Task.checkCancellation()
+            guard case let .user(_, playlists) = loadedDetail else {
+                throw AppError.invalidRoute
+            }
+            model.librarySnapshot = LibrarySnapshot(
+                user: user,
+                songs: loadedSongs,
+                playlists: playlists,
+                following: loadedFollowing,
+                recommendedUsers: loadedRecommendedUsers
+            )
+            phase = .loaded
+            await loadListening(userID: user.id)
+        } catch is CancellationError {
+        } catch {
+            phase = .failed(error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    private func loadListening(userID: Int64, refreshUser: Bool = false) async {
+        listeningPhase = .loading
+        totalListeningSeconds = nil
+        do {
+            async let weekly = library.listeningRecords(userID: userID, period: .week)
+            async let allTime = library.listeningRecords(userID: userID, period: .allTime)
+            async let recent = library.recentlyPlayedSongs(limit: 1)
+            async let totalDuration = try? library.totalListeningDuration()
+            let (loadedWeekly, loadedAllTime, loadedRecent, loadedTotalDuration) = try await (
+                weekly,
+                allTime,
+                recent,
+                totalDuration
+            )
+            try Task.checkCancellation()
+            weeklyListeningRecords = loadedWeekly
+            allTimeListeningRecords = loadedAllTime
+            recentPlayedSong = loadedRecent.first
+            totalListeningSeconds = loadedTotalDuration
+            listeningPhase = .loaded
+
+            if refreshUser,
+               let user = try? await library.userInfo(userID: userID),
+               let snapshot = model.librarySnapshot {
+                model.librarySnapshot = LibrarySnapshot(
+                    user: user,
+                    songs: snapshot.songs,
+                    playlists: snapshot.playlists,
+                    following: snapshot.following,
+                    recommendedUsers: snapshot.recommendedUsers
+                )
+            }
+        } catch is CancellationError {
+        } catch {
+            listeningPhase = .failed(error.localizedDescription)
+        }
+    }
+
+    private func listeningDurationText(_ seconds: Int64) -> String {
+        let totalMinutes = max(0, seconds) / 60
+        let hours = totalMinutes / 60
+        let minutes = totalMinutes % 60
+        if hours == 0 { return minutes == 0 ? "不足 1 分钟" : "\(minutes) 分钟" }
+        if minutes == 0 { return "\(hours) 小时" }
+        return "\(hours) 小时 \(minutes) 分钟"
+    }
+
+    private func createPlaylist() {
+        let name = playlistName
+        creationError = nil
+        isCreatingPlaylist = true
+        Task { @MainActor in
+            do {
+                _ = try await library.createPlaylist(
+                    name: name,
+                    privacy: privatePlaylist ? .privatePlaylist : .publicPlaylist
+                )
+                playlistName = ""
+                privatePlaylist = false
+                isCreatingPlaylist = false
+                await load(force: true)
+            } catch {
+                creationError = error.localizedDescription
+                isCreatingPlaylist = false
+            }
+        }
+    }
+
+    private func deletePlaylist(_ playlist: Playlist) {
+        playlistError = nil
+        deletingPlaylistID = playlist.id
+        Task { @MainActor in
+            do {
+                try await library.deletePlaylist(playlist.id)
+                playlistToDelete = nil
+                deletingPlaylistID = nil
+                await load(force: true)
+            } catch {
+                playlistError = error.localizedDescription
+                deletingPlaylistID = nil
+            }
+        }
+    }
+}
+
+private struct PlaylistOrderEditor: View {
+    let original: [Playlist]
+    let library: LiveMusicLibrary
+    let reload: () async -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var draft: [Playlist]
+    @State private var errorMessage: String?
+    @State private var isSaving = false
+    @State private var saveTask: Task<Void, Never>?
+
+    init(playlists: [Playlist], library: LiveMusicLibrary, reload: @escaping () async -> Void) {
+        original = playlists
+        self.library = library
+        self.reload = reload
+        _draft = State(initialValue: playlists)
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(draft) { playlist in
+                    HStack(spacing: 12) {
+                        LibraryRemoteImage(
+                            url: playlist.artwork.remoteURL,
+                            symbol: "music.note.list",
+                            size: 38
+                        )
+                        Text(playlist.name).lineLimit(1)
+                    }
+                    .frame(minHeight: 44)
+                }
+                .onMove { source, destination in
+                    guard !isSaving else { return }
+                    draft.move(fromOffsets: source, toOffset: destination)
+                }
+            }
+            .navigationTitle("歌单排序")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                        .disabled(isSaving)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(action: save) {
+                        if isSaving {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text("保存")
+                        }
+                    }
+                    .disabled(isSaving || draft.map(\.id) == original.map(\.id))
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if let errorMessage {
+                    Label(errorMessage, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding()
+                        .background(.bar)
+                }
+            }
+        }
+        .frame(minWidth: 480, minHeight: 520)
+        .interactiveDismissDisabled(isSaving)
+        .onDisappear { saveTask?.cancel() }
+    }
+
+    private func save() {
+        guard !isSaving, draft.map(\.id) != original.map(\.id) else { return }
+        errorMessage = nil
+        isSaving = true
+        saveTask = Task { @MainActor in
+            do {
+                try await library.updatePlaylistOrder(draft.map(\.id))
+                await reload()
+                dismiss()
+            } catch is CancellationError {
+            } catch {
+                errorMessage = error.localizedDescription
+                isSaving = false
+                saveTask = nil
+            }
+        }
+    }
+}
+
+struct ListeningHistoryView: View {
+    @Bindable var model: AppModel
+    let library: LiveMusicLibrary
+    @Bindable var player: PlayerController
+
+    @State private var selectedKind = RecentPlaybackKind.song
+    @State private var history = RecentPlaybackState()
+    @State private var tasks: [RecentPlaybackKind: Task<Void, Never>] = [:]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if model.currentUserID == nil {
+                ContentUnavailableView(
+                    "需要登录",
+                    systemImage: "person.crop.circle.badge.exclamationmark",
+                    description: Text("扫码登录后查看最近播放。")
+                )
+            } else {
+                kindPicker
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 12)
+                Divider()
+                ZStack {
+                    ForEach(RecentPlaybackKind.allCases, id: \.self) { kind in
+                        playbackContent(kind)
+                            .opacity(kind == selectedKind ? 1 : 0)
+                            .allowsHitTesting(kind == selectedKind)
+                            .accessibilityHidden(kind != selectedKind)
+                    }
+                }
+            }
+        }
+        .navigationTitle("最近播放")
+        .toolbar {
+            ToolbarItem {
+                Button { startLoad(selectedKind, force: true) } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("刷新播放历史")
+                .accessibilityLabel("刷新播放历史")
+                .disabled(model.currentUserID == nil || history.load(for: selectedKind).isLoading)
+            }
+        }
+        .task(id: model.currentUserID) { reset(accountID: model.currentUserID) }
+        .onChange(of: selectedKind) { _, kind in startLoad(kind) }
+    }
+
+    @MainActor
+    private var kindPicker: some View {
+        ViewThatFits(in: .horizontal) {
+            Picker("播放类型", selection: $selectedKind) {
+                ForEach(RecentPlaybackKind.allCases, id: \.self) { kind in
+                    Text(kind.title).tag(kind)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(minWidth: 560, maxWidth: 680)
+
+            Picker("播放类型", selection: $selectedKind) {
+                ForEach(RecentPlaybackKind.allCases, id: \.self) { kind in
+                    Label(kind.title, systemImage: kind.symbol).tag(kind)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func playbackContent(_ kind: RecentPlaybackKind) -> AnyView {
+        switch history.load(for: kind) {
+        case .idle, .loading:
+            AnyView(VStack(spacing: 12) {
+                ProgressView()
+                Text("正在加载\(kind.title)记录…")
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity))
+        case let .failed(message):
+            AnyView(ContentUnavailableView {
+                Label("\(kind.title)记录加载失败", systemImage: "wifi.exclamationmark")
+            } description: {
+                Text(message)
+            } actions: {
+                Button("重试") { startLoad(kind) }
+            })
+        case let .loaded(content):
+            loadedContent(content, kind: kind)
+        }
+    }
+
+    private func loadedContent(_ content: RecentPlaybackContent, kind: RecentPlaybackKind) -> AnyView {
+        switch content {
+        case let .songs(songs) where !songs.isEmpty:
+            AnyView(ScrollView {
+                SongList(songs: songs, model: model, player: player, showsHeading: false)
+                    .padding(.horizontal, 28)
+                    .padding(.vertical, 20)
+            })
+        case let .albums(albums) where !albums.isEmpty:
+            AnyView(destinationList(albums.map(SearchItem.album)))
+        case let .playlists(playlists) where !playlists.isEmpty:
+            AnyView(destinationList(playlists.map(SearchItem.playlist)))
+        case let .media(items) where !items.isEmpty:
+            AnyView(ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(items) { item in
+                        RecentMediaRow(item: item, symbol: kind.symbol)
+                        Divider().padding(.leading, 64)
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 8)
+            })
+        default:
+            AnyView(ContentUnavailableView(
+                "暂无\(kind.title)记录",
+                systemImage: kind.symbol,
+                description: Text("账号最近播放的\(kind.title)会显示在这里。")
+            ))
+        }
+    }
+
+    private func destinationList(_ items: [SearchItem]) -> some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(items) { item in
+                    SearchResultRow(item: item, onOpenRoute: model.open) {
+                        if let route = item.route { model.open(route) }
+                    }
+                    Divider().padding(.leading, 76)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+        }
+    }
+
+    @MainActor
+    private func reset(accountID: Int64?) {
+        tasks.values.forEach { $0.cancel() }
+        tasks.removeAll()
+        history.reset(accountID: accountID)
+        selectedKind = .song
+        if accountID != nil { startLoad(.song) }
+    }
+
+    @MainActor
+    private func startLoad(_ kind: RecentPlaybackKind, force: Bool = false) {
+        guard let accountID = model.currentUserID, tasks[kind] == nil else { return }
+        if !force {
+            switch history.load(for: kind) {
+            case .loading, .loaded: return
+            case .idle, .failed: break
+            }
+        }
+
+        let generation = history.generation
+        history.setLoading(kind)
+        tasks[kind] = Task { @MainActor in
+            do {
+                if force { await library.invalidateCachedResponses(in: [.library]) }
+                let content = try await load(kind)
+                try Task.checkCancellation()
+                guard model.currentUserID == accountID, history.accept(
+                    .loaded(content),
+                    for: kind,
+                    generation: generation,
+                    accountID: accountID
+                ) else { return }
+                tasks[kind] = nil
+            } catch is CancellationError {
+                guard model.currentUserID == accountID,
+                      history.accept(.idle, for: kind, generation: generation, accountID: accountID)
+                else { return }
+                tasks[kind] = nil
+            } catch {
+                guard model.currentUserID == accountID, history.accept(
+                    .failed(error.localizedDescription),
+                    for: kind,
+                    generation: generation,
+                    accountID: accountID
+                ) else { return }
+                tasks[kind] = nil
+            }
+        }
+    }
+
+    private func load(_ kind: RecentPlaybackKind) async throws -> RecentPlaybackContent {
+        switch kind {
+        case .song: .songs(try await library.recentlyPlayedSongs())
+        case .album: .albums(try await library.recentlyPlayedAlbums())
+        case .playlist: .playlists(try await library.recentlyPlayedPlaylists())
+        case .video: .media(try await library.recentlyPlayedVideos())
+        case .voice: .media(try await library.recentlyPlayedVoices())
+        case .podcast: .media(try await library.recentlyPlayedPodcasts())
+        }
+    }
+}
+
+private struct RecentMediaRow: View {
+    let item: RecentMediaSummary
+    let symbol: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            LibraryRemoteImage(url: item.artworkURL, symbol: symbol, size: 52)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.title)
+                    .font(.body.weight(.medium))
+                    .lineLimit(1)
+                if !item.subtitle.isEmpty {
+                    Text(item.subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer()
+            if let playedAt = item.playedAt {
+                Text(playedAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+            }
+        }
+        .frame(minHeight: 60)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private enum MusicLibrarySection: String, CaseIterable {
+    case recommendations = "每日推荐"
+    case listening = "听歌排行"
+    case playlists = "我的歌单"
+    case following = "我的关注"
+    case recommendedUsers = "推荐用户"
+
+    var symbol: String {
+        switch self {
+        case .recommendations: "sparkles"
+        case .listening: "chart.bar"
+        case .playlists: "music.note.list"
+        case .following: "person.2"
+        case .recommendedUsers: "person.badge.plus"
+        }
+    }
+}
+
+private func confirmedComment(
+    _ serverComment: MusicComment?,
+    songID: Int64,
+    userID: Int64,
+    nickname: String,
+    content: String,
+    replyToNickname: String? = nil
+) -> MusicComment {
+    MusicComment(
+        id: serverComment?.id ?? -Int64.random(in: 1...Int64.max),
+        songID: songID,
+        userID: serverComment?.userID == 0 ? userID : serverComment?.userID ?? userID,
+        nickname: serverComment.flatMap { $0.nickname.isEmpty ? nil : $0.nickname } ?? nickname,
+        content: serverComment.flatMap { $0.content.isEmpty ? nil : $0.content } ?? content,
+        timeText: serverComment.flatMap { $0.timeText.isEmpty ? nil : $0.timeText } ?? "刚刚",
+        likedCount: serverComment?.likedCount ?? 0,
+        isLiked: serverComment?.isLiked ?? false,
+        replyCount: serverComment?.replyCount ?? 0,
+        replyToNickname: serverComment?.replyToNickname ?? replyToNickname
+    )
+}
+
+struct CommentsView: View {
+    let songID: Int64
+    let library: LiveMusicLibrary
+    let currentUserID: Int64?
+    let currentUserNickname: String
+    let onOpenUser: (Int64) -> Void
+    let onLogin: () -> Void
+
+    @State private var comments: [MusicComment] = []
+    @State private var cursor = "0"
+    @State private var pageNumber = 1
+    @State private var sortType = 0
+    @State private var hasMore = false
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+    @State private var emojiPictureIDs: [String: String] = [:]
+    @State private var commentText = ""
+    @State private var isSubmitting = false
+    @State private var writeMessage: String?
+    @State private var successMessage: String?
+    @State private var loadGeneration = 0
+    @State private var loadTask: Task<Void, Never>?
+    @State private var writeTask: Task<Void, Never>?
+    @State private var successTask: Task<Void, Never>?
+
+    var body: AnyView { AnyView(content) }
+
+    private var content: AnyView {
+        AnyView(VStack(spacing: 0) {
+            composer
+            Divider()
+            commentList
+        }
+        .navigationTitle("评论")
+        .task(id: songID) { startLoad(reset: true) }
+        .task { emojiPictureIDs = (try? await library.commentEmojiPictureIDs()) ?? [:] }
+        .onDisappear {
+            loadTask?.cancel()
+            writeTask?.cancel()
+            successTask?.cancel()
+        }
+        .overlay(alignment: .top) {
+            ArtworkSaveToast(message: successMessage)
+                .padding(.top, 12)
+        }
+        .alert("发表评论失败", isPresented: writeMessagePresented) {
+            Button("好") { writeMessage = nil }
+        } message: {
+            Text(writeMessage ?? "")
+        })
+    }
+
+    private var composer: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                TextField("发表评论", text: $commentText, axis: .vertical)
+                    .lineLimit(1...4)
+                    .disabled(currentUserID == nil || isSubmitting)
+                    .onSubmit(submitComment)
+                Button(action: submitComment) {
+                    if isSubmitting {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "paperplane.fill")
+                    }
+                }
+                .frame(width: 30, height: 30)
+                .disabled(currentUserID == nil || trimmedComment.isEmpty || isSubmitting)
+                .help("发表评论")
+                .accessibilityLabel("发表评论")
+            }
+            if currentUserID == nil {
+                HStack(spacing: 6) {
+                    Text("登录后可发表评论和参与互动")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("去登录", action: onLogin)
+                        .buttonStyle(.link)
+                }
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 14)
+    }
+
+    @ViewBuilder
+    private var commentList: some View {
+        Group {
+            if isLoading && comments.isEmpty {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("正在加载评论…")
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let errorMessage, comments.isEmpty {
+                ContentUnavailableView {
+                    Label("评论加载失败", systemImage: "wifi.exclamationmark")
+                } description: {
+                    Text(errorMessage)
+                } actions: {
+                    Button("重试") { startLoad(reset: true) }
+                }
+            } else if comments.isEmpty {
+                ContentUnavailableView(
+                    "暂无评论",
+                    systemImage: "bubble.left",
+                    description: Text("这首歌还没有可显示的评论。")
+                )
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(comments) { comment in
+                            CommentThreadRow(
+                                comment: comment,
+                                library: library,
+                                currentUserID: currentUserID,
+                                currentUserNickname: currentUserNickname,
+                                emojiPictureIDs: emojiPictureIDs,
+                                onOpenUser: onOpenUser,
+                                onLogin: onLogin,
+                                onCommentChanged: updateComment,
+                                onCommentDeleted: removeComment,
+                                onMainListRefresh: { startLoad(reset: true) },
+                                onWriteSucceeded: showSuccess
+                            )
+                            Divider()
+                        }
+                        if let errorMessage {
+                            InlineRetry(message: errorMessage) { startLoad(reset: false) }
+                                .padding(.vertical, 8)
+                        } else if hasMore {
+                            LoadMoreTrigger { startLoad(reset: false) }
+                                .id(pageNumber)
+                        }
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 12)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var trimmedComment: String {
+        commentText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var writeMessagePresented: Binding<Bool> {
+        Binding(
+            get: { writeMessage != nil },
+            set: { if !$0 { writeMessage = nil } }
+        )
+    }
+
+    private func submitComment() {
+        let content = trimmedComment
+        guard currentUserID != nil, !content.isEmpty, !isSubmitting else { return }
+        isSubmitting = true
+        writeTask = Task { @MainActor in
+            defer {
+                isSubmitting = false
+                writeTask = nil
+            }
+            do {
+                let serverComment = try await library.addComment(songID: songID, content: content)
+                try Task.checkCancellation()
+                commentText = ""
+                let comment = confirmedComment(
+                    serverComment,
+                    songID: songID,
+                    userID: currentUserID ?? 0,
+                    nickname: currentUserNickname,
+                    content: content
+                )
+                comments.removeAll { $0.id == comment.id }
+                comments.insert(comment, at: 0)
+                showSuccess("评论成功")
+            } catch is CancellationError {
+            } catch {
+                writeMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func updateComment(_ updated: MusicComment) {
+        comments = comments.map { $0.id == updated.id ? updated : $0 }
+    }
+
+    private func removeComment(_ commentID: Int64) {
+        comments.removeAll { $0.id == commentID }
+        startLoad(reset: true)
+    }
+
+    private func showSuccess(_ message: String) {
+        successTask?.cancel()
+        successMessage = message
+        successTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .seconds(2))
+                successMessage = nil
+            } catch {
+            }
+        }
+    }
+
+    @MainActor
+    private func startLoad(reset: Bool) {
+        guard reset || loadTask == nil else { return }
+        if reset {
+            loadGeneration += 1
+            loadTask?.cancel()
+        }
+        let generation = loadGeneration
+        loadTask = Task { @MainActor in
+            await load(reset: reset, generation: generation)
+        }
+    }
+
+    @MainActor
+    private func load(reset: Bool, generation: Int) async {
+        isLoading = true
+        errorMessage = nil
+        let requestCursor = reset ? "0" : cursor
+        let requestPage = reset ? 1 : pageNumber
+        do {
+            let page = try await library.comments(
+                songID: songID,
+                cursor: requestCursor,
+                pageNumber: requestPage,
+                pageSize: 20,
+                sortType: sortType
+            )
+            try Task.checkCancellation()
+            guard generation == loadGeneration else { return }
+            if reset {
+                comments = page.comments
+            } else {
+                let existing = Set(comments.map(\.id))
+                comments += page.comments.filter { !existing.contains($0.id) }
+            }
+            cursor = page.cursor
+            pageNumber = requestPage + 1
+            sortType = page.sortType
+            hasMore = page.hasMore
+            isLoading = false
+            loadTask = nil
+        } catch is CancellationError {
+            guard generation == loadGeneration else { return }
+            isLoading = false
+            loadTask = nil
+        } catch {
+            guard generation == loadGeneration else { return }
+            errorMessage = error.localizedDescription
+            isLoading = false
+            loadTask = nil
+        }
+    }
+}
+
+struct DownloadsView: View {
+    @Bindable private var manager: MusicDownloadManager
+    let songTitle: (Int64) -> String
+
+    init(manager: MusicDownloadManager, songTitle: @escaping (Int64) -> String = { "歌曲 \($0)" }) {
+        self.manager = manager
+        self.songTitle = songTitle
+    }
+
+    var body: AnyView { AnyView(content) }
+
+    private var content: AnyView {
+        AnyView(VStack(spacing: 0) {
+            HStack {
+                Text("下载")
+                    .font(.title2.weight(.semibold))
+                Spacer()
+                Button("取消全部") { manager.cancelAll() }
+                    .disabled(!hasActiveDownloads)
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+            Divider()
+
+            if manager.states.isEmpty {
+                ContentUnavailableView(
+                    "暂无下载任务",
+                    systemImage: "arrow.down.circle",
+                    description: Text("下载歌曲后，进度和文件位置会显示在这里。")
+                )
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(manager.states.keys.sorted(), id: \.self) { songID in
+                            if let state = manager.states[songID] {
+                                DownloadRow(songID: songID, title: songTitle(songID), state: state) {
+                                    manager.cancel(songID: songID)
+                                }
+                                Divider().padding(.leading, 62)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 8)
+                }
+            }
+        }
+        .navigationTitle("下载"))
+    }
+
+    private var hasActiveDownloads: Bool {
+        manager.states.values.contains {
+            switch $0 {
+            case .queued, .running: true
+            case .completed, .failed, .cancelled: false
+            }
+        }
+    }
+}
+
+private enum LibraryPhase: Equatable {
+    case idle
+    case loading
+    case loggedOut
+    case loaded
+    case failed(String)
+}
+
+struct LibrarySnapshot {
+    let user: MusicLibraryUser
+    let songs: [Song]
+    var playlists: [Playlist]
+    let following: [MusicLibraryFollow]
+    let recommendedUsers: [MusicRecommendedUser]
+}
+
+private struct LibraryRemoteImage: View {
+    let url: URL?
+    let symbol: String
+    let size: CGFloat
+
+    var body: some View {
+        CachedAsyncImage(url: url) { phase in
+            if let image = phase.image {
+                image.resizable().scaledToFill()
+            } else {
+                Image(systemName: symbol)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(.quaternary)
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .accessibilityHidden(true)
+    }
+}
+
+private struct EmptyLibrarySection: View {
+    let title: String
+    let symbol: String
+
+    var body: some View {
+        Label(title, systemImage: symbol)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+    }
+}
+
+struct InlineRetry: View {
+    let message: String
+    let retry: () -> Void
+
+    var body: some View {
+        HStack {
+            Label(message, systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("重试", action: retry)
+        }
+        .frame(minHeight: 44)
+    }
+}
+
+private struct CommentRow: View {
+    let comment: MusicComment
+    let canOpenReplies: Bool
+    let repliesExpanded: Bool
+    let currentUserID: Int64?
+    let isWriting: Bool
+    let emojiPictureIDs: [String: String]
+    let onOpenUser: (Int64) -> Void
+    let showReplies: () -> Void
+    let reply: () -> Void
+    let toggleLike: () -> Void
+    let delete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Button(comment.nickname) { onOpenUser(comment.userID) }
+                    .buttonStyle(.plain)
+                    .font(.subheadline.weight(.semibold))
+                    .disabled(comment.userID <= 0)
+                    .help("打开 \(comment.nickname) 的用户主页")
+                    .accessibilityLabel("打开 \(comment.nickname) 的用户主页")
+                Spacer()
+                Text(comment.timeText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            CommentEmojiText(content: comment.displayContent, remotePictureIDs: emojiPictureIDs)
+            HStack(spacing: 12) {
+                Button(action: toggleLike) {
+                    HStack(spacing: 4) {
+                        if isWriting {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: comment.isLiked ? "hand.thumbsup.fill" : "hand.thumbsup")
+                        }
+                        Text("\(comment.likedCount)")
+                    }
+                    .frame(minWidth: 38, minHeight: 22)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(comment.isLiked ? Color.red : Color.secondary)
+                .disabled(currentUserID == nil || isWriting)
+                .help(comment.isLiked ? "取消点赞" : "点赞")
+                .accessibilityLabel(comment.isLiked ? "取消点赞" : "点赞")
+
+                Button(action: reply) {
+                    Image(systemName: "arrowshape.turn.up.left")
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .disabled(currentUserID == nil || isWriting)
+                .help("回复")
+                .accessibilityLabel("回复")
+
+                if canOpenReplies && comment.replyCount > 0 {
+                    Button(action: showReplies) {
+                        Label(
+                            repliesExpanded ? "收起回复" : "\(comment.replyCount) 条回复",
+                            systemImage: repliesExpanded ? "chevron.up" : "bubble.left"
+                        )
+                    }
+                    .buttonStyle(.borderless)
+                    .help(repliesExpanded ? "收起回复" : "查看回复")
+                    .accessibilityValue(Text(repliesExpanded ? "已展开" : "已折叠"))
+                }
+
+                if currentUserID == comment.userID {
+                    Button(action: delete) {
+                        Image(systemName: "trash")
+                            .frame(width: 22, height: 22)
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.red)
+                    .disabled(isWriting)
+                    .help("删除评论")
+                    .accessibilityLabel("删除评论")
+                }
+            }
+        }
+        .padding(.vertical, 12)
+    }
+}
+
+private struct CommentThreadRow: View {
+    let comment: MusicComment
+    let library: LiveMusicLibrary
+    let currentUserID: Int64?
+    let currentUserNickname: String
+    let emojiPictureIDs: [String: String]
+    let onOpenUser: (Int64) -> Void
+    let onLogin: () -> Void
+    let onCommentChanged: (MusicComment) -> Void
+    let onCommentDeleted: (Int64) -> Void
+    let onMainListRefresh: () -> Void
+    let onWriteSucceeded: (String) -> Void
+
+    @State private var isExpanded = false
+    @State private var replies: [MusicComment] = []
+    @State private var cursor = ""
+    @State private var time: Int64 = -1
+    @State private var hasMore = false
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+    @State private var writeMessage: String?
+    @State private var replyTarget: MusicComment?
+    @State private var deleteTarget: MusicComment?
+    @State private var floorGeneration = 0
+    @State private var floorTask: Task<Void, Never>?
+    @State private var writeTasks: [Int64: Task<Void, Never>] = [:]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            CommentRow(
+                comment: comment,
+                canOpenReplies: true,
+                repliesExpanded: isExpanded,
+                currentUserID: currentUserID,
+                isWriting: writeTasks[comment.id] != nil,
+                emojiPictureIDs: emojiPictureIDs,
+                onOpenUser: onOpenUser,
+                showReplies: toggleReplies,
+                reply: { openReply(comment) },
+                toggleLike: { toggleLiked(comment) },
+                delete: { deleteTarget = comment }
+            )
+            if isExpanded {
+                repliesContent
+                    .padding(.leading, 28)
+            }
+        }
+        .sheet(item: $replyTarget) { target in
+            CommentReplySheet(comment: target, emojiPictureIDs: emojiPictureIDs) { content in
+                let serverComment = try await library.replyToComment(
+                    songID: comment.songID,
+                    commentID: target.id,
+                    content: content
+                )
+                let reply = confirmedComment(
+                    serverComment,
+                    songID: comment.songID,
+                    userID: currentUserID ?? 0,
+                    nickname: currentUserNickname,
+                    content: content,
+                    replyToNickname: target.id == comment.id ? nil : target.nickname
+                )
+                insert(reply, after: target)
+                isExpanded = true
+                onCommentChanged(comment.addingReply())
+                onWriteSucceeded("回复成功")
+            }
+        }
+        .confirmationDialog(
+            "删除这条评论？",
+            isPresented: deletePresented,
+            titleVisibility: .visible,
+            presenting: deleteTarget
+        ) { target in
+            Button("删除", role: .destructive) { deleteComment(target) }
+            Button("取消", role: .cancel) { deleteTarget = nil }
+        }
+        .alert("评论操作失败", isPresented: writeMessagePresented) {
+            Button("好") { writeMessage = nil }
+        } message: {
+            Text(writeMessage ?? "")
+        }
+        .onDisappear {
+            floorTask?.cancel()
+            writeTasks.values.forEach { $0.cancel() }
+        }
+    }
+
+    @ViewBuilder
+    private var repliesContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if isLoading && replies.isEmpty {
+                ProgressView("正在加载回复…")
+                    .frame(maxWidth: .infinity, minHeight: 52)
+            } else if let errorMessage, replies.isEmpty {
+                InlineRetry(message: errorMessage) { startFloorLoad(reset: true) }
+            } else {
+                if replies.isEmpty {
+                    EmptyLibrarySection(title: "暂无回复", symbol: "bubble.left")
+                } else {
+                    ForEach(replies) { reply in
+                        CommentRow(
+                            comment: reply,
+                            canOpenReplies: false,
+                            repliesExpanded: false,
+                            currentUserID: currentUserID,
+                            isWriting: writeTasks[reply.id] != nil,
+                            emojiPictureIDs: emojiPictureIDs,
+                            onOpenUser: onOpenUser,
+                            showReplies: {},
+                            reply: { openReply(reply) },
+                            toggleLike: { toggleLiked(reply) },
+                            delete: { deleteTarget = reply }
+                        )
+                        Divider()
+                    }
+                }
+                if let errorMessage {
+                    InlineRetry(message: errorMessage) { startFloorLoad(reset: false) }
+                } else if hasMore {
+                    Button { startFloorLoad(reset: false) } label: {
+                        HStack(spacing: 6) {
+                            if isLoading { ProgressView().controlSize(.small) }
+                            Text(isLoading ? "加载中" : "查看更多")
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(isLoading)
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    private func toggleReplies() {
+        isExpanded.toggle()
+        if isExpanded && replies.isEmpty && !isLoading {
+            startFloorLoad(reset: true)
+        } else if !isExpanded {
+            floorTask?.cancel()
+        }
+    }
+
+    private func openReply(_ target: MusicComment) {
+        guard currentUserID != nil else {
+            onLogin()
+            return
+        }
+        replyTarget = target
+    }
+
+    private func insert(_ reply: MusicComment, after target: MusicComment) {
+        replies.removeAll { $0.id == reply.id }
+        if target.id == comment.id {
+            replies.insert(reply, at: 0)
+        } else if let index = replies.firstIndex(where: { $0.id == target.id }) {
+            replies.insert(reply, at: index + 1)
+        } else {
+            replies.append(reply)
+        }
+    }
+
+    private var deletePresented: Binding<Bool> {
+        Binding(
+            get: { deleteTarget != nil },
+            set: { if !$0 { deleteTarget = nil } }
+        )
+    }
+
+    private var writeMessagePresented: Binding<Bool> {
+        Binding(
+            get: { writeMessage != nil },
+            set: { if !$0 { writeMessage = nil } }
+        )
+    }
+
+    @MainActor
+    private func toggleLiked(_ target: MusicComment) {
+        guard currentUserID != nil, writeTasks[target.id] == nil else { return }
+        let liked = !target.isLiked
+        writeTasks[target.id] = Task { @MainActor in
+            defer { writeTasks[target.id] = nil }
+            do {
+                try await library.setCommentLiked(
+                    songID: comment.songID,
+                    commentID: target.id,
+                    liked: liked
+                )
+                let updated = target.settingLiked(liked)
+                if target.id == comment.id {
+                    onCommentChanged(updated)
+                } else {
+                    replies = replies.map { $0.id == target.id ? updated : $0 }
+                }
+            } catch is CancellationError {
+            } catch {
+                writeMessage = error.localizedDescription
+            }
+        }
+    }
+
+    @MainActor
+    private func deleteComment(_ target: MusicComment) {
+        guard currentUserID == target.userID, writeTasks[target.id] == nil else { return }
+        deleteTarget = nil
+        writeTasks[target.id] = Task { @MainActor in
+            defer { writeTasks[target.id] = nil }
+            do {
+                try await library.deleteComment(songID: comment.songID, commentID: target.id)
+                if target.id == comment.id {
+                    onCommentDeleted(target.id)
+                } else {
+                    replies.removeAll { $0.id == target.id }
+                    startFloorLoad(reset: true)
+                    onMainListRefresh()
+                }
+            } catch is CancellationError {
+            } catch {
+                writeMessage = error.localizedDescription
+            }
+        }
+    }
+
+    @MainActor
+    private func startFloorLoad(reset: Bool) {
+        guard reset || floorTask == nil else { return }
+        if reset {
+            floorGeneration += 1
+            floorTask?.cancel()
+        }
+        let generation = floorGeneration
+        floorTask = Task { @MainActor in
+            await load(reset: reset, generation: generation)
+        }
+    }
+
+    @MainActor
+    private func load(reset: Bool, generation: Int) async {
+        isLoading = true
+        errorMessage = nil
+        do {
+            let page = try await library.commentFloor(
+                songID: comment.songID,
+                parentCommentID: comment.id,
+                time: reset ? -1 : time,
+                cursor: reset ? "" : cursor,
+                limit: 10
+            )
+            try Task.checkCancellation()
+            guard generation == floorGeneration else { return }
+            if reset {
+                replies = page.comments
+            } else {
+                let existing = Set(replies.map(\.id))
+                replies += page.comments.filter { !existing.contains($0.id) }
+            }
+            cursor = page.cursor
+            time = page.time
+            hasMore = page.hasMore
+            isLoading = false
+            floorTask = nil
+        } catch is CancellationError {
+            guard generation == floorGeneration else { return }
+            isLoading = false
+            floorTask = nil
+        } catch {
+            guard generation == floorGeneration else { return }
+            errorMessage = error.localizedDescription
+            isLoading = false
+            floorTask = nil
+        }
+    }
+}
+
+private struct CommentReplySheet: View {
+    let comment: MusicComment
+    let emojiPictureIDs: [String: String]
+    let submit: (String) async throws -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var content = ""
+    @State private var isSubmitting = false
+    @State private var errorMessage: String?
+    @State private var task: Task<Void, Never>?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("回复 \(comment.nickname)")
+                .font(.headline)
+            CommentEmojiText(content: comment.displayContent, remotePictureIDs: emojiPictureIDs)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            TextEditor(text: $content)
+                .font(.body)
+                .frame(minHeight: 96)
+                .padding(4)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color(nsColor: .separatorColor))
+                }
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }
+                    .disabled(isSubmitting)
+                Button("回复", action: submitReply)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(trimmedContent.isEmpty || isSubmitting)
+            }
+        }
+        .padding(20)
+        .frame(width: 420, height: 320)
+        .interactiveDismissDisabled(isSubmitting)
+        .onDisappear { task?.cancel() }
+    }
+
+    private var trimmedContent: String {
+        content.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func submitReply() {
+        let value = trimmedContent
+        guard !value.isEmpty, !isSubmitting else { return }
+        isSubmitting = true
+        errorMessage = nil
+        task = Task { @MainActor in
+            defer {
+                isSubmitting = false
+                task = nil
+            }
+            do {
+                try await submit(value)
+                dismiss()
+            } catch is CancellationError {
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+}
+
+private struct DownloadRow: View {
+    let songID: Int64
+    let title: String
+    let state: MusicDownloadState
+    let cancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: symbol)
+                .foregroundStyle(symbolColor)
+                .frame(width: 30)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(title)
+                    .lineLimit(1)
+                stateDetail
+            }
+            Spacer()
+            stateAction
+        }
+        .frame(minHeight: 58)
+    }
+
+    private var symbol: String {
+        switch state {
+        case .queued: "clock"
+        case .running: "arrow.down.circle"
+        case .completed: "checkmark.circle.fill"
+        case .failed: "exclamationmark.triangle"
+        case .cancelled: "xmark.circle"
+        }
+    }
+
+    private var symbolColor: Color {
+        switch state {
+        case .failed: .red
+        case .completed: .green
+        default: .secondary
+        }
+    }
+
+    private var stateText: String {
+        switch state {
+        case .queued: "等待下载"
+        case let .running(progress): "已下载 \(Int(progress * 100))%"
+        case let .completed(audioURL, _): "已完成，\(audioURL.lastPathComponent)"
+        case let .failed(message): "下载失败，\(message)"
+        case .cancelled: "已取消"
+        }
+    }
+
+    private var stateDetail: AnyView {
+        AnyView(Group {
+            switch state {
+        case .queued, .cancelled:
+            Text(stateText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case let .running(progress):
+            HStack(spacing: 8) {
+                ProgressView(value: progress)
+                    .frame(maxWidth: 240)
+                Text("\(Int(progress * 100))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 38, alignment: .trailing)
+            }
+        case let .completed(audioURL, lyricURL):
+            Text(lyricURL == nil ? audioURL.lastPathComponent : "\(audioURL.lastPathComponent) · 含歌词")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        case let .failed(message):
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.red)
+                .lineLimit(2)
+            }
+        })
+    }
+
+    private var stateAction: AnyView {
+        AnyView(Group {
+            switch state {
+        case .queued, .running:
+            Button(action: cancel) {
+                Image(systemName: "xmark")
+            }
+            .help("取消下载")
+            .accessibilityLabel("取消 \(title) 的下载")
+            .frame(width: 44, height: 44)
+        case let .completed(audioURL, _):
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting([audioURL])
+            } label: {
+                Image(systemName: "folder")
+            }
+            .help("在 Finder 中显示")
+            .accessibilityLabel("在 Finder 中显示 \(title)")
+            .frame(width: 44, height: 44)
+        case .failed, .cancelled:
+            EmptyView()
+            }
+        })
+    }
+}
