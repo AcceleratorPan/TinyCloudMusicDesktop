@@ -9,6 +9,23 @@ final class MusicDownloadManager {
         let task: Task<Void, Never>
     }
 
+    private struct PendingDownload {
+        let songID: Int64
+        let jobID: UUID
+    }
+
+    private struct ResolvedSource: Sendable {
+        let url: URL
+        let type: String
+        let level: String?
+        let expectedBytes: Int64?
+    }
+
+    private struct DownloadedAudio: Sendable {
+        let temporaryURL: URL
+        let source: ResolvedSource
+    }
+
     private(set) var states: [Int64: MusicDownloadState] = [:]
     private(set) var items: [Int64: MusicDownloadItem] = [:]
     private(set) var itemOrder: [Int64] = []
@@ -21,13 +38,16 @@ final class MusicDownloadManager {
     @ObservationIgnored private let resumeStore: MusicDownloadResumeStore
     @ObservationIgnored private let targetAllocator: MusicDownloadTargetAllocator
     @ObservationIgnored private var pendingRequests: [Int64: MusicDownloadRequest] = [:]
-    @ObservationIgnored private var pendingOrder: [Int64] = []
+    @ObservationIgnored private var pendingOrder: [PendingDownload] = []
+    @ObservationIgnored private var pendingHead = 0
     @ObservationIgnored private var activeTasks: [UUID: ActiveDownloadTask] = [:]
     @ObservationIgnored private var requestsBySongID: [Int64: MusicDownloadRequest] = [:]
     @ObservationIgnored private var resumeDataBySongID: [Int64: Data] = [:]
     @ObservationIgnored private var jobIDs: [Int64: UUID] = [:]
-    @ObservationIgnored private var cloudSongIDs: Set<Int64> = []
-    @ObservationIgnored private var requestedQualities: [Int64: AudioQuality] = [:]
+    @ObservationIgnored private var pausingSongIDs: Set<Int64> = []
+    @ObservationIgnored private var resumeAfterPauseSongIDs: Set<Int64> = []
+    @ObservationIgnored private var bufferedProgress: [Int64: (jobID: UUID, value: Double)] = [:]
+    @ObservationIgnored private var progressFlushTask: Task<Void, Never>?
 
     init(
         transport: EAPITransport = EAPITransport(),
@@ -43,10 +63,18 @@ final class MusicDownloadManager {
         self.retryPolicy = retryPolicy
         self.resumeStore = resumeStore
         self.targetAllocator = targetAllocator
+
+        for recovery in resumeStore.recoverableDownloads() {
+            if let resumeData = recovery.resumeData {
+                resumeDataBySongID[recovery.request.songID] = resumeData
+            }
+            _ = enqueue(recovery.request, persist: false)
+        }
     }
 
     isolated deinit {
         activeTasks.values.forEach { $0.task.cancel() }
+        progressFlushTask?.cancel()
     }
 
     @discardableResult
@@ -89,33 +117,34 @@ final class MusicDownloadManager {
     }
 
     @discardableResult
-    private func enqueue(_ request: MusicDownloadRequest) -> Bool {
+    private func enqueue(_ request: MusicDownloadRequest, persist: Bool = true) -> Bool {
         let songID = request.songID
-        if requestedQualities[songID] == request.quality {
+        let wasKnown = items[songID] != nil
+        if requestsBySongID[songID] == request {
             switch states[songID] {
             case .queued, .running:
                 return false
-            case let .completed(audioURL, _) where FileManager.default.fileExists(atPath: audioURL.path):
+            case let .completed(audioURL, _) where (try? MusicDownloadFiles.validatedAudioFileSize(at: audioURL)) != nil:
                 return false
             default:
                 break
             }
         }
         if isActive(songID: songID) {
+            pausingSongIDs.remove(songID)
+            resumeAfterPauseSongIDs.remove(songID)
             pendingRequests.removeValue(forKey: songID)
-            pendingOrder.removeAll { $0 == songID }
             activeTasks.values
                 .filter { $0.songID == songID }
                 .forEach { $0.task.cancel() }
             jobIDs.removeValue(forKey: songID)
-            cloudSongIDs.remove(songID)
             discardResumeData(songID: songID)
         }
         if let previous = requestsBySongID[songID], previous != request {
             discardResumeData(songID: songID)
         }
+        resumeAfterPauseSongIDs.remove(songID)
         requestsBySongID[songID] = request
-        requestedQualities[songID] = request.quality
         let quality = switch request.source {
         case .catalog: request.quality.rawValue
         case .cloud: "原文件"
@@ -127,59 +156,125 @@ final class MusicDownloadManager {
             quality: quality,
             expectedBytes: request.expectedBytes
         )
-        itemOrder.removeAll { $0 == songID }
-        itemOrder.insert(songID, at: 0)
+        if wasKnown { itemOrder.removeAll { $0 == songID } }
+        itemOrder.append(songID)
         let jobID = UUID()
         jobIDs[songID] = jobID
-        if case .cloud = request.source { cloudSongIDs.insert(songID) } else { cloudSongIDs.remove(songID) }
         retryAttempts[songID] = 0
         states[songID] = .queued
         pendingRequests[songID] = request
-        pendingOrder.append(songID)
+        pendingOrder.append(PendingDownload(songID: songID, jobID: jobID))
+        if persist {
+            resumeStore.save(request, resumeData: resumeDataBySongID[songID])
+        }
         schedulePendingDownloads()
         return true
     }
 
     func cancel(songID: Int64) {
-        var foundTask = false
+        var foundTask = switch states[songID] {
+        case .paused?, .failed?: true
+        default: false
+        }
         if pendingRequests.removeValue(forKey: songID) != nil {
-            pendingOrder.removeAll { $0 == songID }
             foundTask = true
         }
         let runningTasks = activeTasks.values.filter { $0.songID == songID }
         foundTask = foundTask || !runningTasks.isEmpty
         guard foundTask else { return }
+        pausingSongIDs.remove(songID)
+        resumeAfterPauseSongIDs.remove(songID)
         jobIDs.removeValue(forKey: songID)
-        cloudSongIDs.remove(songID)
+        bufferedProgress.removeValue(forKey: songID)
         retryAttempts[songID] = 0
         discardResumeData(songID: songID)
         states[songID] = .cancelled
         runningTasks.forEach { $0.task.cancel() }
         schedulePendingDownloads()
+        trimHistory()
     }
 
     func cancelAll() {
-        let affectedIDs = Set(pendingOrder + activeTasks.values.map(\.songID))
+        let pausedIDs = states.compactMap { songID, state in
+            if case .paused = state { songID } else { nil }
+        }
+        let affectedIDs = Set(pendingRequests.keys)
+            .union(activeTasks.values.map(\.songID))
+            .union(pausedIDs)
         pendingOrder.removeAll()
+        pendingHead = 0
         pendingRequests.removeAll()
         jobIDs.removeAll()
-        cloudSongIDs.removeAll()
+        pausingSongIDs.removeAll()
+        resumeAfterPauseSongIDs.removeAll()
+        bufferedProgress.removeAll()
         for songID in affectedIDs {
             retryAttempts[songID] = 0
             discardResumeData(songID: songID)
             states[songID] = .cancelled
         }
         activeTasks.values.forEach { $0.task.cancel() }
+        trimHistory()
     }
 
-    func cancelCloudDownloads() {
-        for songID in Array(cloudSongIDs) {
+    func pause(songID: Int64) {
+        guard let request = requestsBySongID[songID] else { return }
+        resumeAfterPauseSongIDs.remove(songID)
+        let wasPending = pendingRequests.removeValue(forKey: songID) != nil
+        let currentJobID = jobIDs[songID]
+        let runningTasks = activeTasks.compactMap { jobID, active in
+            jobID == currentJobID && active.songID == songID ? active : nil
+        }
+        guard wasPending || !runningTasks.isEmpty else { return }
+        let currentProgress: Double? = switch states[songID] {
+        case let .running(progress), let .paused(progress): progress
+        default: nil
+        }
+        let progress = max(
+            currentProgress ?? 0,
+            bufferedProgress.removeValue(forKey: songID)?.value ?? 0
+        )
+        states[songID] = .paused(progress: progress > 0 ? progress : nil)
+        retryAttempts[songID] = 0
+        resumeStore.save(request, resumeData: resumeDataBySongID[songID])
+        if runningTasks.isEmpty {
+            jobIDs.removeValue(forKey: songID)
+        } else {
+            pausingSongIDs.insert(songID)
+            runningTasks.forEach { $0.task.cancel() }
+        }
+        schedulePendingDownloads()
+    }
+
+    func pauseAll() async {
+        let affected = Set(pendingRequests.keys).union(activeTasks.values.map(\.songID))
+        let ordered = itemOrder.filter(affected.contains)
+            + affected.subtracting(itemOrder).sorted()
+        for songID in ordered {
+            pause(songID: songID)
+        }
+        // ponytail: manifests are already durable; bound native callback wait so app termination cannot hang forever.
+        for _ in 0..<100 where !activeTasks.isEmpty {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
+    func cancelCloudDownloads(exceptUserID: Int64? = nil) {
+        for (songID, request) in requestsBySongID {
+            guard case let .cloud(userID, _) = request.source,
+                  userID != exceptUserID
+            else { continue }
             cancel(songID: songID)
         }
     }
 
     func retry(songID: Int64) {
-        guard !isActive(songID: songID), let request = requestsBySongID[songID] else { return }
+        guard let request = requestsBySongID[songID] else { return }
+        if case .paused? = states[songID], isActive(songID: songID) {
+            resumeAfterPauseSongIDs.insert(songID)
+            return
+        }
+        guard !isActive(songID: songID) else { return }
         _ = enqueue(request)
     }
 
@@ -201,15 +296,36 @@ final class MusicDownloadManager {
     }
 
     private func schedulePendingDownloads() {
-        while activeTasks.count < maximumConcurrentDownloads, !pendingOrder.isEmpty {
-            guard let pendingIndex = pendingOrder.firstIndex(where: { songID in
-                !activeTasks.values.contains { $0.songID == songID }
-            }) else { break }
-            let songID = pendingOrder.remove(at: pendingIndex)
+        while activeTasks.count < maximumConcurrentDownloads, pendingHead < pendingOrder.count {
+            while pendingHead < pendingOrder.count {
+                let pending = pendingOrder[pendingHead]
+                if jobIDs[pending.songID] == pending.jobID { break }
+                pendingHead += 1
+            }
+            guard pendingHead < pendingOrder.count else { break }
+
+            let index = (pendingHead..<pendingOrder.count).first { index in
+                let candidate = pendingOrder[index]
+                return jobIDs[candidate.songID] == candidate.jobID
+                    && !activeTasks.values.contains(where: { $0.songID == candidate.songID })
+            }
+            guard let index else { break }
+            if index != pendingHead { pendingOrder.swapAt(index, pendingHead) }
+
+            let pending = pendingOrder[pendingHead]
+            pendingHead += 1
+            let songID = pending.songID
             guard let request = pendingRequests.removeValue(forKey: songID),
-                  let jobID = jobIDs[songID]
+                  jobIDs[songID] == pending.jobID
             else { continue }
-            start(request, songID: songID, jobID: jobID)
+            start(request, songID: songID, jobID: pending.jobID)
+        }
+        if pendingHead == pendingOrder.count {
+            pendingOrder.removeAll(keepingCapacity: true)
+            pendingHead = 0
+        } else if pendingHead >= 1_024, pendingHead * 2 >= pendingOrder.count {
+            pendingOrder.removeFirst(pendingHead)
+            pendingHead = 0
         }
     }
 
@@ -221,8 +337,7 @@ final class MusicDownloadManager {
         let session = session
         let retryPolicy = retryPolicy
         let targetAllocator = targetAllocator
-        let task = Task { @MainActor [self] in
-            defer { self.finish(songID: songID, jobID: jobID) }
+        let task = Task { @MainActor [weak self] in
             do {
                 let result = try await Self.perform(
                     request,
@@ -231,33 +346,57 @@ final class MusicDownloadManager {
                     initialResumeData: initialResumeData,
                     retryPolicy: retryPolicy,
                     targetAllocator: targetAllocator,
-                    update: { update in
-                        Task { @MainActor in
-                            self.apply(update, songID: songID, jobID: jobID, request: request)
+                    update: { [weak self] update in
+                        Task { @MainActor [weak self] in
+                            self?.apply(update, songID: songID, jobID: jobID, request: request)
                         }
                     }
                 )
-                guard self.jobIDs[songID] == jobID else { return }
-                self.discardResumeData(songID: songID)
-                self.retryAttempts[songID] = 0
-                self.states[songID] = .completed(audioURL: result.audioURL, lyricURL: result.lyricURL)
+                self?.complete(result, songID: songID, jobID: jobID)
             } catch {
-                guard self.jobIDs[songID] == jobID else { return }
-                if Task.isCancelled || Self.isCancellation(error) {
-                    self.discardResumeData(songID: songID)
-                    self.retryAttempts[songID] = 0
-                    self.states[songID] = .cancelled
-                } else {
-                    let failure = error as? MusicDownloadFailure
-                    if let resumeData = failure?.resumeData {
-                        self.resumeDataBySongID[songID] = resumeData
-                        self.resumeStore.save(resumeData, for: request)
-                    }
-                    self.states[songID] = .failed(failure?.localizedDescription ?? error.localizedDescription)
-                }
+                self?.fail(error, request: request, songID: songID, jobID: jobID)
             }
+            self?.finish(songID: songID, jobID: jobID)
         }
         activeTasks[jobID] = ActiveDownloadTask(songID: songID, task: task)
+    }
+
+    private func complete(_ result: MusicDownloadResult, songID: Int64, jobID: UUID) {
+        guard jobIDs[songID] == jobID else { return }
+        pausingSongIDs.remove(songID)
+        resumeAfterPauseSongIDs.remove(songID)
+        discardResumeData(songID: songID)
+        retryAttempts[songID] = 0
+        states[songID] = .completed(audioURL: result.audioURL, lyricURL: result.lyricURL)
+        trimHistory()
+    }
+
+    private func fail(_ error: Error, request: MusicDownloadRequest, songID: Int64, jobID: UUID) {
+        guard jobIDs[songID] == jobID else { return }
+        let failure = error as? MusicDownloadFailure
+        if pausingSongIDs.remove(songID) != nil {
+            let resumeData = failure?.resumeData ?? resumeDataBySongID[songID]
+            if let resumeData { resumeDataBySongID[songID] = resumeData }
+            resumeStore.save(request, resumeData: resumeData)
+            retryAttempts[songID] = 0
+            return
+        }
+        if Task.isCancelled || Self.isCancellation(error) {
+            discardResumeData(songID: songID)
+            retryAttempts[songID] = 0
+            states[songID] = .cancelled
+            trimHistory()
+            return
+        }
+
+        if let resumeData = failure?.resumeData {
+            resumeDataBySongID[songID] = resumeData
+            resumeStore.save(request, resumeData: resumeData)
+        } else {
+            discardResumeData(songID: songID)
+        }
+        states[songID] = .failed(failure?.localizedDescription ?? error.localizedDescription)
+        trimHistory()
     }
 
     private func apply(
@@ -267,7 +406,7 @@ final class MusicDownloadManager {
         request: MusicDownloadRequest
     ) {
         guard jobIDs[songID] == jobID, activeTasks[jobID] != nil else { return }
-        if case .cancelled? = states[songID] { return }
+        guard case .running? = states[songID] else { return }
         switch update {
         case let .metadata(level, expectedBytes):
             guard let item = items[songID] else { return }
@@ -279,18 +418,23 @@ final class MusicDownloadManager {
                 expectedBytes: expectedBytes ?? item.expectedBytes
             )
             if updated != item { items[songID] = updated }
+            if updated.expectedBytes != nil, case .running(progress: nil)? = states[songID] {
+                states[songID] = .running(progress: 0)
+            }
         case let .progress(value):
             let value = min(max(value, 0), 1)
-            let current: Double? = if case let .running(progress)? = states[songID] { progress } else { nil }
-            if let current, value <= current { return }
-            states[songID] = .running(progress: current.map { max($0, value) } ?? value)
+            if value > (bufferedProgress[songID]?.value ?? -1) {
+                bufferedProgress[songID] = (jobID, value)
+                scheduleProgressFlush()
+            }
         case let .retrying(attempt, _, progress, resumeData, discardsResumeData):
             retryAttempts[songID] = attempt
             if discardsResumeData {
-                discardResumeData(songID: songID)
+                resumeDataBySongID.removeValue(forKey: songID)
+                resumeStore.save(request)
             } else if let resumeData {
                 resumeDataBySongID[songID] = resumeData
-                resumeStore.save(resumeData, for: request)
+                resumeStore.save(request, resumeData: resumeData)
             }
             let current: Double? = if case let .running(value)? = states[songID] { value } else { nil }
             let nextProgress = if let current, let progress {
@@ -300,6 +444,46 @@ final class MusicDownloadManager {
             }
             states[songID] = .running(progress: nextProgress)
         }
+    }
+
+    private func scheduleProgressFlush() {
+        guard progressFlushTask == nil else { return }
+        progressFlushTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(100))
+                self?.flushProgress()
+            } catch {
+            }
+        }
+    }
+
+    private func flushProgress() {
+        progressFlushTask = nil
+        let updates = bufferedProgress
+        bufferedProgress.removeAll(keepingCapacity: true)
+        var validUpdates: [Int64: Double] = [:]
+        for (songID, update) in updates {
+            guard jobIDs[songID] == update.jobID,
+                  activeTasks[update.jobID] != nil
+            else { continue }
+            validUpdates[songID] = update.value
+        }
+        let nextStates = Self.mergingProgress(validUpdates, into: states)
+        if nextStates != states { states = nextStates }
+    }
+
+    nonisolated static func mergingProgress(
+        _ updates: [Int64: Double],
+        into states: [Int64: MusicDownloadState]
+    ) -> [Int64: MusicDownloadState] {
+        var result = states
+        for (songID, value) in updates {
+            guard case let .running(current)? = result[songID],
+                  current.map({ value > $0 }) ?? true
+            else { continue }
+            result[songID] = .running(progress: value)
+        }
+        return result
     }
 
     private func discardResumeData(songID: Int64) {
@@ -313,11 +497,45 @@ final class MusicDownloadManager {
 
     private func finish(songID: Int64, jobID: UUID) {
         activeTasks.removeValue(forKey: jobID)
+        let shouldResume = resumeAfterPauseSongIDs.contains(songID)
+            && !activeTasks.values.contains(where: { $0.songID == songID })
+            && states[songID].map({ state in
+                if case .paused = state { true } else { false }
+            }) == true
+        if shouldResume { resumeAfterPauseSongIDs.remove(songID) }
         if jobIDs[songID] == jobID {
+            pausingSongIDs.remove(songID)
             jobIDs.removeValue(forKey: songID)
-            cloudSongIDs.remove(songID)
+        }
+        if shouldResume, let request = requestsBySongID[songID] {
+            _ = enqueue(request)
+            trimHistory()
+            return
         }
         schedulePendingDownloads()
+        trimHistory()
+    }
+
+    private func trimHistory(limit: Int = 500) {
+        let excess = itemOrder.count - limit
+        guard excess > 0 else { return }
+        let victims = itemOrder.lazy.filter { songID in
+            guard !self.isActive(songID: songID), let state = self.states[songID] else { return false }
+            switch state {
+            case .completed, .failed, .cancelled: return true
+            case .queued, .running, .paused: return false
+            }
+        }.prefix(excess)
+        let victimIDs = Set(victims)
+        guard !victimIDs.isEmpty else { return }
+        itemOrder.removeAll { victimIDs.contains($0) }
+        for songID in victimIDs {
+            states.removeValue(forKey: songID)
+            items.removeValue(forKey: songID)
+            retryAttempts.removeValue(forKey: songID)
+            requestsBySongID.removeValue(forKey: songID)
+            discardResumeData(songID: songID)
+        }
     }
 
     private nonisolated static func perform(
@@ -330,64 +548,71 @@ final class MusicDownloadManager {
         update: @escaping @Sendable (MusicDownloadUpdate) -> Void
     ) async throws -> MusicDownloadResult {
         try Task.checkCancellation()
-        let source = try await resolvedSource(for: request, transport: transport)
-        update(.metadata(level: source.level, expectedBytes: source.expectedBytes))
+        let initialSource = try await resolvedSourceWithRetry(
+            for: request,
+            transport: transport,
+            retryPolicy: retryPolicy,
+            update: update
+        )
         let hasSecurityScope = request.destination.startAccessingSecurityScopedResource()
         defer { if hasSecurityScope { request.destination.stopAccessingSecurityScopedResource() } }
         try FileManager.default.createDirectory(at: request.destination, withIntermediateDirectories: true)
 
-        let prefix = request.artists.isEmpty ? request.songName : "\(request.artists) - \(request.songName)"
-        let label = source.level.map { "【\(qualityLabel($0))】" } ?? ""
-        let cleaned = MusicDownloadFiles.sanitizedFileName(label + prefix)
-        let stem = cleaned.isEmpty ? String(request.songID) : cleaned
-        let fallbackExtension = if case let .cloud(_, fileName) = request.source {
-            URL(fileURLWithPath: fileName).pathExtension
-        } else {
-            ""
-        }
-        let fileExtension = sanitizedExtension(source.type.nonEmpty ?? fallbackExtension)
+        let initialIdentity = fileIdentity(for: request, source: initialSource)
         if let existing = MusicDownloadFiles.existingDownload(
             in: request.destination,
-            stem: stem,
-            audioExtension: fileExtension
+            stem: initialIdentity.stem,
+            audioExtension: initialIdentity.audioExtension
         ) {
             update(.progress(1))
             return existing
         }
-        let lyrics = try await downloadableLyrics(for: request, transport: transport)
-        let audioProgressWeight = lyrics == nil ? 1.0 : 0.99
+
+        let audioProgressWeight = request.includeLyrics ? 0.99 : 1
+        async let lyrics = downloadableLyrics(for: request, transport: transport)
+        let audio = try await downloadAudio(
+            request: request,
+            initialSource: initialSource,
+            transport: transport,
+            session: session,
+            initialResumeData: initialResumeData,
+            retryPolicy: retryPolicy,
+            audioProgressWeight: audioProgressWeight,
+            update: update
+        )
+        try Task.checkCancellation()
+
+        let identity = fileIdentity(for: request, source: audio.source)
+        if let existing = MusicDownloadFiles.existingDownload(
+            in: request.destination,
+            stem: identity.stem,
+            audioExtension: identity.audioExtension
+        ) {
+            try? FileManager.default.removeItem(at: audio.temporaryURL)
+            update(.progress(1))
+            return existing
+        }
         let targets = await targetAllocator.reserve(
             in: request.destination,
-            stem: stem,
-            audioExtension: fileExtension
+            stem: identity.stem,
+            audioExtension: identity.audioExtension
         )
         var committed: [URL] = []
         var succeeded = false
         defer {
             if !succeeded {
-                for url in [targets.audioPart, targets.lyricPart] + committed {
+                for url in [audio.temporaryURL, targets.audioPart, targets.lyricPart] + committed {
                     try? FileManager.default.removeItem(at: url)
                 }
             }
         }
 
         do {
-            let (temporaryURL, _) = try await downloadAudio(
-                request: request,
-                initialSource: source,
-                transport: transport,
-                session: session,
-                initialResumeData: initialResumeData,
-                retryPolicy: retryPolicy,
-                audioProgressWeight: audioProgressWeight,
-                update: update
-            )
-            try Task.checkCancellation()
-            try MusicDownloadFiles.stageDownloadedFile(temporaryURL, at: targets.audioPart)
+            try MusicDownloadFiles.stageDownloadedFile(audio.temporaryURL, at: targets.audioPart)
             update(.progress(audioProgressWeight))
 
             var hasLyrics = false
-            if let lyrics {
+            if let lyrics = try await lyrics {
                 do {
                     try Task.checkCancellation()
                     try MusicDownloadFiles.stageData(Data(lyrics.utf8), at: targets.lyricPart)
@@ -427,65 +652,95 @@ final class MusicDownloadManager {
 
     private nonisolated static func downloadAudio(
         request: MusicDownloadRequest,
-        initialSource: (url: URL, type: String, level: String?, expectedBytes: Int64?),
+        initialSource: ResolvedSource,
         transport: EAPITransport,
         session: URLSession,
         initialResumeData: Data?,
         retryPolicy: MusicDownloadRetryPolicy,
         audioProgressWeight: Double,
         update: @escaping @Sendable (MusicDownloadUpdate) -> Void
-    ) async throws -> (URL, URLResponse) {
+    ) async throws -> DownloadedAudio {
         var source = initialSource
         var resumeData = initialResumeData
         var needsFreshSource = false
+        var didRefreshSource = false
         var lastError: Error = MusicDownloadError.invalidResponse
+        let reporter = MusicDownloadProgressReporter(weight: audioProgressWeight, update: update)
+        let transfer = MusicDownloadTransfer(
+            session: session,
+            progress: { written, expected, responseExpected in
+                reporter.update(
+                    totalBytesWritten: written,
+                    totalBytesExpectedToWrite: expected,
+                    responseExpectedContentLength: responseExpected
+                )
+            },
+            allowsRequest: { redirectedRequest in
+                redirectedRequest.url.map(CloudMusicDecoder.isAllowedDownloadURL) == true
+            }
+        )
+        defer { transfer.invalidate() }
 
         for attempt in 1...retryPolicy.maximumAttempts {
             do {
                 try Task.checkCancellation()
                 if needsFreshSource {
-                    source = try await resolvedSource(for: request, transport: transport)
-                    update(.metadata(level: source.level, expectedBytes: source.expectedBytes))
+                    source = try await resolvedSourceWithRetry(
+                        for: request,
+                        transport: transport,
+                        retryPolicy: retryPolicy,
+                        update: update
+                    )
                     needsFreshSource = false
                 }
+                try ensureAvailableCapacity(for: source.expectedBytes, at: request.destination)
+                reporter.setExpectedBytes(source.expectedBytes)
 
-                let isCloud = if case .cloud = request.source { true } else { false }
-                let delegate = MusicDownloadProgressDelegate(
-                    progress: { update(.progress(overallProgress(audioProgress: $0, weight: audioProgressWeight))) },
-                    expectedContentLength: source.expectedBytes
-                ) { redirectedRequest in
-                    !isCloud || redirectedRequest.url.map(CloudMusicDecoder.isAllowedDownloadURL) == true
+                var urlRequest = URLRequest(url: source.url, timeoutInterval: 60)
+                urlRequest.setValue("TinyCloudMusic/1.0 macOS", forHTTPHeaderField: "User-Agent")
+                let result = try await transfer.download(request: urlRequest, resumeData: resumeData)
+                do {
+                    guard let response = result.response as? HTTPURLResponse else {
+                        throw MusicDownloadError.invalidResponse
+                    }
+                    guard (200..<300).contains(response.statusCode) else {
+                        throw MusicDownloadHTTPError(
+                            statusCode: response.statusCode,
+                            retryAfter: retryPolicy.retryAfter(from: response)
+                        )
+                    }
+                    try validateDownloadedAudio(
+                        at: result.temporaryURL,
+                        response: response,
+                        expectedBytes: source.expectedBytes
+                    )
+                } catch {
+                    try? FileManager.default.removeItem(at: result.temporaryURL)
+                    throw error
                 }
-
-                let result: (URL, URLResponse)
-                if let resumeData, !resumeData.isEmpty {
-                    result = try await session.download(resumeFrom: resumeData, delegate: delegate)
-                } else {
-                    var urlRequest = URLRequest(url: source.url, timeoutInterval: 60)
-                    urlRequest.setValue("TinyCloudMusic/1.0 macOS", forHTTPHeaderField: "User-Agent")
-                    result = try await session.download(for: urlRequest, delegate: delegate)
-                }
-
-                guard let response = result.1 as? HTTPURLResponse else {
-                    throw MusicDownloadError.invalidResponse
-                }
-                guard (200..<300).contains(response.statusCode) else {
-                    throw MusicDownloadHTTPError(
-                        statusCode: response.statusCode,
-                        retryAfter: retryPolicy.retryAfter(from: response)
+                return DownloadedAudio(temporaryURL: result.temporaryURL, source: source)
+            } catch {
+                if let failure = error as? MusicDownloadFailure { throw failure }
+                let recoveredResumeData = (error as? MusicDownloadTransferPaused)?.resumeData
+                    ?? retryPolicy.resumeData(from: error)
+                    ?? resumeData
+                if Task.isCancelled || isCancellation(error) {
+                    throw MusicDownloadFailure(
+                        underlying: error,
+                        resumeData: recoveredResumeData,
+                        attempts: attempt
                     )
                 }
-                return result
-            } catch {
-                if Task.isCancelled || isCancellation(error) { throw CancellationError() }
                 lastError = error
-                let recoveredResumeData = retryPolicy.resumeData(from: error) ?? resumeData
-                let retryable = retryPolicy.shouldRetry(error)
-                let discardsResumeData = retryPolicy.shouldRefreshSource(after: error)
-                    || (!retryable && resumeData != nil)
+                let invalidPayload = (error as? MusicDownloadError) == .invalidResponse
+                let sourceNeedsRefresh = retryPolicy.shouldRefreshSource(after: error) || invalidPayload
+                let refreshesSource = sourceNeedsRefresh && !didRefreshSource
+                let retryable = retryPolicy.shouldRetry(error) && !sourceNeedsRefresh
+                let discardsResumeData = refreshesSource || (!retryable && resumeData != nil)
                 if discardsResumeData {
                     resumeData = nil
                     needsFreshSource = true
+                    didRefreshSource = didRefreshSource || refreshesSource
                 } else {
                     resumeData = recoveredResumeData
                 }
@@ -502,9 +757,7 @@ final class MusicDownloadManager {
                     resumeData: resumeData,
                     discardsResumeData: discardsResumeData
                 ))
-                let retryAfter = (error as? MusicDownloadHTTPError)?.retryAfter
-                let baseDelay = retryPolicy.delay(forRetry: retry, retryAfter: retryAfter)
-                let delay = retryAfter == nil ? baseDelay * Double.random(in: 0.9...1.1) : baseDelay
+                let delay = retryDelay(after: error, retry: retry, policy: retryPolicy)
                 if delay > 0 { try await Task.sleep(for: .seconds(delay)) }
             }
         }
@@ -519,82 +772,116 @@ final class MusicDownloadManager {
         min(max(audioProgress, 0), 1) * min(max(weight, 0), 1)
     }
 
+    private nonisolated static func resolvedSourceWithRetry(
+        for request: MusicDownloadRequest,
+        transport: EAPITransport,
+        retryPolicy: MusicDownloadRetryPolicy,
+        update: @escaping @Sendable (MusicDownloadUpdate) -> Void
+    ) async throws -> ResolvedSource {
+        var lastError: Error = MusicDownloadError.invalidResponse
+        for attempt in 1...retryPolicy.maximumAttempts {
+            do {
+                try Task.checkCancellation()
+                let source = try await resolvedSource(for: request, transport: transport)
+                update(.metadata(level: source.level, expectedBytes: source.expectedBytes))
+                return source
+            } catch {
+                if Task.isCancelled || isCancellation(error) { throw CancellationError() }
+                lastError = error
+                guard attempt < retryPolicy.maximumAttempts, retryPolicy.shouldRetry(error) else {
+                    throw MusicDownloadFailure(underlying: error, resumeData: nil, attempts: attempt)
+                }
+                update(.retrying(
+                    attempt: attempt,
+                    total: retryPolicy.maximumRetryCount,
+                    progress: nil,
+                    resumeData: nil,
+                    discardsResumeData: false
+                ))
+                let delay = retryDelay(after: error, retry: attempt, policy: retryPolicy)
+                if delay > 0 { try await Task.sleep(for: .seconds(delay)) }
+            }
+        }
+        throw MusicDownloadFailure(
+            underlying: lastError,
+            resumeData: nil,
+            attempts: retryPolicy.maximumAttempts
+        )
+    }
+
     private nonisolated static func resolvedSource(
         for request: MusicDownloadRequest,
         transport: EAPITransport
-    ) async throws -> (url: URL, type: String, level: String?, expectedBytes: Int64?) {
+    ) async throws -> ResolvedSource {
         if case .cloud = request.source {
             let source = try await LiveMusicLibrary(transport: transport).cloudDownloadSource(songID: request.songID)
-            return (source.url, source.type, nil, request.expectedBytes)
+            return ResolvedSource(
+                url: source.url,
+                type: source.type,
+                level: nil,
+                expectedBytes: request.expectedBytes
+            )
         }
 
         let selection = try await downloadSelection(for: request, transport: transport)
-        do {
-            let source = try await audioSource(
-                songID: request.songID,
-                level: selection.level,
-                requiresExactLevel: request.quality == .best,
-                transport: transport
-            )
-            return (
-                source.url,
-                source.type,
-                source.level,
-                selection.sizes[source.level] ?? source.expectedBytes
-            )
-        } catch {
-            guard request.quality == .best,
-                  shouldRetryAtLowerLevel(after: error),
-                  let fallbackLevel = nextLowerLevel(after: selection.level)
-            else { throw error }
-            let source = try await audioSource(
-                songID: request.songID,
-                level: fallbackLevel,
-                requiresExactLevel: true,
-                transport: transport
-            )
-            return (
-                source.url,
-                source.type,
-                source.level,
-                selection.sizes[source.level] ?? source.expectedBytes
-            )
+        var lastError: Error = MusicDownloadError.unavailable
+        for level in selection.levels {
+            do {
+                let source = try await audioSource(
+                    songID: request.songID,
+                    level: level,
+                    requiresExactLevel: true,
+                    transport: transport
+                )
+                return ResolvedSource(
+                    url: source.url,
+                    type: source.type,
+                    level: source.level,
+                    expectedBytes: source.expectedBytes ?? selection.sizes[source.level]
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                guard request.quality == .best, shouldFallbackQuality(after: error) else { throw error }
+                lastError = error
+            }
         }
+        throw lastError
     }
 
     nonisolated static func downloadLevel(
         for request: MusicDownloadRequest,
         transport: EAPITransport
     ) async throws -> String {
-        try await downloadSelection(for: request, transport: transport).level
+        guard let level = try await downloadSelection(for: request, transport: transport).levels.first else {
+            throw EAPIError.missingData("highestAvailableQuality")
+        }
+        return level
     }
 
     private nonisolated static func downloadSelection(
         for request: MusicDownloadRequest,
         transport: EAPITransport
-    ) async throws -> (level: String, sizes: [String: Int64]) {
-        let requestedLevel: String = switch request.quality {
-        case .standard: "standard"
-        case .lossless: "lossless"
-        case .best: ""
+    ) async throws -> (levels: [String], sizes: [String: Int64]) {
+        switch request.quality {
+        case .standard:
+            return (["standard"], [:])
+        case .lossless:
+            return (["lossless"], [:])
+        case .best:
+            break
         }
-        let qualities: [SongQualityDetail]
-        do {
-            qualities = try await LiveMusicRepository(transport: transport)
-                .songQualityDetails(for: request.songID)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            if request.quality == .best { throw error }
-            return (requestedLevel, [:])
-        }
-        let level = request.quality == .best
-            ? SongQualityDetail.highestAvailableLevel(in: qualities)
-            : requestedLevel
-        guard let level, !level.isEmpty else {
+
+        let qualities = try await LiveMusicRepository(transport: transport)
+            .songQualityDetails(for: request.songID)
+        let available = qualities.filter(\.isAvailable).sorted { $0.rank > $1.rank }
+        guard !available.isEmpty else {
             throw EAPIError.missingData("highestAvailableQuality")
         }
-        return (level, Dictionary(uniqueKeysWithValues: qualities.map { ($0.id, $0.size) }))
+        return (
+            available.map(\.id),
+            Dictionary(uniqueKeysWithValues: available.map { ($0.id, $0.size) })
+        )
     }
 
     nonisolated static func audioSource(
@@ -611,13 +898,32 @@ final class MusicDownloadManager {
             iPhoneClient: true
         )
         let root = try decodedJSONObject(data)
+        guard root["code"] != nil else { throw MusicDownloadError.invalidResponse }
+        let rootCode = root.int("code")
+        guard rootCode == 0 || (200..<300).contains(rootCode) else {
+            if rootCode == 404 { throw MusicDownloadError.unavailable }
+            throw EAPIError.service(code: rootCode, message: root.string("message"))
+        }
         let value = root.array("data").first ?? root.object("data")
+        guard !value.isEmpty, value.int64("id") == songID else {
+            throw MusicDownloadError.invalidResponse
+        }
+        guard value["code"] != nil else { throw MusicDownloadError.invalidResponse }
+        let itemCode = value.int("code")
+        guard itemCode == 0 || (200..<300).contains(itemCode) else {
+            if itemCode == 404 { throw MusicDownloadError.unavailable }
+            throw EAPIError.service(code: itemCode, message: value.string("message"))
+        }
         let actualLevel = value.string("level")
         guard !requiresExactLevel || actualLevel == level else {
             throw MusicDownloadError.qualityMismatch
         }
-        guard let url = URL(string: value.string("url")), !value.string("url").isEmpty else {
+        let rawURL = value.string("url")
+        guard !rawURL.isEmpty, let sourceURL = URL(string: rawURL) else {
             throw MusicDownloadError.unavailable
+        }
+        guard let url = CloudMusicDecoder.normalizedDownloadURL(sourceURL) else {
+            throw MusicDownloadError.invalidResponse
         }
         let size = value.int64("size")
         return (url, value.string("type"), actualLevel.nonEmpty ?? level, size > 0 ? size : nil)
@@ -628,27 +934,83 @@ final class MusicDownloadManager {
     }
 
     nonisolated static func nextLowerLevel(after level: String) -> String? {
-        switch level {
-        case "jymaster": "sky"
-        case "sky": "jyeffect"
-        case "jyeffect": "hires"
-        case "hires": "lossless"
-        case "lossless": "exhigh"
-        case "exhigh": "higher"
-        case "higher": "standard"
-        default: nil
+        guard let index = SongQualityDetail.orderedLevels.firstIndex(of: level), index > 0 else { return nil }
+        return SongQualityDetail.orderedLevels[index - 1]
+    }
+
+    private nonisolated static func shouldFallbackQuality(after error: Error) -> Bool {
+        guard let error = error as? MusicDownloadError else { return false }
+        return error == .unavailable || error == .qualityMismatch
+    }
+
+    nonisolated static func retryDelay(
+        after error: Error,
+        retry: Int,
+        policy: MusicDownloadRetryPolicy
+    ) -> TimeInterval {
+        let retryAfter = (error as? MusicDownloadHTTPError)?.retryAfter
+        let base = policy.delay(forRetry: retry, retryAfter: retryAfter)
+        guard retryAfter != nil else { return base * Double.random(in: 0.9...1.1) }
+        guard base > 0 else { return 0 }
+        return base + Double.random(in: 0...min(max(base * 0.1, 0.05), 1))
+    }
+
+    private nonisolated static func fileIdentity(
+        for request: MusicDownloadRequest,
+        source: ResolvedSource
+    ) -> (stem: String, audioExtension: String) {
+        let prefix = request.artists.isEmpty ? request.songName : "\(request.artists) - \(request.songName)"
+        let label = source.level.map { "【\(qualityLabel($0))】" } ?? ""
+        let cleaned = MusicDownloadFiles.sanitizedFileName(label + prefix)
+        let idSuffix = " [\(request.songID)]"
+        let byteLimit = max(0, 180 - idSuffix.utf8.count)
+        var usedBytes = 0
+        let shortened = cleaned.prefix { character in
+            let count = String(character).utf8.count
+            guard usedBytes + count <= byteLimit else { return false }
+            usedBytes += count
+            return true
+        }
+        let stem = shortened.isEmpty ? String(request.songID) : String(shortened) + idSuffix
+        let fallbackExtension = if case let .cloud(_, fileName) = request.source {
+            URL(fileURLWithPath: fileName).pathExtension
+        } else {
+            ""
+        }
+        return (stem, sanitizedExtension(source.type.nonEmpty ?? fallbackExtension))
+    }
+
+    private nonisolated static func ensureAvailableCapacity(for expectedBytes: Int64?, at directory: URL) throws {
+        guard let expectedBytes, expectedBytes > 0,
+              let available = try? directory.resourceValues(
+                  forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+              ).volumeAvailableCapacityForImportantUsage
+        else { return }
+        let reserve = min(max(expectedBytes / 20, 1_048_576), 32 * 1_048_576)
+        let required = expectedBytes.addingReportingOverflow(reserve)
+        guard !required.overflow, available >= required.partialValue else {
+            throw MusicDownloadError.insufficientSpace
         }
     }
 
-    private nonisolated static func shouldRetryAtLowerLevel(after error: Error) -> Bool {
-        if let error = error as? MusicDownloadError {
-            return error == .unavailable || error == .qualityMismatch
+    private nonisolated static func validateDownloadedAudio(
+        at url: URL,
+        response: HTTPURLResponse,
+        expectedBytes: Int64?
+    ) throws {
+        let size = try MusicDownloadFiles.validatedAudioFileSize(at: url)
+
+        if let mimeType = response.mimeType?.lowercased(),
+           mimeType.hasPrefix("text/")
+            || mimeType.hasPrefix("image/")
+            || mimeType == "application/json"
+            || mimeType.hasSuffix("+json")
+            || mimeType == "application/xml"
+            || mimeType.hasSuffix("+xml") {
+            throw MusicDownloadError.invalidResponse
         }
-        guard let error = error as? EAPIError else { return false }
-        switch error {
-        case let .http(status): return status >= 500
-        case let .service(code, _): return code >= 500
-        default: return false
+        if let expectedBytes, expectedBytes > 0 {
+            guard size == expectedBytes else { throw MusicDownloadError.invalidResponse }
         }
     }
 
@@ -725,7 +1087,7 @@ final class MusicDownloadManager {
 
     private nonisolated static func sanitizedExtension(_ value: String) -> String {
         let result = value.lowercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
-        return result.isEmpty ? "mp3" : result
+        return result.isEmpty ? "mp3" : String(result.prefix(10))
     }
 
     private nonisolated static func qualityLabel(_ level: String) -> String {
@@ -744,56 +1106,40 @@ final class MusicDownloadManager {
     }
 }
 
-private final class MusicDownloadProgressDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
-    let progress: @Sendable (Double) -> Void
-    let allowsRequest: @Sendable (URLRequest) -> Bool
-    let expectedContentLength: Int64?
+private final class MusicDownloadProgressReporter: @unchecked Sendable {
+    private let weight: Double
+    private let updateProgress: @Sendable (MusicDownloadUpdate) -> Void
     private let lock = NSLock()
     private var throttle = MusicDownloadProgressThrottle()
+    private var expectedBytes: Int64?
 
     init(
-        progress: @escaping @Sendable (Double) -> Void,
-        expectedContentLength: Int64? = nil,
-        allowsRequest: @escaping @Sendable (URLRequest) -> Bool = { _ in true }
+        weight: Double,
+        update: @escaping @Sendable (MusicDownloadUpdate) -> Void
     ) {
-        self.progress = progress
-        self.expectedContentLength = expectedContentLength
-        self.allowsRequest = allowsRequest
+        self.weight = weight
+        updateProgress = update
     }
 
-    func urlSession(
-        _ session: URLSession,
-        downloadTask: URLSessionDownloadTask,
-        didWriteData bytesWritten: Int64,
+    func setExpectedBytes(_ value: Int64?) {
+        lock.withLock { expectedBytes = value }
+    }
+
+    func update(
         totalBytesWritten: Int64,
-        totalBytesExpectedToWrite: Int64
+        totalBytesExpectedToWrite: Int64,
+        responseExpectedContentLength: Int64
     ) {
-        lock.lock()
-        let value = throttle.update(
-            totalBytesWritten: totalBytesWritten,
-            totalBytesExpectedToWrite: totalBytesExpectedToWrite,
-            responseExpectedContentLength: expectedContentLength
-                ?? downloadTask.response?.expectedContentLength
-                ?? NSURLSessionTransferSizeUnknown
-        )
-        lock.unlock()
-        if let value { progress(value) }
-    }
-
-    func urlSession(
-        _ session: URLSession,
-        downloadTask: URLSessionDownloadTask,
-        didFinishDownloadingTo location: URL
-    ) {}
-
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        willPerformHTTPRedirection response: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping @Sendable (URLRequest?) -> Void
-    ) {
-        completionHandler(allowsRequest(request) ? request : nil)
+        let value = lock.withLock {
+            throttle.update(
+                totalBytesWritten: totalBytesWritten,
+                totalBytesExpectedToWrite: totalBytesExpectedToWrite,
+                responseExpectedContentLength: expectedBytes ?? responseExpectedContentLength
+            )
+        }
+        if let value {
+            updateProgress(.progress(MusicDownloadManager.overallProgress(audioProgress: value, weight: weight)))
+        }
     }
 }
 
