@@ -2858,9 +2858,12 @@ struct DownloadControl: View {
 
     var body: some View {
         Button {
-            if manager.isActive(songID: songID) {
-                manager.cancel(songID: songID)
-            } else {
+            switch manager.states[songID] {
+            case .queued, .running:
+                manager.pause(songID: songID)
+            case .paused:
+                manager.retry(songID: songID)
+            default:
                 start()
             }
         } label: {
@@ -2880,6 +2883,8 @@ struct DownloadControl: View {
             case .queued:
                 ProgressView()
                     .controlSize(.small)
+            case .paused:
+                Image(systemName: "play.circle")
             case .cancelled, .none:
                 Image(systemName: "arrow.down.circle")
             }
@@ -2894,10 +2899,12 @@ struct DownloadControl: View {
     private var downloadHelp: String {
         switch manager.states[songID] {
         case .running:
-            (manager.retryAttempts[songID] ?? 0) > 0 ? "取消正在重试的下载" : "取消下载"
+            (manager.retryAttempts[songID] ?? 0) > 0 ? "暂停正在重试的下载" : "暂停下载"
+        case let .paused(progress):
+            progress.map { "继续下载，已完成 \(Int($0 * 100))%" } ?? "继续下载"
         case .completed: "已下载"
         case let .failed(message): "下载失败：\(message)"
-        case .queued: "等待下载"
+        case .queued: "暂停等待中的下载"
         case .cancelled, .none: "下载"
         }
     }

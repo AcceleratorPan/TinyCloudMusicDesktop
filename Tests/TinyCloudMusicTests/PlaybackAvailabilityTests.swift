@@ -7,7 +7,7 @@ struct PlaybackAvailabilityTests {
     @Test("Playable, trial, and unavailable entries map to stable states")
     func playbackMappings() throws {
         let playable = try LiveMusicRepository.decodePlaybackSource(
-            Data(#"{"code":200,"data":[{"id":1,"url":"https://example.com/1.mp3","code":200,"level":"exhigh","type":"mp3","fee":0,"payed":0,"message":null,"freeTrialInfo":null}]}"#.utf8),
+            Data(#"{"code":200,"data":[{"id":1,"url":"https://m1.music.126.net/1.mp3","code":200,"level":"exhigh","type":"mp3","fee":0,"payed":0,"message":null,"freeTrialInfo":null}]}"#.utf8),
             expectedSongID: 1,
             requestedLevel: "standard"
         )
@@ -15,7 +15,17 @@ struct PlaybackAvailabilityTests {
 
         do {
             _ = try LiveMusicRepository.decodePlaybackSource(
-                Data(#"{"code":200,"data":[{"id":1,"url":"https://example.com/1.flac","code":200,"level":"lossless"}]}"#.utf8),
+                Data(#"{"code":200,"data":[{"id":1,"url":"https://example.com/1.mp3","code":200,"level":"standard"}]}"#.utf8),
+                expectedSongID: 1,
+                requestedLevel: "standard"
+            )
+            Issue.record("Untrusted playback hosts must be rejected")
+        } catch EAPIError.invalidResponse {
+        }
+
+        do {
+            _ = try LiveMusicRepository.decodePlaybackSource(
+                Data(#"{"code":200,"data":[{"id":1,"url":"https://m1.music.126.net/1.flac","code":200,"level":"lossless"}]}"#.utf8),
                 expectedSongID: 1,
                 requestedLevel: "jyeffect",
                 requiresExactLevel: true
@@ -26,7 +36,7 @@ struct PlaybackAvailabilityTests {
         }
 
         let trial = try LiveMusicRepository.decodePlaybackSource(
-            Data(#"{"code":200,"data":[{"id":2,"url":"https://example.com/2.mp3","code":200,"level":"standard","type":"mp3","fee":1,"payed":0,"message":null,"freeTrialInfo":{"start":0,"end":30}}]}"#.utf8),
+            Data(#"{"code":200,"data":[{"id":2,"url":"https://m1.music.126.net/2.mp3","code":200,"level":"standard","type":"mp3","fee":1,"payed":0,"message":null,"freeTrialInfo":{"start":0,"end":30}}]}"#.utf8),
             expectedSongID: 2,
             requestedLevel: "standard"
         )

@@ -281,7 +281,10 @@ struct LiveMusicRepository: MusicRepository {
         let message = safePlaybackMessage(item.string("message"))
         let trial = item["freeTrialInfo"] as? [String: Any]
 
-        if let url = URL(string: value), !value.isEmpty, (200..<300).contains(code) {
+        if let sourceURL = URL(string: value), !value.isEmpty, (200..<300).contains(code) {
+            guard let url = CloudMusicDecoder.normalizedDownloadURL(sourceURL) else {
+                throw EAPIError.invalidResponse
+            }
             guard !requiresExactLevel || level == requestedLevel else {
                 throw AppError.unavailable("服务端未返回所选音质，已保留当前音质")
             }

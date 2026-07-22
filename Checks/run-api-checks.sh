@@ -14,6 +14,7 @@ COMMON_SOURCES=(
   Sources/TinyCloudMusic/CredentialStore.swift
   Sources/TinyCloudMusic/EAPITransport.swift
   Sources/TinyCloudMusic/MusicDownloadModels.swift
+  Sources/TinyCloudMusic/MusicDownloadTransfer.swift
   Sources/TinyCloudMusic/MusicDownloadInfrastructure.swift
   Sources/TinyCloudMusic/CloudMusicModels.swift
   Sources/TinyCloudMusic/MusicLibraryModels.swift

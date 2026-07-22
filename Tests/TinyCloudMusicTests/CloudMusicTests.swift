@@ -61,7 +61,7 @@ private final class CloudMusicProtocol: URLProtocol, @unchecked Sendable {
         case "/eapi/cloud/lyric/get":
             body = Data(#"{"code":200,"lrc":{"lyric":""},"tlyric":{"lyric":""}}"#.utf8)
         case "/cloud-audio":
-            body = Data([1, 2, 3, 4])
+            body = Data("fLaC".utf8)
         default:
             body = Data(#"{"code":404}"#.utf8)
         }
@@ -146,8 +146,18 @@ private func verifyCloudModelsAndSecurity() throws {
           LiveMusicLibrary.cloudLyricEndpoint.logicalPath == "/api/cloud/lyric/get",
           CloudMusicDecoder.isAllowedDownloadURL(URL(string: "https://m1.music.126.net/file.flac")!),
           !CloudMusicDecoder.isAllowedDownloadURL(URL(string: "http://m1.music.126.net/file.flac")!),
+          CloudMusicDecoder.normalizedDownloadURL(URL(string: "http://m1.music.126.net/file.flac")!)?.scheme == "https",
           !CloudMusicDecoder.isAllowedDownloadURL(URL(string: "https://music.126.net.evil.test/file.flac")!)
     else { throw CloudMusicCheckError.failed("Cloud endpoint or URL validation failed") }
+
+    do {
+        _ = try CloudMusicDecoder.downloadSource([
+            "code": 200,
+            "data": ["songId": 2, "url": "https://m1.music.126.net/file.flac"]
+        ], expectedSongID: 1)
+        throw CloudMusicCheckError.failed("Cloud source song identity was not validated")
+    } catch MusicDownloadError.invalidResponse {
+    }
 }
 
 @MainActor
@@ -172,9 +182,15 @@ private func verifyCloudDetailBatchingAndURLCache() async throws {
 private func verifyCloudDownloadWithoutLyricsAndCancellation() async throws {
     CloudMusicProtocol.reset()
     let (transport, session) = cloudTransport()
-    let manager = MusicDownloadManager(transport: transport, session: session)
+    defer { session.invalidateAndCancel() }
     let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
     defer { try? FileManager.default.removeItem(at: root) }
+    let manager = MusicDownloadManager(
+        transport: transport,
+        session: session,
+        resumeStore: MusicDownloadResumeStore(directory: root.appending(path: "resume")),
+        targetAllocator: MusicDownloadTargetAllocator()
+    )
     let cloudSong = CloudSong(
         id: 90,
         song: nil,
@@ -307,6 +323,52 @@ private func verifyDownloadConcurrencyLimit() async throws {
     }
 }
 
+@MainActor
+private func verifyCloudRecoveryAccountFilter() throws {
+    CloudMusicProtocol.reset(blockAudio: true)
+    let (transport, session) = cloudTransport()
+    defer { session.invalidateAndCancel() }
+    let root = FileManager.default.temporaryDirectory
+        .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = MusicDownloadResumeStore(directory: root.appending(path: "resume"))
+    let manager = MusicDownloadManager(
+        transport: transport,
+        session: session,
+        maximumConcurrentDownloads: 1,
+        resumeStore: store,
+        targetAllocator: MusicDownloadTargetAllocator()
+    )
+    for (songID, userID) in [(301 as Int64, 7 as Int64), (302, 8)] {
+        _ = manager.enqueue(
+            cloudSong: CloudSong(
+                id: songID,
+                song: nil,
+                name: "Account \(userID)",
+                artist: "Artist",
+                album: "",
+                fileName: "\(songID).flac",
+                fileSize: 4,
+                addedAt: nil
+            ),
+            userID: userID,
+            to: root,
+            includeLyrics: false
+        )
+    }
+
+    manager.cancelCloudDownloads(exceptUserID: 7)
+    let recoveredUserIDs = store.recoverableDownloads().compactMap { recovery -> Int64? in
+        guard case let .cloud(userID, _) = recovery.request.source else { return nil }
+        return userID
+    }
+    guard manager.states[301] == .running(progress: nil),
+          manager.states[302] == .cancelled,
+          recoveredUserIDs == [7]
+    else { throw CloudMusicCheckError.failed("Matching cloud recovery was cancelled during account setup") }
+    manager.cancelAll()
+}
+
 #if CLOUD_MUSIC_CHECK
 @main
 private enum CloudMusicCheck {
@@ -316,6 +378,7 @@ private enum CloudMusicCheck {
         try await verifyCloudDetailBatchingAndURLCache()
         try await verifyCloudDownloadWithoutLyricsAndCancellation()
         try await verifyDownloadConcurrencyLimit()
+        try verifyCloudRecoveryAccountFilter()
         print("Cloud music checks passed")
     }
 }
@@ -341,6 +404,11 @@ struct CloudMusicTests {
     @Test("Concurrent downloads obey the live 1-5 scheduler limit")
     func concurrencyLimit() async throws {
         try await verifyDownloadConcurrencyLimit()
+    }
+
+    @Test("Account setup keeps matching recovered cloud downloads")
+    func cloudRecoveryAccountFilter() throws {
+        try verifyCloudRecoveryAccountFilter()
     }
 }
 #endif

@@ -949,7 +949,7 @@ final class AppModel {
     }
 
     private func resetAccountScopedState(userID: Int64?) {
-        downloads?.cancelCloudDownloads()
+        downloads?.cancelCloudDownloads(exceptUserID: userID)
         homeGeneration &+= 1
         homeTasks.values.forEach { $0.task.cancel() }
         homeTasks.removeAll()

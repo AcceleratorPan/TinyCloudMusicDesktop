@@ -3,6 +3,7 @@ import Foundation
 enum MusicDownloadState: Equatable, Sendable {
     case queued
     case running(progress: Double?)
+    case paused(progress: Double?)
     case completed(audioURL: URL, lyricURL: URL?)
     case failed(String)
     case cancelled
@@ -42,6 +43,7 @@ enum MusicDownloadError: LocalizedError, Equatable, Sendable {
     case qualityMismatch
     case invalidResponse
     case emptyFile
+    case insufficientSpace
     case destinationExists
 
     var errorDescription: String? {
@@ -50,6 +52,7 @@ enum MusicDownloadError: LocalizedError, Equatable, Sendable {
         case .qualityMismatch: "服务端未返回要求的最高音质，已取消下载以避免降质"
         case .invalidResponse: "音频下载请求失败"
         case .emptyFile: "下载文件为空"
+        case .insufficientSpace: "下载目录可用空间不足"
         case .destinationExists: "下载目标已存在"
         }
     }
@@ -108,7 +111,7 @@ enum MusicDownloadFiles {
     ) -> MusicDownloadResult? {
         let audioURL = directory.appending(path: stem).appendingPathExtension(audioExtension)
         guard fileManager.fileExists(atPath: audioURL.path),
-              ((try? fileSize(at: audioURL)) ?? 0) > 0
+              (try? validatedAudioFileSize(at: audioURL)) != nil
         else { return nil }
         let lyricURL = directory.appending(path: stem).appendingPathExtension("lrc")
         return MusicDownloadResult(
@@ -156,6 +159,31 @@ enum MusicDownloadFiles {
         guard try fileSize(at: partURL) > 0 else { throw MusicDownloadError.emptyFile }
         guard !fileManager.fileExists(atPath: finalURL.path) else { throw MusicDownloadError.destinationExists }
         try fileManager.moveItem(at: partURL, to: finalURL)
+    }
+
+    static func validatedAudioFileSize(at url: URL) throws -> Int64 {
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        let size = Int64(values.fileSize ?? 0)
+        guard values.isRegularFile == true, size > 0 else { throw MusicDownloadError.invalidResponse }
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let bytes = [UInt8](try handle.read(upToCount: 16) ?? Data())
+        guard looksLikeAudio(bytes) else { throw MusicDownloadError.invalidResponse }
+        return size
+    }
+
+    private static func looksLikeAudio(_ bytes: [UInt8]) -> Bool {
+        func matches(_ value: String, at offset: Int = 0) -> Bool {
+            let pattern = Array(value.utf8)
+            guard bytes.count >= offset + pattern.count else { return false }
+            return bytes[offset..<(offset + pattern.count)].elementsEqual(pattern)
+        }
+        return matches("ID3")
+            || matches("fLaC")
+            || matches("OggS")
+            || matches("RIFF")
+            || matches("ftyp", at: 4)
+            || (bytes.count >= 2 && bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0)
     }
 
     private static func fileSize(at url: URL) throws -> Int {

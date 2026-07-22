@@ -30,11 +30,10 @@ struct MusicDownloadRetryPolicy: Equatable, Sendable {
     var maximumRetryCount: Int { max(0, maximumAttempts - 1) }
 
     func delay(forRetry retry: Int, retryAfter: TimeInterval? = nil) -> TimeInterval {
-        if let retryAfter, retryAfter >= 0 {
-            return min(retryAfter, 60)
-        }
         let exponent = max(0, retry - 1)
-        return min(baseDelay * pow(2, Double(exponent)), maximumDelay)
+        let exponential = min(baseDelay * pow(2, Double(exponent)), maximumDelay)
+        guard let retryAfter, retryAfter >= 0 else { return exponential }
+        return max(exponential, min(retryAfter, 300))
     }
 
     func shouldRetry(_ error: Error) -> Bool {
@@ -60,7 +59,7 @@ struct MusicDownloadRetryPolicy: Equatable, Sendable {
             case let .http(status):
                 return status == 408 || status == 429 || (500...599).contains(status)
             case let .service(code, _):
-                return code == 408 || code == 429 || code >= 500
+                return code == 408 || code == 429 || (500...599).contains(code)
             case .invalidResponse:
                 return true
             default:
@@ -93,6 +92,7 @@ struct MusicDownloadRetryPolicy: Equatable, Sendable {
     }
 
     func resumeData(from error: Error) -> Data? {
+        if let error = error as? MusicDownloadTransferPaused { return error.resumeData }
         let error = error as NSError
         return error.userInfo[NSURLSessionDownloadTaskResumeData] as? Data
     }
@@ -124,7 +124,8 @@ struct MusicDownloadFailure: LocalizedError, @unchecked Sendable {
 actor MusicDownloadTargetAllocator {
     static let shared = MusicDownloadTargetAllocator()
 
-    private var reservedAudioPaths: Set<String> = []
+    private var reservedPaths: Set<String> = []
+    private var cleanedDirectories: Set<String> = []
 
     func reserve(
         in directory: URL,
@@ -132,16 +133,20 @@ actor MusicDownloadTargetAllocator {
         audioExtension: String,
         fileManager: FileManager = .default
     ) -> MusicDownloadTargets {
+        let directoryPath = directory.standardizedFileURL.path
+        if cleanedDirectories.insert(directoryPath).inserted {
+            MusicDownloadPartialFiles.removeStale(in: directory, fileManager: fileManager)
+        }
         var index = 1
         while true {
             let suffix = index == 1 ? "" : " (\(index))"
             let base = stem + suffix
             let audioFinal = directory.appending(path: base).appendingPathExtension(audioExtension)
             let lyricFinal = directory.appending(path: base).appendingPathExtension("lrc")
-            let audioPath = audioFinal.standardizedFileURL.path
-            if !reservedAudioPaths.contains(audioPath),
+            let paths = Set([audioFinal, lyricFinal].map { $0.standardizedFileURL.path })
+            if reservedPaths.isDisjoint(with: paths),
                [audioFinal, lyricFinal].allSatisfy({ !fileManager.fileExists(atPath: $0.path) }) {
-                reservedAudioPaths.insert(audioPath)
+                reservedPaths.formUnion(paths)
                 let token = UUID().uuidString
                 return MusicDownloadTargets(
                     audioFinal: audioFinal,
@@ -155,36 +160,149 @@ actor MusicDownloadTargetAllocator {
     }
 
     func release(_ targets: MusicDownloadTargets) {
-        reservedAudioPaths.remove(targets.audioFinal.standardizedFileURL.path)
+        reservedPaths.subtract(
+            [targets.audioFinal, targets.lyricFinal].map { $0.standardizedFileURL.path }
+        )
     }
 }
 
+enum MusicDownloadPartialFiles {
+    private static let defaultMaximumAge: TimeInterval = 24 * 60 * 60
+
+    @discardableResult
+    static func removeStale(
+        in directory: URL,
+        olderThan maximumAge: TimeInterval = defaultMaximumAge,
+        now: Date = Date(),
+        fileManager: FileManager = .default
+    ) -> Int {
+        let keys: Set<URLResourceKey> = [.contentModificationDateKey, .creationDateKey, .isRegularFileKey]
+        guard let urls = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles]
+        ) else { return 0 }
+
+        var removed = 0
+        for url in urls where url.pathExtension == "part"
+            && UUID(uuidString: url.deletingPathExtension().pathExtension) != nil {
+            guard let values = try? url.resourceValues(forKeys: keys),
+                  values.isRegularFile == true,
+                  let modifiedAt = values.contentModificationDate ?? values.creationDate,
+                  now.timeIntervalSince(modifiedAt) > max(0, maximumAge)
+            else { continue }
+            do {
+                try fileManager.removeItem(at: url)
+                removed += 1
+            } catch {
+                // Cleanup is best-effort; a failed deletion must not block a download.
+            }
+        }
+        return removed
+    }
+}
+
+struct MusicDownloadRecovery: Equatable, Sendable {
+    let request: MusicDownloadRequest
+    let resumeData: Data?
+    let savedAt: Date
+}
+
 final class MusicDownloadResumeStore: @unchecked Sendable {
+    private struct StoredRequest: Codable {
+        private enum Source: Codable {
+            case catalog
+            case cloud(userID: Int64, fileName: String)
+        }
+
+        let songID: Int64
+        let songName: String
+        let artists: String
+        let destinationBookmark: Data?
+        let destinationPath: String
+        let quality: AudioQuality
+        let includeLyrics: Bool
+        private let source: Source
+        let expectedBytes: Int64?
+
+        init(_ request: MusicDownloadRequest) {
+            songID = request.songID
+            songName = request.songName
+            artists = request.artists
+            destinationBookmark = try? request.destination.bookmarkData(
+                options: .withSecurityScope,
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+            destinationPath = request.destination.standardizedFileURL.path
+            quality = request.quality
+            includeLyrics = request.includeLyrics
+            source = switch request.source {
+            case .catalog: .catalog
+            case let .cloud(userID, fileName): .cloud(userID: userID, fileName: fileName)
+            }
+            expectedBytes = request.expectedBytes
+        }
+
+        func restored() -> MusicDownloadRequest? {
+            let destination: URL
+            var bookmarkIsStale = false
+            if let destinationBookmark,
+               let bookmarkedURL = try? URL(
+                   resolvingBookmarkData: destinationBookmark,
+                   options: .withSecurityScope,
+                   relativeTo: nil,
+                   bookmarkDataIsStale: &bookmarkIsStale
+               ), bookmarkedURL.isFileURL {
+                destination = bookmarkedURL
+            } else {
+                guard destinationPath.hasPrefix("/") else { return nil }
+                destination = URL(fileURLWithPath: destinationPath, isDirectory: true)
+            }
+            let source: MusicDownloadSource = switch source {
+            case .catalog: .catalog
+            case let .cloud(userID, fileName): .cloud(userID: userID, fileName: fileName)
+            }
+            return MusicDownloadRequest(
+                songID: songID,
+                songName: songName,
+                artists: artists,
+                destination: destination,
+                quality: quality,
+                includeLyrics: includeLyrics,
+                source: source,
+                expectedBytes: expectedBytes
+            )
+        }
+    }
+
     private struct Record: Codable {
         let signature: String
-        let resumeData: Data
+        let request: StoredRequest?
+        let resumeData: Data?
         let savedAt: Date
+        let updatedAt: Date?
     }
 
     static let shared = MusicDownloadResumeStore()
 
     private let directory: URL
     private let lock = NSLock()
-    private let maximumAge: TimeInterval = 7 * 24 * 60 * 60
+    private let maximumAge: TimeInterval
 
-    init(directory: URL? = nil) {
-        self.directory = directory ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+    init(directory: URL? = nil, maximumAge: TimeInterval = 7 * 24 * 60 * 60) {
+        self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appending(path: "TinyCloudMusic", directoryHint: .isDirectory)
             .appending(path: "DownloadResume", directoryHint: .isDirectory)
+        self.maximumAge = max(0, maximumAge)
     }
 
     func load(for request: MusicDownloadRequest) -> Data? {
         lock.withLock {
             let url = recordURL(songID: request.songID)
-            guard let data = try? Data(contentsOf: url),
-                  let record = try? PropertyListDecoder().decode(Record.self, from: data),
+            guard let record = record(at: url),
                   record.signature == signature(for: request),
-                  Date().timeIntervalSince(record.savedAt) <= maximumAge
+                  !isExpired(record, now: Date())
             else {
                 try? FileManager.default.removeItem(at: url)
                 return nil
@@ -195,19 +313,34 @@ final class MusicDownloadResumeStore: @unchecked Sendable {
 
     func save(_ resumeData: Data, for request: MusicDownloadRequest) {
         guard !resumeData.isEmpty else { return }
+        saveRecord(request, resumeData: resumeData)
+    }
+
+    func save(_ request: MusicDownloadRequest, resumeData: Data? = nil) {
+        saveRecord(request, resumeData: resumeData.flatMap { $0.isEmpty ? nil : $0 })
+    }
+
+    func recoverableDownloads(now: Date = Date()) -> [MusicDownloadRecovery] {
         lock.withLock {
-            do {
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                let record = Record(
-                    signature: signature(for: request),
-                    resumeData: resumeData,
-                    savedAt: Date()
+            records(now: now).compactMap { record in
+                guard let request = record.request?.restored() else { return nil }
+                return MusicDownloadRecovery(
+                    request: request,
+                    resumeData: record.resumeData,
+                    savedAt: record.savedAt
                 )
-                let data = try PropertyListEncoder().encode(record)
-                try data.write(to: recordURL(songID: request.songID), options: .atomic)
-            } catch {
-                // Resume persistence is best-effort; the in-memory retry path remains available.
+            }.sorted {
+                ($0.savedAt, $0.request.songID) < ($1.savedAt, $1.request.songID)
             }
+        }
+    }
+
+    @discardableResult
+    func prune(now: Date = Date()) -> Int {
+        lock.withLock {
+            let urls = recordURLs()
+            let retained = records(now: now).count
+            return urls.count - retained
         }
     }
 
@@ -219,6 +352,55 @@ final class MusicDownloadResumeStore: @unchecked Sendable {
 
     private func recordURL(songID: Int64) -> URL {
         directory.appending(path: "\(songID).resume.plist", directoryHint: .notDirectory)
+    }
+
+    private func saveRecord(_ request: MusicDownloadRequest, resumeData: Data?) {
+        lock.withLock {
+            do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let signature = signature(for: request)
+                let now = Date()
+                let existing = record(at: recordURL(songID: request.songID))
+                let record = Record(
+                    signature: signature,
+                    request: StoredRequest(request),
+                    resumeData: resumeData,
+                    savedAt: existing?.signature == signature ? existing?.savedAt ?? now : now,
+                    updatedAt: now
+                )
+                let data = try PropertyListEncoder().encode(record)
+                try data.write(to: recordURL(songID: request.songID), options: .atomic)
+            } catch {
+                // Resume persistence is best-effort; the in-memory retry path remains available.
+            }
+        }
+    }
+
+    private func record(at url: URL) -> Record? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? PropertyListDecoder().decode(Record.self, from: data)
+    }
+
+    private func recordURLs() -> [URL] {
+        ((try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []).filter { $0.lastPathComponent.hasSuffix(".resume.plist") }
+    }
+
+    private func records(now: Date) -> [Record] {
+        recordURLs().compactMap { url in
+            guard let record = record(at: url), !isExpired(record, now: now) else {
+                try? FileManager.default.removeItem(at: url)
+                return nil
+            }
+            return record
+        }
+    }
+
+    private func isExpired(_ record: Record, now: Date) -> Bool {
+        now.timeIntervalSince(record.updatedAt ?? record.savedAt) > maximumAge
     }
 
     private func signature(for request: MusicDownloadRequest) -> String {

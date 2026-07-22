@@ -975,12 +975,15 @@ struct EAPITransport: Sendable {
     ) async throws -> EAPIHTTPResponse {
         var lastError: Error = EAPIError.invalidResponse
         let attemptCount = retryable ? 3 : 1
+        var retryAfter: TimeInterval?
 
         for attempt in 0..<attemptCount {
             try Task.checkCancellation()
             if attempt > 0 {
-                let delay = (250 << (attempt - 1)) + Int.random(in: 0...250)
-                try await Task.sleep(for: .milliseconds(delay))
+                let backoff = TimeInterval(250 << (attempt - 1)) / 1_000
+                let delay = max(backoff, retryAfter ?? 0) + Double.random(in: 0...0.25)
+                retryAfter = nil
+                try await Task.sleep(for: .seconds(delay))
             }
 
             var request = URLRequest(url: endpoint.physicalURL, timeoutInterval: 15)
@@ -1017,6 +1020,7 @@ struct EAPITransport: Sendable {
                     encoding: endpoint.responseEncoding
                 )
                 guard (200..<300).contains(http.statusCode) else {
+                    retryAfter = Self.retryAfter(from: http)
                     if let decodedData,
                        let issue = SessionCredentialIssue.detect(in: decodedData, vip: vip, musicU: musicU) {
                         reportCredentialIssue(issue)
@@ -1054,6 +1058,20 @@ struct EAPITransport: Sendable {
             }
         }
         throw lastError
+    }
+
+    static func retryAfter(from response: HTTPURLResponse) -> TimeInterval? {
+        guard let value = response.value(forHTTPHeaderField: "Retry-After")?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty
+        else { return nil }
+        if let seconds = TimeInterval(value), seconds >= 0 { return min(seconds, 300) }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss z"
+        return formatter.date(from: value).map { min(max(0, $0.timeIntervalSinceNow), 300) }
     }
 
     private static func authenticationProfile(

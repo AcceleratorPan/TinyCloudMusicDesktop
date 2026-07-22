@@ -1508,11 +1508,11 @@ struct DownloadsView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button { manager.cancelAll() } label: {
-                    Label("取消全部", systemImage: "xmark.circle")
+                Button { Task { await manager.pauseAll() } } label: {
+                    Label("暂停全部", systemImage: "pause.circle")
                 }
                 .disabled(!hasActiveDownloads)
-                .help(hasActiveDownloads ? "取消所有等待中和下载中的任务" : "没有可取消的任务")
+                .help(hasActiveDownloads ? "暂停所有等待中和下载中的任务" : "没有可暂停的任务")
             }
             .padding(.horizontal, 28)
             .padding(.vertical, 12)
@@ -1535,6 +1535,7 @@ struct DownloadsView: View {
                                     state: state,
                                     retryAttempt: manager.retryAttempts[songID] ?? 0,
                                     maximumRetryCount: manager.maximumRetryCount,
+                                    pause: { manager.pause(songID: songID) },
                                     cancel: { manager.cancel(songID: songID) },
                                     retry: { manager.retry(songID: songID) }
                                 )
@@ -1552,21 +1553,23 @@ struct DownloadsView: View {
 
     private var orderedSongIDs: [Int64] {
         let knownIDs = Set(manager.itemOrder)
-        return manager.itemOrder.filter { manager.states[$0] != nil }
+        return manager.itemOrder.reversed().filter { manager.states[$0] != nil }
             + manager.states.keys.filter { !knownIDs.contains($0) }.sorted(by: >)
     }
 
     private var summaryText: String {
         let completed = manager.states.values.filter(\.isCompletedDownload).count
+        let paused = manager.states.values.reduce(into: 0) { count, state in
+            if case .paused = state { count += 1 }
+        }
         let running = manager.runningDownloadCount
         let queued = manager.queuedDownloadCount
-        if running > 0 || queued > 0 {
-            var parts = ["\(running)/\(manager.maximumConcurrentDownloads) 首下载中"]
-            if queued > 0 { parts.append("\(queued) 首等待") }
-            if completed > 0 { parts.append("\(completed) 首已完成") }
-            return parts.joined(separator: " · ")
-        }
-        return completed > 0 ? "\(completed) 首已完成" : "下载任务与文件状态"
+        var parts: [String] = []
+        if running > 0 { parts.append("\(running)/\(manager.maximumConcurrentDownloads) 首下载中") }
+        if queued > 0 { parts.append("\(queued) 首等待") }
+        if paused > 0 { parts.append("\(paused) 首已暂停") }
+        if completed > 0 { parts.append("\(completed) 首已完成") }
+        return parts.isEmpty ? "下载任务与文件状态" : parts.joined(separator: " · ")
     }
 
     private var hasActiveDownloads: Bool {
@@ -2083,6 +2086,7 @@ private struct DownloadRow: View {
     let state: MusicDownloadState
     let retryAttempt: Int
     let maximumRetryCount: Int
+    let pause: () -> Void
     let cancel: () -> Void
     let retry: () -> Void
 
@@ -2129,6 +2133,7 @@ private struct DownloadRow: View {
         switch state {
         case .queued: "clock"
         case .running: "arrow.down.circle"
+        case .paused: "pause.circle"
         case .completed: "checkmark.circle.fill"
         case .failed: "exclamationmark.triangle"
         case .cancelled: "xmark.circle"
@@ -2140,7 +2145,7 @@ private struct DownloadRow: View {
         case .failed: .red
         case .completed: .green
         case .running: .accentColor
-        case .queued, .cancelled: .secondary
+        case .queued, .paused, .cancelled: .secondary
         }
     }
 
@@ -2177,6 +2182,22 @@ private struct DownloadRow: View {
                         .foregroundStyle(.secondary)
                 }
             }
+        case let .paused(progress):
+            Text("已暂停")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let progress {
+                HStack(spacing: 8) {
+                    ProgressView(value: progress)
+                        .frame(maxWidth: 240)
+                    Text("\(Int(progress * 100))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 38, alignment: .trailing)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("下载已暂停，进度 \(Int(progress * 100))%")
+            }
         case let .completed(audioURL, lyricURL):
             Text(lyricURL == nil ? audioURL.lastPathComponent : "\(audioURL.lastPathComponent) · 含歌词")
                 .font(.caption)
@@ -2194,14 +2215,45 @@ private struct DownloadRow: View {
     private var stateAction: some View {
         switch state {
         case .queued, .running:
-            Button(action: cancel) {
-                Image(systemName: "xmark")
+            HStack(spacing: 0) {
+                Button(action: pause) {
+                    Image(systemName: "pause.fill")
+                }
+                .buttonStyle(.borderless)
+                .help("暂停下载")
+                .accessibilityLabel("暂停 \(item.title) 的下载")
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+
+                Button(action: cancel) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .help("取消下载")
+                .accessibilityLabel("取消 \(item.title) 的下载")
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
             }
-            .buttonStyle(.borderless)
-            .help("取消下载")
-            .accessibilityLabel("取消 \(item.title) 的下载")
-            .frame(width: 44, height: 44)
-            .contentShape(Rectangle())
+        case .paused:
+            HStack(spacing: 0) {
+                Button(action: retry) {
+                    Image(systemName: "play.fill")
+                }
+                .buttonStyle(.borderless)
+                .help("继续下载")
+                .accessibilityLabel("继续 \(item.title) 的下载")
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+
+                Button(action: cancel) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .help("取消下载")
+                .accessibilityLabel("取消 \(item.title) 的下载")
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+            }
         case let .completed(audioURL, _):
             Button {
                 NSWorkspace.shared.activateFileViewerSelecting([audioURL])

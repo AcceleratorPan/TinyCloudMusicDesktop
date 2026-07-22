@@ -114,6 +114,13 @@ enum EAPICheck {
             preconditionFailure("Explicit credentials must bypass Keychain")
         }
         precondition(explicitCredentials.cookie.isEmpty && explicitCredentials.musicU.isEmpty)
+        let throttled = HTTPURLResponse(
+            url: URL(string: "https://example.com")!,
+            statusCode: 429,
+            httpVersion: nil,
+            headerFields: ["Retry-After": "12.5"]
+        )!
+        precondition(EAPITransport.retryAfter(from: throttled) == 12.5)
         do {
             _ = try decodedJSONObject(Data(#"{"code":"400","msg":"bad request"}"#.utf8))
             preconditionFailure("String service codes must be rejected")

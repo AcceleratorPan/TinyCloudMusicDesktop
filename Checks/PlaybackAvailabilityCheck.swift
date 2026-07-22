@@ -4,7 +4,7 @@ import Foundation
 enum PlaybackAvailabilityCheck {
     static func main() throws {
         let playable = try LiveMusicRepository.decodePlaybackSource(
-            Data(#"{"code":200,"data":[{"id":1,"url":"https://example.com/1.mp3","code":200,"level":"exhigh","type":"mp3","fee":0,"payed":0,"message":null,"freeTrialInfo":null}]}"#.utf8),
+            Data(#"{"code":200,"data":[{"id":1,"url":"https://m1.music.126.net/1.mp3","code":200,"level":"exhigh","type":"mp3","fee":0,"payed":0,"message":null,"freeTrialInfo":null}]}"#.utf8),
             expectedSongID: 1,
             requestedLevel: "standard"
         )
@@ -12,7 +12,17 @@ enum PlaybackAvailabilityCheck {
 
         do {
             _ = try LiveMusicRepository.decodePlaybackSource(
-                Data(#"{"code":200,"data":[{"id":1,"url":"https://example.com/1.flac","code":200,"level":"lossless"}]}"#.utf8),
+                Data(#"{"code":200,"data":[{"id":1,"url":"https://example.com/1.mp3","code":200,"level":"standard"}]}"#.utf8),
+                expectedSongID: 1,
+                requestedLevel: "standard"
+            )
+            preconditionFailure("Untrusted playback host was accepted")
+        } catch EAPIError.invalidResponse {
+        }
+
+        do {
+            _ = try LiveMusicRepository.decodePlaybackSource(
+                Data(#"{"code":200,"data":[{"id":1,"url":"https://m1.music.126.net/1.flac","code":200,"level":"lossless"}]}"#.utf8),
                 expectedSongID: 1,
                 requestedLevel: "jyeffect",
                 requiresExactLevel: true
@@ -23,7 +33,7 @@ enum PlaybackAvailabilityCheck {
         }
 
         let trial = try LiveMusicRepository.decodePlaybackSource(
-            Data(#"{"code":200,"data":[{"id":2,"url":"https://example.com/2.mp3","code":200,"level":"standard","type":"mp3","fee":1,"payed":0,"message":null,"freeTrialInfo":{"end":30}}]}"#.utf8),
+            Data(#"{"code":200,"data":[{"id":2,"url":"https://m1.music.126.net/2.mp3","code":200,"level":"standard","type":"mp3","fee":1,"payed":0,"message":null,"freeTrialInfo":{"end":30}}]}"#.utf8),
             expectedSongID: 2,
             requestedLevel: "standard"
         )

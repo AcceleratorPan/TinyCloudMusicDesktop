@@ -93,17 +93,35 @@ enum CloudMusicDecoder {
         )
     }
 
-    static func downloadSource(_ root: [String: Any]) throws -> CloudDownloadSource {
+    static func downloadSource(_ root: [String: Any], expectedSongID: Int64? = nil) throws -> CloudDownloadSource {
+        guard root["code"] != nil else { throw MusicDownloadError.invalidResponse }
         let code = root.int("code")
         guard code == 0 || (200..<300).contains(code) else {
             throw EAPIError.service(code: code, message: root.string("message"))
         }
         let value = root.object("data").isEmpty ? root : root.object("data")
+        if let expectedSongID, value["songId"] != nil, value.int64("songId") != expectedSongID {
+            throw MusicDownloadError.invalidResponse
+        }
         let rawURL = value.string("url")
-        guard !rawURL.isEmpty, let url = URL(string: rawURL), isAllowedDownloadURL(url) else {
+        guard !rawURL.isEmpty,
+              let sourceURL = URL(string: rawURL),
+              let url = normalizedDownloadURL(sourceURL)
+        else {
             throw MusicDownloadError.invalidResponse
         }
         return CloudDownloadSource(url: url, type: value.string("type"))
+    }
+
+    static func normalizedDownloadURL(_ url: URL) -> URL? {
+        if isAllowedDownloadURL(url) { return url }
+        guard url.scheme?.lowercased() == "http", url.port == nil || url.port == 80,
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        else { return nil }
+        components.scheme = "https"
+        components.port = nil
+        guard let upgraded = components.url, isAllowedDownloadURL(upgraded) else { return nil }
+        return upgraded
     }
 
     static func isAllowedDownloadURL(_ url: URL) -> Bool {

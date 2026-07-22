@@ -694,7 +694,7 @@ struct LiveMusicLibrary: Sendable {
             payload: ["songId": songID],
             cache: nil
         )
-        return try CloudMusicDecoder.downloadSource(root)
+        return try CloudMusicDecoder.downloadSource(root, expectedSongID: songID)
     }
 
     private var songDecoder: LiveMusicRepository {

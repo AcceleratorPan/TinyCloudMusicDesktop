@@ -26,6 +26,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var model: AppModel?
     private var credentialObserver: NSObjectProtocol?
     private var terminationConfirmed = false
+    private var terminationTask: Task<Void, Never>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
@@ -34,7 +35,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let repository = LiveMusicRepository(transport: transport)
         let library = LiveMusicLibrary(transport: transport)
         let extras = LiveMusicExtras(transport: transport)
-        let downloads = MusicDownloadManager(transport: transport)
+        let storedConcurrency = UserDefaults.standard.object(forKey: "downloadConcurrency") == nil
+            ? 3
+            : UserDefaults.standard.integer(forKey: "downloadConcurrency")
+        let downloads = MusicDownloadManager(
+            transport: transport,
+            maximumConcurrentDownloads: storedConcurrency
+        )
         let session = SessionController(
             transport: transport,
             validator: { credentials in
@@ -225,16 +232,28 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard terminationTask == nil else { return .terminateLater }
         guard !terminationConfirmed else { return .terminateNow }
-        terminationConfirmed = confirmTermination()
-        return terminationConfirmed ? .terminateNow : .terminateCancel
+        guard confirmTermination() else { return .terminateCancel }
+        terminationConfirmed = true
+
+        guard let downloads = model?.downloads,
+              downloads.runningDownloadCount > 0 || downloads.queuedDownloadCount > 0
+        else { return .terminateNow }
+
+        terminationTask = Task { [weak self] in
+            await downloads.pauseAll()
+            self?.terminationTask = nil
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     private func confirmTermination() -> Bool {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "确定要退出小云音乐吗？"
-        alert.informativeText = "当前播放和未完成的任务将停止。"
+        alert.informativeText = "当前播放将停止；未完成的下载会保存进度，并在下次启动时继续。"
         alert.addButton(withTitle: "退出")
         alert.addButton(withTitle: "取消")
         alert.buttons.first?.hasDestructiveAction = true
@@ -434,15 +453,22 @@ private final class MenuBarPlayerController: NSObject {
 
         switch manager.states[song.id] {
         case .queued:
-            update(downloadButton, symbol: "clock", label: "等待下载", enabled: true)
+            update(downloadButton, symbol: "pause.circle", label: "暂停等待中的下载", enabled: true)
         case let .running(progress):
             let retryAttempt = manager.retryAttempts[song.id] ?? 0
             update(
                 downloadButton,
                 symbol: "arrow.down.circle.fill",
                 label: retryAttempt > 0
-                    ? "取消下载，正在进行第 \(retryAttempt) 次断点重试"
-                    : progress.map { "取消下载，已完成 \(Int($0 * 100))%" } ?? "取消下载，正在下载",
+                    ? "暂停下载，正在进行第 \(retryAttempt) 次断点重试"
+                    : progress.map { "暂停下载，已完成 \(Int($0 * 100))%" } ?? "暂停下载，正在下载",
+                enabled: true
+            )
+        case let .paused(progress):
+            update(
+                downloadButton,
+                symbol: "play.circle",
+                label: progress.map { "继续下载，已完成 \(Int($0 * 100))%" } ?? "继续下载",
                 enabled: true
             )
         case .completed:
@@ -506,9 +532,12 @@ private final class MenuBarPlayerController: NSObject {
 
     @objc private func download() {
         guard let song = player.currentSong, let manager = model.downloads else { return }
-        if manager.isActive(songID: song.id) {
-            manager.cancel(songID: song.id)
-        } else {
+        switch manager.states[song.id] {
+        case .queued, .running:
+            manager.pause(songID: song.id)
+        case .paused:
+            manager.retry(songID: song.id)
+        default:
             model.download(song)
         }
     }
