@@ -5,12 +5,12 @@ struct AddSongToPlaylistView: View {
     let userID: Int64
     let extras: LiveMusicExtras
     let library: LiveMusicLibrary
-    let onFinished: (Int64) -> Void
+    let onFinished: (Int64, Bool) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var phase: AvailablePlaylistPhase = .idle
     @State private var addingPlaylistID: Int64?
-    @State private var failedPlaylistID: Int64?
+    @State private var failedPlaylist: MusicAvailablePlaylist?
     @State private var operationError: String?
 
     init(
@@ -18,7 +18,7 @@ struct AddSongToPlaylistView: View {
         userID: Int64,
         extras: LiveMusicExtras,
         library: LiveMusicLibrary,
-        onFinished: @escaping (Int64) -> Void
+        onFinished: @escaping (Int64, Bool) -> Void
     ) {
         self.song = song
         self.userID = userID
@@ -38,13 +38,13 @@ struct AddSongToPlaylistView: View {
                             .foregroundStyle(.red)
                             .lineLimit(2)
                         Spacer()
-                        if let failedPlaylistID {
-                            Button("重试") { add(to: failedPlaylistID) }
+                        if let failedPlaylist {
+                            Button("重试") { add(to: failedPlaylist) }
                                 .disabled(addingPlaylistID != nil)
                         }
                         Button {
                             self.operationError = nil
-                            failedPlaylistID = nil
+                            failedPlaylist = nil
                         } label: {
                             Image(systemName: "xmark")
                         }
@@ -134,7 +134,7 @@ struct AddSongToPlaylistView: View {
                     .foregroundStyle(.secondary)
             } else {
                 Button {
-                    add(to: item.id)
+                    add(to: item)
                 } label: {
                     if addingPlaylistID == item.id {
                         ProgressView()
@@ -176,21 +176,21 @@ struct AddSongToPlaylistView: View {
         }
     }
 
-    private func add(to playlistID: Int64) {
-        addingPlaylistID = playlistID
-        failedPlaylistID = nil
+    private func add(to item: MusicAvailablePlaylist) {
+        addingPlaylistID = item.id
+        failedPlaylist = nil
         operationError = nil
         Task { @MainActor in
             do {
-                try await library.addSongs([song.id], to: playlistID)
+                try await library.addSongs([song.id], to: item.id)
                 addingPlaylistID = nil
-                onFinished(playlistID)
+                onFinished(item.id, item.playlist.specialType == 5)
                 dismiss()
             } catch is CancellationError {
                 addingPlaylistID = nil
             } catch {
                 addingPlaylistID = nil
-                failedPlaylistID = playlistID
+                failedPlaylist = item
                 operationError = error.localizedDescription
             }
         }
@@ -202,74 +202,38 @@ struct RemoveSongFromPlaylistButton: View {
     let playlistID: Int64
     let library: LiveMusicLibrary
     let onRemoved: () -> Void
-
-    @State private var showConfirmation = false
-    @State private var isRemoving = false
-    @State private var errorMessage: String?
+    let onFailed: (String) -> Void
 
     init(
         songID: Int64,
         playlistID: Int64,
         library: LiveMusicLibrary,
-        onRemoved: @escaping () -> Void
+        onRemoved: @escaping () -> Void,
+        onFailed: @escaping (String) -> Void
     ) {
         self.songID = songID
         self.playlistID = playlistID
         self.library = library
         self.onRemoved = onRemoved
+        self.onFailed = onFailed
     }
 
-    var body: AnyView { AnyView(content) }
-
-    private var content: AnyView {
-        AnyView(Button(role: .destructive) {
-            showConfirmation = true
+    var body: some View {
+        Button(role: .destructive) {
+            remove()
         } label: {
-            if isRemoving {
-                HStack(spacing: 6) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("正在移除")
-                }
-            } else {
-                Label("从歌单移除", systemImage: "trash")
-            }
+            Label("从歌单移除", systemImage: "trash")
         }
-        .disabled(isRemoving)
-        .confirmationDialog("从歌单移除这首歌？", isPresented: $showConfirmation) {
-            Button("移除", role: .destructive) { remove() }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("移除后仍可重新添加。")
-        }
-        .alert("移除失败", isPresented: showsError) {
-            Button("重试") { remove() }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text(errorMessage ?? "未知错误")
-        })
-    }
-
-    private var showsError: Binding<Bool> {
-        Binding(
-            get: { errorMessage != nil },
-            set: { if !$0 { errorMessage = nil } }
-        )
     }
 
     private func remove() {
-        isRemoving = true
-        errorMessage = nil
         Task { @MainActor in
             do {
                 try await library.removeSongs([songID], from: playlistID)
-                isRemoving = false
                 onRemoved()
             } catch is CancellationError {
-                isRemoving = false
             } catch {
-                isRemoving = false
-                errorMessage = error.localizedDescription
+                onFailed(error.localizedDescription)
             }
         }
     }

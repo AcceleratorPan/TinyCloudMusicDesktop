@@ -20,6 +20,16 @@ struct PlaybackControls: View {
                     ) {
                         player.toggleShuffle()
                     }
+
+                    PlayerIconButton(
+                        symbol: "waveform.path.ecg",
+                        label: heartModeLabel,
+                        isActive: player.isHeartModeEnabled,
+                        isDisabled: player.currentSong == nil || player.isLoadingHeartMode,
+                        badge: player.isLoadingHeartMode ? "…" : (player.heartModeErrorMessage == nil ? nil : "!")
+                    ) {
+                        player.toggleHeartMode()
+                    }
                 }
 
                 PlayerIconButton(
@@ -120,6 +130,12 @@ struct PlaybackControls: View {
     private var playbackButtonLabel: String {
         if case .failed = player.state { return "重试播放" }
         return player.isPlaybackRequested ? "暂停" : "播放"
+    }
+
+    private var heartModeLabel: String {
+        if player.isLoadingHeartMode { return "正在开启心动模式" }
+        if let message = player.heartModeErrorMessage { return "心动模式失败：\(message)，点按重试" }
+        return player.isHeartModeEnabled ? "关闭心动模式" : "开启心动模式"
     }
 
     private var displayedPosition: TimeInterval {
@@ -318,6 +334,7 @@ struct NowPlayingDetailView: View {
 
             PlaybackControls(player: player)
                 .frame(maxWidth: 304)
+                .padding(.bottom, 16)
         }
     }
 

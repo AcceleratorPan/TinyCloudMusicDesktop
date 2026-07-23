@@ -11,17 +11,30 @@ struct Artwork: Hashable, Sendable {
 }
 
 enum ArtworkURLPolicy {
+    static func secureURL(for url: URL) -> URL {
+        guard url.scheme?.lowercased() == "http",
+              isNeteaseHost(url.host)
+        else { return url }
+
+        return URL(string: "https://" + url.absoluteString.dropFirst("http://".count)) ?? url
+    }
+
     static func highResolutionURL(for url: URL) -> URL {
-        guard let host = url.host?.lowercased(),
-              host == "music.126.net" || host.hasSuffix(".music.126.net")
-                || host == "music.163.com" || host.hasSuffix(".music.163.com"),
+        guard isNeteaseHost(url.host),
               var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         else { return url }
 
         var queryItems = components.queryItems ?? []
+        guard queryItems.contains(where: { $0.name == "param" }) else { return url }
         queryItems.removeAll { $0.name == "param" }
         components.queryItems = queryItems.isEmpty ? nil : queryItems
         return components.url ?? url
+    }
+
+    private static func isNeteaseHost(_ host: String?) -> Bool {
+        guard let host = host?.lowercased() else { return false }
+        return host == "music.126.net" || host.hasSuffix(".music.126.net")
+            || host == "music.163.com" || host.hasSuffix(".music.163.com")
     }
 }
 
@@ -227,7 +240,7 @@ enum Route: Hashable, Sendable {
     case playlist(Int64)
     case user(Int64)
     case comments(Int64)
-    case similarSongs(Int64)
+    case similarSongs(Song)
     case recommendationHistory
 }
 

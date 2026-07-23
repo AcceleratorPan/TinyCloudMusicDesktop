@@ -145,6 +145,46 @@ struct LiveMusicRepository: MusicRepository {
         return try decodeCopyrightAlternatives(data)
     }
 
+    func heartModeSongs(seedSongID: Int64, playlistID: Int64?, startSongID: Int64) async throws -> [Song] {
+        guard seedSongID > 0, startSongID > 0 else { throw EAPIError.invalidPayload }
+        if let playlistID {
+            guard playlistID > 0 else { throw EAPIError.invalidPayload }
+            do {
+                let data = try await request(
+                    EAPIEndpoint(
+                        "/eapi/playmode/intelligence/list",
+                        signing: "/api/playmode/intelligence/list",
+                        host: Self.interfaceHost
+                    ),
+                    payload: [
+                        "songId": seedSongID,
+                        "type": "fromPlayOne",
+                        "playlistId": playlistID,
+                        "startMusicId": startSongID,
+                        "count": 1
+                    ]
+                )
+                let songs = try decodeHeartModeSongs(data)
+                if !songs.isEmpty { return songs }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {}
+        }
+
+        return try await LiveMusicLibrary(transport: transport).similarSongs(to: startSongID)
+    }
+
+    func decodeHeartModeSongs(_ data: Data) throws -> [Song] {
+        let root = try decodedJSONObject(data)
+        let values = root.array("data").isEmpty ? root.object("data").array("songs") : root.array("data")
+        return values.compactMap { item in
+            var songInfo = item.object("songInfo")
+            if songInfo.isEmpty { songInfo = item }
+            if songInfo.int64("id") == 0 { songInfo["id"] = item["id"] }
+            return decodeSong(songInfo)
+        }
+    }
+
     func recordPlaybackStart(for songID: Int64) async throws {
         guard songID > 0 else { throw EAPIError.invalidPayload }
         try await recordPlaybackLog([

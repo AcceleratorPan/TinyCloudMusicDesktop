@@ -72,6 +72,7 @@ protocol MusicRepository: Sendable {
     func playbackSource(for songID: Int64, quality: AudioQuality) async throws -> PlaybackSource
     func playbackSource(for songID: Int64, level: String) async throws -> PlaybackSource
     func songQualityDetails(for songID: Int64) async throws -> [SongQualityDetail]
+    func heartModeSongs(seedSongID: Int64, playlistID: Int64?, startSongID: Int64) async throws -> [Song]
     func recordPlaybackStart(for songID: Int64) async throws
     func recordPlayback(for songID: Int64, playedSeconds: Int) async throws
 }
@@ -83,6 +84,10 @@ extension MusicRepository {
 
     func audioURL(for songID: Int64) async throws -> URL {
         try await audioURL(for: songID, quality: .standard)
+    }
+
+    func heartModeSongs(seedSongID: Int64, playlistID: Int64?, startSongID: Int64) async throws -> [Song] {
+        throw AppError.unavailable("心动模式暂时不可用")
     }
 }
 

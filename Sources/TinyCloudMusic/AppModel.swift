@@ -516,6 +516,18 @@ final class AppModel {
         }
     }
 
+    func songPlaylistMembershipDidChange(
+        _ songID: Int64,
+        playlistID: Int64,
+        isFavoritePlaylist: Bool,
+        containsSong: Bool
+    ) {
+        if isFavoritePlaylist {
+            if containsSong { likedSongIDs.insert(songID) } else { likedSongIDs.remove(songID) }
+        }
+        playlistContentsDidChange(playlistID)
+    }
+
     func playlistSummariesDidChange() {
         playlistContentRevision &+= 1
     }

@@ -15,6 +15,7 @@ final class PlayerController {
     private static let maximumStreamAttempts = 3
     private static let maximumCrossfadeDuration: TimeInterval = 12
     private static let prefetchWindow: TimeInterval = 10
+    private static let heartModeReplenishThreshold = 3
 
     private(set) var queue: [PlaybackQueueItem] = []
     private(set) var context: PlaybackContext?
@@ -41,6 +42,10 @@ final class PlayerController {
     private(set) var repeatMode: PlaybackRepeatMode = .off
     private(set) var isShuffleEnabled = false
     private(set) var isLinearQueueMode = false
+    private(set) var isHeartModeEnabled = false
+    private(set) var isLoadingHeartMode = false
+    private(set) var heartModeErrorMessage: String?
+    private(set) var sourcePlaylistID: Int64?
     private(set) var playbackReportRevision = 0
 
     @ObservationIgnored private let repository: any MusicRepository
@@ -58,6 +63,12 @@ final class PlayerController {
     @ObservationIgnored private var queueHydrationTask: Task<Void, Never>?
     @ObservationIgnored private var songResolutionTask: Task<Void, Never>?
     @ObservationIgnored private var lyricTask: Task<Void, Never>?
+    @ObservationIgnored private var heartModeTask: Task<Void, Never>?
+    @ObservationIgnored private var heartModeSeedSongID: Int64?
+    @ObservationIgnored private var heartModeHasRecommendations = false
+    @ObservationIgnored private var heartModeExhausted = false
+    @ObservationIgnored private var heartModeOriginalQueue: [PlaybackQueueItem]?
+    @ObservationIgnored private var heartModeOriginalIndex: Int?
     @ObservationIgnored private var qualitySwitchTask: Task<Void, Never>?
     @ObservationIgnored private var qualitySwitchRevision = 0
     @ObservationIgnored private var fadeTask: Task<Void, Never>?
@@ -119,6 +130,7 @@ final class PlayerController {
         queueHydrationTask?.cancel()
         songResolutionTask?.cancel()
         lyricTask?.cancel()
+        heartModeTask?.cancel()
         qualitySwitchTask?.cancel()
         fadeTask?.cancel()
         playerStateObservation?.invalidate()
@@ -180,23 +192,39 @@ final class PlayerController {
         return lyrics[currentLyricIndex]
     }
 
-    func play(_ song: Song, in visibleSongs: [Song], allSongIDs: [Int64]? = nil) {
+    func play(
+        _ song: Song,
+        in visibleSongs: [Song],
+        allSongIDs: [Int64]? = nil,
+        playlistID: Int64? = nil
+    ) {
         guard let plan = PlaybackQueuePlan.make(
             selectedSongID: song.id,
             visibleSongIDs: visibleSongs.map(\.id),
             allSongIDs: allSongIDs
         ) else { return }
-        restoreQueueMode()
+        if isHeartModeEnabled {
+            stopHeartMode(restoringQueue: false)
+        } else {
+            restoreQueueMode()
+        }
+        heartModeErrorMessage = nil
         let songIDs = plan.songIDs
         let index = plan.startIndex
         let newContext = PlaybackContext(songIDs: songIDs, startIndex: index)
-        let action = PlaybackSelectionAction.decide(
-            currentSongID: currentSong?.id,
-            isPlaying: isPlaying,
-            currentContext: context,
-            selectedSongID: song.id,
-            newContext: newContext
-        )
+        let sourceChanged = sourcePlaylistID != playlistID
+        sourcePlaylistID = playlistID
+        let action: PlaybackSelectionAction = if sourceChanged, currentSong?.id == song.id {
+            .switchQueue(resume: !isPlaying)
+        } else {
+            PlaybackSelectionAction.decide(
+                currentSongID: currentSong?.id,
+                isPlaying: isPlaying,
+                currentContext: context,
+                selectedSongID: song.id,
+                newContext: newContext
+            )
+        }
 
         switch action {
         case .keepPlaying:
@@ -293,6 +321,23 @@ final class PlayerController {
 
     func next() {
         advance(automatic: false)
+    }
+
+    func toggleHeartMode() {
+        if isHeartModeEnabled {
+            stopHeartMode()
+            return
+        }
+        guard let songID = currentSongID else { return }
+        heartModeOriginalQueue = queue
+        heartModeOriginalIndex = currentIndex
+        heartModeSeedSongID = songID
+        heartModeHasRecommendations = false
+        heartModeExhausted = false
+        heartModeErrorMessage = nil
+        useLinearQueueMode()
+        isHeartModeEnabled = true
+        loadHeartModeSongs(startSongID: songID, replacingTail: true)
     }
 
     func toggleShuffle() {
@@ -506,6 +551,7 @@ final class PlayerController {
             crossfade: shouldCrossfade
         )
         loadLyrics(generation: generation, songID: song.id)
+        replenishHeartModeIfNeeded()
     }
 
     private func installQueue(songIDs: [Int64], knownSongs: [Song], currentIndex: Int) {
@@ -526,6 +572,106 @@ final class PlayerController {
         self.savedQueueMode = nil
         rebuildShuffleOrder(keeping: currentIndex)
         resetTransitionPreparation()
+    }
+
+    private func stopHeartMode(restoringQueue: Bool = true) {
+        let originalQueue = heartModeOriginalQueue
+        let originalIndex = heartModeOriginalIndex
+        let activeSongID = currentSongID
+        heartModeTask?.cancel()
+        heartModeTask = nil
+        isHeartModeEnabled = false
+        isLoadingHeartMode = false
+        heartModeErrorMessage = nil
+        heartModeSeedSongID = nil
+        heartModeHasRecommendations = false
+        heartModeExhausted = false
+        heartModeOriginalQueue = nil
+        heartModeOriginalIndex = nil
+
+        if restoringQueue, let originalQueue, !originalQueue.isEmpty {
+            let index = originalQueue.firstIndex { $0.id == activeSongID }
+                ?? min(originalIndex ?? 0, originalQueue.count - 1)
+            let shouldRestart = originalQueue[index].id != activeSongID
+            queue = originalQueue
+            currentIndex = index
+            context = PlaybackContext(songIDs: originalQueue.map(\.id), startIndex: index)
+            hydrateQueue()
+            restoreQueueMode()
+            if shouldRestart { activate(index: index) }
+            return
+        }
+        restoreQueueMode()
+    }
+
+    private func loadHeartModeSongs(startSongID: Int64, replacingTail: Bool) {
+        guard isHeartModeEnabled,
+              !isLoadingHeartMode,
+              let seedSongID = heartModeSeedSongID
+        else { return }
+        let playlistID = sourcePlaylistID
+        isLoadingHeartMode = true
+        heartModeTask = Task { @MainActor [weak self, repository] in
+            do {
+                let songs = try await repository.heartModeSongs(
+                    seedSongID: seedSongID,
+                    playlistID: playlistID,
+                    startSongID: startSongID
+                )
+                try Task.checkCancellation()
+                guard let self,
+                      self.isHeartModeEnabled,
+                      self.heartModeSeedSongID == seedSongID,
+                      self.sourcePlaylistID == playlistID
+                else { return }
+                self.heartModeTask = nil
+                self.isLoadingHeartMode = false
+                let added = self.installHeartModeSongs(songs, replacingTail: replacingTail)
+                if !added, replacingTail {
+                    self.failHeartMode("暂无相似推荐")
+                } else if !added {
+                    self.heartModeExhausted = true
+                }
+            } catch is CancellationError {
+            } catch {
+                guard let self,
+                      self.isHeartModeEnabled,
+                      self.heartModeSeedSongID == seedSongID,
+                      self.sourcePlaylistID == playlistID
+                else { return }
+                self.failHeartMode(error.localizedDescription)
+            }
+        }
+    }
+
+    private func installHeartModeSongs(_ songs: [Song], replacingTail: Bool) -> Bool {
+        guard let currentIndex, queue.indices.contains(currentIndex) else { return false }
+        let retained = replacingTail ? Array(queue.prefix(currentIndex + 1)) : queue
+        var ids = Set(retained.map(\.id))
+        let additions = songs.filter { ids.insert($0.id).inserted }
+        guard !additions.isEmpty else { return false }
+        queue = retained + additions.map { PlaybackQueueItem(id: $0.id, song: $0) }
+        context = PlaybackContext(songIDs: queue.map(\.id), startIndex: currentIndex)
+        heartModeHasRecommendations = true
+        resetTransitionPreparation()
+        return true
+    }
+
+    private func replenishHeartModeIfNeeded() {
+        guard isHeartModeEnabled,
+              heartModeHasRecommendations,
+              !isLoadingHeartMode,
+              !heartModeExhausted,
+              let currentIndex,
+              queue.count - currentIndex <= Self.heartModeReplenishThreshold,
+              let lastSongID = queue.last?.id
+        else { return }
+        loadHeartModeSongs(startSongID: lastSongID, replacingTail: false)
+    }
+
+    private func failHeartMode(_ message: String) {
+        stopHeartMode()
+        heartModeErrorMessage = message
     }
 
     private func mergeKnownSongs(_ songs: [Song]) {
@@ -1108,6 +1254,7 @@ final class PlayerController {
         else { return }
         position = seconds
         updateCurrentLyricIndex()
+        replenishHeartModeIfNeeded()
         prepareNextTransitionIfNeeded(position: seconds)
     }
 

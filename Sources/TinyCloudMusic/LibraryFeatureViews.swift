@@ -380,10 +380,7 @@ struct MusicLibraryView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             SongTitleText(song: song)
                                 .lineLimit(1)
-                            Text("\(song.artistsDisplay) · \(song.album.name)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
+                            SongMetadataLinks(song: song, onOpenRoute: onOpenRoute)
                         }
                         Spacer()
                         Text(song.durationText)
@@ -400,6 +397,11 @@ struct MusicLibraryView: View {
                         .frame(width: 44, height: 44)
                     }
                     .frame(minHeight: 48)
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) { player.play(song, in: snapshot.songs) }
+                    .contextMenu {
+                        SongContextMenu(song: song, songs: snapshot.songs, model: model, player: player)
+                    }
                 }
                 if visibleRecommendationCount < snapshot.songs.count {
                     LoadMoreTrigger(title: "正在显示更多…") {
@@ -448,10 +450,7 @@ struct MusicLibraryView: View {
                     )
                     VStack(alignment: .leading, spacing: 2) {
                         SongTitleText(song: recentPlayedSong).lineLimit(1)
-                        Text(recentPlayedSong.artistsDisplay)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                        SongMetadataLinks(song: recentPlayedSong, onOpenRoute: onOpenRoute)
                     }
                     Spacer()
                     Button {
@@ -465,6 +464,11 @@ struct MusicLibraryView: View {
                     .frame(width: 44, height: 44)
                 }
                 .frame(minHeight: 48)
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) { player.play(recentPlayedSong, in: [recentPlayedSong]) }
+                .contextMenu {
+                    SongContextMenu(song: recentPlayedSong, songs: [recentPlayedSong], model: model, player: player)
+                }
                 Divider()
             }
 
@@ -505,10 +509,7 @@ struct MusicLibraryView: View {
                                 )
                                 VStack(alignment: .leading, spacing: 2) {
                                     SongTitleText(song: record.song).lineLimit(1)
-                                    Text("\(record.song.artistsDisplay) · \(record.song.album.name)")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
+                                    SongMetadataLinks(song: record.song, onOpenRoute: onOpenRoute)
                                 }
                                 Spacer()
                                 Text("\(record.playCount.formatted()) 次")
@@ -526,6 +527,11 @@ struct MusicLibraryView: View {
                                 .frame(width: 44, height: 44)
                             }
                             .frame(minHeight: 48)
+                            .contentShape(Rectangle())
+                            .onTapGesture(count: 2) { player.play(record.song, in: songs) }
+                            .contextMenu {
+                                SongContextMenu(song: record.song, songs: songs, model: model, player: player)
+                            }
                         }
                     }
                 }

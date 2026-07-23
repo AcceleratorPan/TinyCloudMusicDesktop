@@ -376,6 +376,39 @@ struct CoreTests {
         #expect(requestCount == 3)
     }
 
+    @Test("Favorite playlist mutations update liked song state")
+    @MainActor
+    func favoritePlaylistMutationUpdatesLikedSongs() {
+        let model = AppModel(
+            repository: FixtureMusicRepository(),
+            defaults: UserDefaults(suiteName: UUID().uuidString)!
+        )
+
+        model.songPlaylistMembershipDidChange(
+            1,
+            playlistID: 901,
+            isFavoritePlaylist: true,
+            containsSong: true
+        )
+        #expect(model.likedSongIDs.contains(1))
+
+        model.songPlaylistMembershipDidChange(
+            1,
+            playlistID: 901,
+            isFavoritePlaylist: true,
+            containsSong: false
+        )
+        #expect(!model.likedSongIDs.contains(1))
+
+        model.songPlaylistMembershipDidChange(
+            2,
+            playlistID: 902,
+            isFavoritePlaylist: false,
+            containsSong: true
+        )
+        #expect(!model.likedSongIDs.contains(2))
+    }
+
     @Test("Playlist summaries expire by TTL and reject stale refreshes")
     @MainActor
     func playlistSummaryFreshness() {
@@ -544,6 +577,23 @@ struct CoreTests {
         #expect(ArtworkPipeline.maximumResponseSize == 25 * 1_024 * 1_024)
         #expect(ArtworkPipeline.isTransient(URLError(.timedOut)))
         #expect(!ArtworkPipeline.isTransient(URLError(.badURL)))
+
+        let insecureNetease = try #require(URL(string: "http://p1.music.126.net/cover.jpg"))
+        let secureRequest = try #require(
+            ArtworkPipeline.request(for: insecureNetease, size: CGSize(width: 44, height: 44), now: now)
+        )
+        #expect(secureRequest.url?.scheme == "https")
+        #expect(secureRequest.imageID?.hasPrefix("https://") == true)
+
+        let watermarked = try #require(
+            URL(string: "http://p1.music.126.net/cover.jpg?enlarge=1%7CimageView=1&image=dGVzdA==")
+        )
+        let secureWatermarked = ArtworkURLPolicy.secureURL(for: watermarked)
+        #expect(
+            secureWatermarked.absoluteString
+                == "https://p1.music.126.net/cover.jpg?enlarge=1%7CimageView=1&image=dGVzdA=="
+        )
+        #expect(ArtworkURLPolicy.highResolutionURL(for: secureWatermarked) == secureWatermarked)
 
         let lowResolution = try #require(URL(string: "https://p1.music.126.net/cover.jpg?foo=bar&param=64y64"))
         let highResolution = ArtworkURLPolicy.highResolutionURL(for: lowResolution)

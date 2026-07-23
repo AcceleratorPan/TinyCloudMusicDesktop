@@ -113,7 +113,8 @@ enum WriteAPIContractCheck {
 
         try verifyCoverProcessing()
         try await verifyPlaybackQualityPrivilegeProfile()
-        count += 2
+        try await verifyHeartModeFallback(transport: transport)
+        count += 3
 
         try await verify("/eapi/song/like", signing: "/api/song/like", call: {
             try await library.setSongLiked(11, liked: true)
@@ -458,6 +459,44 @@ enum WriteAPIContractCheck {
         precondition(privilegeCookie.contains("MUSIC_A=guest-token"))
         precondition(privilegeCookie.contains("MUSIC_U=vip-token"))
         precondition(privilegeCookie.contains("os=iPhone OS"))
+    }
+
+    private static func verifyHeartModeFallback(transport: EAPITransport) async throws {
+        RequestCaptureProtocol.reset(responses: [
+            "/eapi/playmode/intelligence/list": (
+                200,
+                Data(#"{"code":400,"message":"不支持该歌单类型"}"#.utf8)
+            ),
+            "/weapi/v1/discovery/simiSong": (
+                200,
+                Data(#"{"code":200,"songs":[{"id":33,"name":"Fallback","ar":[{"id":44,"name":"Artist"}],"al":{"id":55,"name":"Album"},"dt":1000}]}"#.utf8)
+            )
+        ])
+        let songs = try await LiveMusicRepository(transport: transport).heartModeSongs(
+            seedSongID: 11,
+            playlistID: 22,
+            startSongID: 11
+        )
+        let requests = RequestCaptureProtocol.requests()
+        guard songs.map(\.id) == [33],
+              requests.map(\.url?.path) == [
+                  "/eapi/playmode/intelligence/list",
+                  "/weapi/v1/discovery/simiSong"
+              ],
+              let heartBody = requests[0].httpBody,
+              let heart = try decode(body: heartBody),
+              heart.path == "/api/playmode/intelligence/list",
+              heart.payload.int64("songId") == 11,
+              heart.payload.int64("playlistId") == 22,
+              heart.payload.int64("startMusicId") == 11,
+              heart.payload.string("type") == "fromPlayOne",
+              heart.payload.int("count") == 1,
+              let similarBody = requests[1].httpBody,
+              let similar = try decodeWEAPI(body: similarBody, secretKey: "0123456789abcdef"),
+              similar.payload.int64("songid") == 11,
+              similar.payload.int("limit") == 50,
+              similar.payload.int("offset") == 0
+        else { preconditionFailure("Heart mode fallback contract mismatch") }
     }
 
     private static func verifyCoverProcessing() throws {

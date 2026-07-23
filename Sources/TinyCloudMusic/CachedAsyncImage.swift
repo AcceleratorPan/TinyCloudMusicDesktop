@@ -104,7 +104,9 @@ final class ArtworkPipeline {
     }
 
     private static func originalRequest(for url: URL?, now: Date = Date()) -> ImageRequest? {
-        guard let url,
+        guard let sourceURL = url else { return nil }
+        let url = ArtworkURLPolicy.secureURL(for: sourceURL)
+        guard
               let scheme = url.scheme?.lowercased(),
               scheme == "https" || scheme == "http"
         else { return nil }

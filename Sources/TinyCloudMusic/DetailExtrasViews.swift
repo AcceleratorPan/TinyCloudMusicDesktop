@@ -367,7 +367,8 @@ enum UserRelationSection {
 }
 
 struct SimilarSongsView: View {
-    let songID: Int64
+    let sourceSong: Song
+    @Bindable private var model: AppModel
     let library: LiveMusicLibrary
     @Bindable private var player: PlayerController
 
@@ -375,8 +376,9 @@ struct SimilarSongsView: View {
     @State private var reloadID = 0
     @State private var visibleCount = 20
 
-    init(songID: Int64, library: LiveMusicLibrary, player: PlayerController) {
-        self.songID = songID
+    init(sourceSong: Song, model: AppModel, library: LiveMusicLibrary, player: PlayerController) {
+        self.sourceSong = sourceSong
+        self.model = model
         self.library = library
         self.player = player
     }
@@ -386,7 +388,7 @@ struct SimilarSongsView: View {
     private var content: AnyView {
         AnyView(ScrollView {
             LazyVStack(alignment: .leading, spacing: 8) {
-                Text("相似歌曲")
+                Text("由「\(sourceSong.artistsDisplay) - \(sourceSong.name)」相似推荐")
                     .font(.title3.weight(.semibold))
                 switch phase {
                 case .loading:
@@ -404,10 +406,7 @@ struct SimilarSongsView: View {
                                     SongTitleText(song: song)
                                         .font(.body.weight(.medium))
                                         .lineLimit(1)
-                                    Text("\(song.artistsDisplay) · \(song.album.name)")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
+                                    SongMetadataLinks(song: song, onOpenRoute: model.open)
                                 }
                                 Spacer(minLength: 8)
                                 Text(song.durationText)
@@ -429,6 +428,11 @@ struct SimilarSongsView: View {
                                 .accessibilityLabel("播放 \(song.name)")
                             }
                             .frame(minHeight: 52)
+                            .contentShape(Rectangle())
+                            .onTapGesture(count: 2) { player.play(song, in: songs) }
+                            .contextMenu {
+                                SongContextMenu(song: song, songs: songs, model: model, player: player)
+                            }
                             Divider().padding(.leading, 50)
                         }
                         if visibleCount < songs.count {
@@ -442,7 +446,7 @@ struct SimilarSongsView: View {
             }
             .padding(24)
         }
-        .task(id: "\(songID):\(reloadID)") { await load() })
+        .task(id: "\(sourceSong.id):\(reloadID)") { await load() })
     }
 
     @MainActor
@@ -450,7 +454,7 @@ struct SimilarSongsView: View {
         phase = .loading
         visibleCount = 20
         do {
-            let songs = try await library.similarSongs(to: songID)
+            let songs = try await library.similarSongs(to: sourceSong.id)
             try Task.checkCancellation()
             phase = .loaded(songs)
         } catch is CancellationError {

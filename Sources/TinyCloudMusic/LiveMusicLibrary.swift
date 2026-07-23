@@ -548,13 +548,13 @@ struct LiveMusicLibrary: Sendable {
 
     func similarSongs(to songID: Int64) async throws -> [Song] {
         guard songID > 0 else { throw EAPIError.invalidPayload }
-        let root = try await call(
-            EAPIEndpoint(
-                "/eapi/v1/discovery/simiSong",
-                signing: "/api/v1/discovery/simiSong",
-                host: Self.interfaceHost
-            ),
-            payload: ["songid": songID, "verifyId": 1, "e_r": true]
+        let root = try decodedJSONObject(
+            try await transport.requestWEAPI(
+                path: "/weapi/v1/discovery/simiSong",
+                payload: ["songid": songID, "limit": 50, "offset": 0],
+                cache: .library,
+                invalidatesAccountCache: false
+            )
         )
         return root.array("songs").compactMap(songDecoder.decodeLiveSong)
     }

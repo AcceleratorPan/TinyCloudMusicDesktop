@@ -41,7 +41,7 @@ struct SongTitleText: View {
     }
 }
 
-private struct SongMetadataLink: View {
+struct SongMetadataLink: View {
     let title: String
     let help: String
     let action: () -> Void
@@ -63,7 +63,7 @@ private struct SongMetadataLink: View {
     }
 }
 
-private struct SongArtistLinks: View {
+struct SongArtistLinks: View {
     let artists: [ArtistSummary]
     let action: (ArtistSummary) -> Void
 
@@ -86,6 +86,26 @@ private struct SongArtistLinks: View {
             }
             .help(artists.map(\.name).joined(separator: " / "))
         }
+    }
+}
+
+struct SongMetadataLinks: View {
+    let song: Song
+    let onOpenRoute: (Route) -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            SongArtistLinks(artists: song.artists) { artist in
+                onOpenRoute(.artist(artist.id))
+            }
+            Text("·")
+                .foregroundStyle(.tertiary)
+            SongMetadataLink(title: song.album.name, help: "打开专辑 \(song.album.name)") {
+                onOpenRoute(.album(song.album.id))
+            }
+        }
+        .font(.caption)
+        .lineLimit(1)
     }
 }
 
@@ -188,8 +208,13 @@ struct RootView: View {
                     userID: userID,
                     extras: extras,
                     library: library,
-                    onFinished: { playlistID in
-                        model.playlistContentsDidChange(playlistID)
+                    onFinished: { playlistID, isFavoritePlaylist in
+                        model.songPlaylistMembershipDidChange(
+                            song.id,
+                            playlistID: playlistID,
+                            isFavoritePlaylist: isFavoritePlaylist,
+                            containsSong: true
+                        )
                         model.playlistPickerSong = nil
                         model.showToast("已加入歌单")
                     }
@@ -311,9 +336,9 @@ private struct RouteDestinationView: View {
             } else {
                 ContentUnavailableView("评论不可用", systemImage: "bubble.left")
             }
-        case let .similarSongs(songID):
+        case let .similarSongs(song):
             if let library = model.library {
-                SimilarSongsView(songID: songID, library: library, player: player)
+                SimilarSongsView(sourceSong: song, model: model, library: library, player: player)
             } else {
                 ContentUnavailableView("相似歌曲不可用", systemImage: "music.note")
             }
@@ -948,15 +973,16 @@ struct SearchResultRow: View {
     }
 }
 
-private struct SongContextMenu: View {
+struct SongContextMenu: View {
     let song: Song
     let songs: [Song]
     var allSongIDs: [Int64]? = nil
+    var playlistID: Int64? = nil
     @Bindable var model: AppModel
     @Bindable var player: PlayerController
 
     var body: some View {
-        Button { player.play(song, in: songs, allSongIDs: allSongIDs) } label: {
+        Button { player.play(song, in: songs, allSongIDs: allSongIDs, playlistID: playlistID) } label: {
             Label("播放", systemImage: "play.fill")
         }
         if !song.artists.isEmpty {
@@ -983,7 +1009,7 @@ private struct SongContextMenu: View {
             Label("添加到歌单", systemImage: "text.badge.plus")
         }
         .disabled(model.currentUserID == nil)
-        Button { model.open(.similarSongs(song.id)) } label: {
+        Button { model.open(.similarSongs(song)) } label: {
             Label("相似歌曲", systemImage: "waveform.badge.magnifyingglass")
         }
         Button { model.open(.comments(song.id)) } label: {
@@ -1234,6 +1260,8 @@ private struct PlaylistDetailContent: View {
                         songs: songs,
                         allSongIDs: trackIDs,
                         playlistID: playlist.id,
+                        playlistIsFavorite: playlist.specialType == 5,
+                        allowsSongRemoval: playlist.creatorID == model.currentUserID && !playlist.isReadOnly,
                         model: model,
                         player: player,
                         hasMore: loadedTrackCount < trackIDs.count,
@@ -1430,7 +1458,9 @@ private struct PlaylistDetailContent: View {
     private var headerActions: AnyView {
         AnyView(HStack(spacing: 10) {
             if let firstSong = songs.first {
-                Button { player.play(firstSong, in: songs, allSongIDs: trackIDs) } label: {
+                Button {
+                    player.play(firstSong, in: songs, allSongIDs: trackIDs, playlistID: playlist.id)
+                } label: {
                     Label("播放", systemImage: "play.fill")
                 }
                 .buttonStyle(.borderedProminent)
@@ -2265,6 +2295,8 @@ struct SongList: View {
     let songs: [Song]
     let allSongIDs: [Int64]?
     let playlistID: Int64?
+    let playlistIsFavorite: Bool
+    let allowsSongRemoval: Bool
     @Bindable var model: AppModel
     @Bindable var player: PlayerController
     let showsHeading: Bool
@@ -2277,6 +2309,8 @@ struct SongList: View {
         songs: [Song],
         allSongIDs: [Int64]? = nil,
         playlistID: Int64? = nil,
+        playlistIsFavorite: Bool = false,
+        allowsSongRemoval: Bool = false,
         model: AppModel,
         player: PlayerController,
         showsHeading: Bool = true,
@@ -2288,6 +2322,8 @@ struct SongList: View {
         self.songs = songs
         self.allSongIDs = allSongIDs
         self.playlistID = playlistID
+        self.playlistIsFavorite = playlistIsFavorite
+        self.allowsSongRemoval = allowsSongRemoval
         self.model = model
         self.player = player
         self.showsHeading = showsHeading
@@ -2311,7 +2347,7 @@ struct SongList: View {
                             .foregroundStyle(.tertiary)
                             .frame(width: 24, alignment: .trailing)
                         Button {
-                            player.play(song, in: songs, allSongIDs: allSongIDs)
+                            player.play(song, in: songs, allSongIDs: allSongIDs, playlistID: playlistID)
                         } label: {
                             Image(systemName: player.currentSong?.id == song.id && player.isPlaying ? "speaker.wave.2.fill" : "play.fill")
                                 .frame(width: 20)
@@ -2344,25 +2380,34 @@ struct SongList: View {
                     }
                     .frame(height: 50)
                     .contentShape(Rectangle())
-                    .onTapGesture(count: 2) { player.play(song, in: songs, allSongIDs: allSongIDs) }
+                    .onTapGesture(count: 2) {
+                        player.play(song, in: songs, allSongIDs: allSongIDs, playlistID: playlistID)
+                    }
                     .contextMenu {
                         SongContextMenu(
                             song: song,
                             songs: songs,
                             allSongIDs: allSongIDs,
+                            playlistID: playlistID,
                             model: model,
                             player: player
                         )
-                        if let playlistID, let library = model.library {
+                        if allowsSongRemoval, let playlistID, let library = model.library {
                             Divider()
                             RemoveSongFromPlaylistButton(
                                 songID: song.id,
                                 playlistID: playlistID,
                                 library: library,
                                 onRemoved: {
-                                    model.playlistContentsDidChange(playlistID)
+                                    model.songPlaylistMembershipDidChange(
+                                        song.id,
+                                        playlistID: playlistID,
+                                        isFavoritePlaylist: playlistIsFavorite,
+                                        containsSong: false
+                                    )
                                     model.showToast("已从歌单移除")
-                                }
+                                },
+                                onFailed: { model.libraryMessage = "移除失败：\($0)" }
                             )
                         }
                     }

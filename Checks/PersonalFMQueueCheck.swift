@@ -20,6 +20,31 @@ enum PersonalFMQueueCheck {
 
         let soundURL = URL(fileURLWithPath: "/System/Library/Sounds/Glass.aiff")
         precondition(FileManager.default.fileExists(atPath: soundURL.path))
+        let heartRepository = LocalPlaybackRepository(
+            sourceURL: soundURL,
+            heartModeRecommendations: [songs[2]]
+        )
+        let heartPlayer = PlayerController(
+            repository: heartRepository,
+            cacheRoot: FileManager.default.temporaryDirectory,
+            crossfadeDuration: 0
+        )
+        heartPlayer.play(songs[0], in: Array(songs.prefix(2)), playlistID: 301)
+        heartPlayer.toggleHeartMode()
+        try await waitUntil { !heartPlayer.isLoadingHeartMode }
+        precondition(heartPlayer.isHeartModeEnabled)
+        precondition(heartPlayer.queue.map(\.id) == [songs[0].id, songs[2].id])
+        let heartRequest = await heartRepository.heartModeRequests().first
+        precondition(heartRequest?.seedSongID == songs[0].id)
+        precondition(heartRequest?.playlistID == 301)
+        precondition(heartRequest?.startSongID == songs[0].id)
+        heartPlayer.next()
+        precondition(heartPlayer.currentSongID == songs[2].id)
+        heartPlayer.toggleHeartMode()
+        precondition(!heartPlayer.isHeartModeEnabled)
+        precondition(heartPlayer.queue.map(\.id) == songs.prefix(2).map(\.id))
+        precondition(heartPlayer.currentSongID == songs[0].id)
+
         let localRepository = LocalPlaybackRepository(sourceURL: soundURL)
         let crossfadePlayer = PlayerController(
             repository: localRepository,
@@ -64,10 +89,13 @@ private func waitUntil(_ condition: @escaping @MainActor () -> Bool) async throw
 private actor LocalPlaybackRepository: MusicRepository {
     let sourceURL: URL
     nonisolated let homeDescriptors: [HomeSectionDescriptor] = []
+    private let heartModeRecommendations: [Song]
     private var sourceRequests: [String] = []
+    private var recordedHeartModeRequests: [HeartModeRequest] = []
 
-    init(sourceURL: URL) {
+    init(sourceURL: URL, heartModeRecommendations: [Song] = []) {
         self.sourceURL = sourceURL
+        self.heartModeRecommendations = heartModeRecommendations
     }
 
     func playbackSource(for songID: Int64, quality: AudioQuality) async throws -> PlaybackSource {
@@ -82,6 +110,17 @@ private actor LocalPlaybackRepository: MusicRepository {
 
     func requests() -> [String] { sourceRequests }
 
+    func heartModeSongs(seedSongID: Int64, playlistID: Int64?, startSongID: Int64) async throws -> [Song] {
+        recordedHeartModeRequests.append(HeartModeRequest(
+            seedSongID: seedSongID,
+            playlistID: playlistID,
+            startSongID: startSongID
+        ))
+        return heartModeRecommendations
+    }
+
+    func heartModeRequests() -> [HeartModeRequest] { recordedHeartModeRequests }
+
     func songs(ids: [Int64]) async throws -> [Song] { [] }
     func lyrics(for songID: Int64) async throws -> SongLyrics { SongLyrics(lineLyrics: "") }
     func songQualityDetails(for songID: Int64) async throws -> [SongQualityDetail] { [] }
@@ -92,4 +131,10 @@ private actor LocalPlaybackRepository: MusicRepository {
         throw AppError.invalidRoute
     }
     func detail(for route: Route) async throws -> DetailContent { throw AppError.invalidRoute }
+}
+
+private struct HeartModeRequest: Sendable {
+    let seedSongID: Int64
+    let playlistID: Int64?
+    let startSongID: Int64
 }
