@@ -15,7 +15,7 @@
 | 能力 | Swift App | api-enhanced | 判断 |
 | --- | --- | --- | --- |
 | 运行形态 | 原生客户端直连官方 HTTPS | Express 代理与 Node SDK | Swift 少一层代理，延迟和攻击面更小。 |
-| 请求协议 | EAPI 请求；EAPI/AES 响应自动识别 | API、WEAPI、EAPI、LinuxAPI、XEAPI | 按接口需求补协议，不需要一次实现全部。 |
+| 请求协议 | EAPI 与固定用途 WEAPI；EAPI/AES 响应自动识别 | API、WEAPI、EAPI、LinuxAPI、XEAPI | 复用现有协议，只按明确功能补能力。 |
 | 请求构造 | 显式物理 URL + 签名逻辑路径 + 排序 JSON | 每模块构造 data，统一 `createOption/request` | Swift 的显式签名路径更适合静态审查。 |
 | 响应解析 | 明文 JSON/加密 JSON 自动识别，业务 code 归一化 | 按配置解密后动态 JSON | Swift 已避免以 host 猜测密文。 |
 | 凭据 | WebKit 官方登录 + Keychain | Cookie 参数/环境变量/游客 token | Swift 更适合终端用户和系统安全模型。 |
@@ -25,7 +25,7 @@
 | 并发连接 | 复用 `URLSession`，每 host 8 个连接 | 每请求创建 Agent/Axios 调用 | Swift 的连接复用更适合桌面客户端。 |
 | Cookie 回写 | 登录由 WebKit/Keychain 管理 | 上游 `Set-Cookie` 转发给调用方 | Swift 增加原生登录/刷新时才需要补。 |
 | 代理/IP | 无 | PAC、HTTP tunnel、realIP、随机中国 IP | 默认不应加入；只在合法网络部署需求下评估。 |
-| 上传 | 歌曲下载与本地缓存，无云盘/NOS 上传 | 图片、云盘、播客分片上传 | 可按云盘/封面产品需求分阶段加入。 |
+| 上传 | 已有歌单封面 NOS 直传；无音频云盘/播客上传 | 图片、云盘、播客分片上传 | 复用现有 token/host 校验经验，音频上传单独实现恢复与对账。 |
 
 ## 3. Swift 当前已实现的功能
 
@@ -114,12 +114,16 @@ P0/P1 共 12 份独立文档均按可单独交付给实现 agent 的格式编写
 
 ### P2：新增内容形态
 
-- MV/视频：详情、播放 URL、收藏、评论和推荐。
-- 电台/播客/广播：分类、订阅、节目列表、声音详情与歌词。
-- 曲风、乐谱、音乐百科和 UGC 条目。
-- 听歌足迹、周/月/年报告。
-- 云盘和播客上传；需实现 NOS token、直传/分片、进度、断点与临时文件清理。
-- 一起听；涉及房间、心跳、命令序列和状态同步，应作为独立实时功能设计，不能只增加几个 request 方法。
+| 功能 | 参考接口组 | 说明 |
+| --- | --- | --- |
+| [MV 与视频](docs/api-gap-tasks/P2-01_MV_AND_VIDEO.md) | `mv_*`、`video_*`、`related_allvideo` | 详情、播放 URL、收藏、评论读取和推荐。 |
+| [电台、播客、声音与广播](docs/api-gap-tasks/P2-02_RADIO_PODCAST_AND_VOICE.md) | `dj_*`、`voice_*`、`broadcast_*` | 分类、订阅、节目列表、声音详情与歌词。 |
+| [曲风、乐谱、音乐百科与 UGC](docs/api-gap-tasks/P2-03_GENRE_SHEET_ENCYCLOPEDIA_AND_UGC.md) | `style_*`、`sheet_*`、`song_wiki_summary`、`ugc_*` | 发现与知识内容先只读，UGC 写入后置。 |
+| [听歌足迹与周/月/年报告](docs/api-gap-tasks/P2-04_LISTENING_FOOTPRINTS_AND_REPORTS.md) | `listen_data_*`、`music_first_listen_info` | 复用现有听歌排行，区分活动年度报告。 |
+| [云盘与播客上传](docs/api-gap-tasks/P2-05_CLOUD_AND_PODCAST_UPLOAD.md) | `cloud_upload_*`、`voice_upload`、NOS | 覆盖 token、直传/分片、进度、断点、对账与临时清理。 |
+| [一起听实时同步](docs/api-gap-tasks/P2-06_LISTEN_TOGETHER_REALTIME.md) | `listentogether_*` | 独立设计房间、心跳、命令序列、列表版本和状态同步。 |
+
+P2 六份文档同样可独立交付给实现 agent，但不代表适合六路同时修改。MV/视频与播客先二选一；上传依赖云盘/播客读取；一起听应最后接入播放器。并行时由单一集成 agent 负责 `EAPITransport`、`LiveMusicLibrary`、`AppModel`、Route/Views、`DetailExtrasViews`、`PlayerController`、共享 checks 和检查脚本，其余 agent 只提交领域文件及领域测试。
 
 ## 6. 协议能力升级顺序
 
@@ -127,9 +131,9 @@ P0/P1 共 12 份独立文档均按可单独交付给实现 agent 的格式编写
 
 当前核心接口和 P0 大部分功能可由 EAPI 覆盖。先复用 `EAPICodec`、Cookie 档案、缓存和重试策略，避免为“覆盖率”引入未使用代码。
 
-### 6.2 按需增加 WEAPI
+### 6.2 复用并按需扩展 WEAPI
 
-当选中的接口只能稳定使用 WEAPI 时，再加入双层 AES-128-CBC 和 RSA 请求构造。实现前应先选定具体接口并留下 golden vector；不要暴露任意 URI 的通用 WEAPI 调用。
+现有 `WEAPICodec` 与 `requestWEAPI` 已覆盖双层 AES-128-CBC、RSA、Cookie/CSRF 和固定随机 key 测试。新功能只增加固定路径包装与 contract fixture；不要重复实现加密，也不要暴露任意 URI 的通用 WEAPI 调用。
 
 ### 6.3 XEAPI 只服务明确功能
 
@@ -180,5 +184,8 @@ P0/P1 共 12 份独立文档均按可单独交付给实现 agent 的格式编写
 
 1. 批次 A：新版歌词、歌曲权限和歌单元数据先沿用 EAPI；私人 FM、热搜和评论点赞经固定接口验证后复用同一个最小 WEAPI 实现。
 2. 批次 B：二维码账号生命周期、最近播放全类型、云盘只读、歌单封面与排序。
-3. 批次 C：MV/视频或播客二选一，按实际用户需求选择，不同时铺开。
-4. 批次 D：只有被选功能需要时实现 WEAPI/XEAPI；每种协议先做一个接口和一组 golden/live 检查，再扩展。
+3. 批次 C1：听歌足迹和知识内容可先做领域模型/页面，集成共享 Route 时串行合并。
+4. 批次 C2：MV/视频或播客二选一，按实际用户需求选择，不同时铺开。
+5. 批次 D：云盘上传可在 P1-04 后实施；播客上传必须等 P2-02，不能用空壳播客模型抢跑。
+6. 批次 E：一起听最后接入播放器，并先完成双账号 live contract 和无网络状态机检查。
+7. 只有明确功能需要时再实现 XEAPI；先做一个接口和一组 golden/live 检查，再扩展。

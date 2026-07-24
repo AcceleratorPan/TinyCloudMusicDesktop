@@ -112,7 +112,7 @@ enum WriteAPIContractCheck {
         var count = 0
 
         try verifyCoverProcessing()
-        try await verifyPlaybackQualityPrivilegeProfile()
+        try await verifyPlaybackQualityVIPProfile()
         try await verifyHeartModeFallback(transport: transport)
         count += 3
 
@@ -429,7 +429,7 @@ enum WriteAPIContractCheck {
         print("Write API contract checks passed: \(count) requests captured locally")
     }
 
-    private static func verifyPlaybackQualityPrivilegeProfile() async throws {
+    private static func verifyPlaybackQualityVIPProfile() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [RequestCaptureProtocol.self]
         let repository = LiveMusicRepository(transport: EAPITransport(
@@ -437,7 +437,7 @@ enum WriteAPIContractCheck {
             cookie: "MUSIC_A=guest-token",
             musicU: "vip-token"
         ))
-        RequestCaptureProtocol.reset(responses: [
+        let responses: [String: (statusCode: Int, body: Data)] = [
             "/eapi/song/music/detail/get": (
                 200,
                 Data(#"{"code":200,"data":{"l":{"br":128000,"size":1000,"sr":44100}}}"#.utf8)
@@ -446,19 +446,32 @@ enum WriteAPIContractCheck {
                 200,
                 Data(#"{"code":200,"privileges":[{"plLevel":"standard","flLevel":"standard"}]}"#.utf8)
             )
-        ])
+        ]
+        RequestCaptureProtocol.reset(responses: responses)
 
         let qualities = try await repository.songQualityDetails(for: 17)
         let requests = RequestCaptureProtocol.requests()
-        let privilegeCookie = requests.first { $0.url?.path == "/eapi/v3/song/detail" }?
-            .value(forHTTPHeaderField: "Cookie") ?? ""
+        let cookies = requests.map { $0.value(forHTTPHeaderField: "Cookie") ?? "" }
         precondition(qualities.count == 1 && qualities[0].isAvailable)
         precondition(Set(requests.compactMap(\.url?.path)) == [
             "/eapi/song/music/detail/get", "/eapi/v3/song/detail"
         ])
-        precondition(privilegeCookie.contains("MUSIC_A=guest-token"))
-        precondition(privilegeCookie.contains("MUSIC_U=vip-token"))
-        precondition(privilegeCookie.contains("os=iPhone OS"))
+        precondition(cookies.count == 2)
+        precondition(cookies.allSatisfy { $0.contains("MUSIC_U=vip-token") })
+        precondition(cookies.allSatisfy { !$0.contains("MUSIC_A=guest-token") })
+        precondition(cookies.allSatisfy { $0.contains("os=Android") })
+
+        let fallbackRepository = LiveMusicRepository(transport: EAPITransport(
+            session: URLSession(configuration: configuration),
+            cookie: "MUSIC_A=guest-token",
+            musicU: ""
+        ))
+        RequestCaptureProtocol.reset(responses: responses)
+        _ = try await fallbackRepository.songQualityDetails(for: 17)
+        let fallbackCookies = RequestCaptureProtocol.requests()
+            .map { $0.value(forHTTPHeaderField: "Cookie") ?? "" }
+        precondition(fallbackCookies.count == 2)
+        precondition(fallbackCookies.allSatisfy { $0 == "MUSIC_A=guest-token" })
     }
 
     private static func verifyHeartModeFallback(transport: EAPITransport) async throws {

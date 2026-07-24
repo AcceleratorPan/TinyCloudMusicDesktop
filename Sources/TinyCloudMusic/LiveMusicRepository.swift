@@ -118,13 +118,13 @@ struct LiveMusicRepository: MusicRepository {
                 responseEncoding: .automatic
             ),
             payload: ["songId": songID],
+            vip: true,
             cache: .detail
         )
         async let privilegeData = request(
             EAPIEndpoint("/eapi/v3/song/detail"),
             payload: ["c": "[{\"id\":\(songID)}]"],
             vip: true,
-            iPhoneClient: true,
             cache: .detail
         )
         let result = try await (qualityData, privilegeData)
