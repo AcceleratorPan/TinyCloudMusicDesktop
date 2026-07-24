@@ -246,6 +246,15 @@ struct MusicLibraryView: View {
             }
         }
         .navigationTitle("我的音乐")
+        .toolbar {
+            ToolbarItem {
+                Button { onOpenRoute(.podcastSubscriptions) } label: {
+                    Image(systemName: "star.square")
+                }
+                .help("订阅的播客")
+                .accessibilityLabel("订阅的播客")
+            }
+        }
         .task(id: model.currentUserID) { await load() }
         .task(id: playlistRefreshID) { await refreshPlaylistsIfNeeded() }
         .task(id: player.playbackReportRevision) {
@@ -436,6 +445,10 @@ struct MusicLibraryView: View {
                         .monospacedDigit()
                 }
                 Spacer()
+                Button { onOpenRoute(.listeningFootprints) } label: {
+                    Label("完整足迹", systemImage: "chart.line.uptrend.xyaxis")
+                }
+                .help("查看今日、周、月和年度听歌足迹")
             }
 
             if let recentPlayedSong {
@@ -1074,7 +1087,13 @@ struct ListeningHistoryView: View {
             AnyView(ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(items) { item in
-                        RecentMediaRow(item: item, symbol: kind.symbol)
+                        RecentMediaRow(
+                            item: item,
+                            symbol: kind.symbol,
+                            open: recentRoute(for: kind, item: item).map { route in
+                                { model.open(route) }
+                            }
+                        )
                         Divider().padding(.leading, 64)
                     }
                 }
@@ -1102,6 +1121,19 @@ struct ListeningHistoryView: View {
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 8)
+        }
+    }
+
+    private func recentRoute(for kind: RecentPlaybackKind, item: RecentMediaSummary) -> Route? {
+        switch kind {
+        case .video:
+            .video(item.resourceID)
+        case .voice:
+            Int64(item.resourceID).map(Route.podcastEpisode)
+        case .podcast:
+            Int64(item.resourceID).map(Route.podcast)
+        case .song, .album, .playlist:
+            nil
         }
     }
 
@@ -1170,8 +1202,21 @@ struct ListeningHistoryView: View {
 private struct RecentMediaRow: View {
     let item: RecentMediaSummary
     let symbol: String
+    let open: (() -> Void)?
 
     var body: some View {
+        Group {
+            if let open {
+                Button(action: open) { row }
+                    .buttonStyle(.plain)
+                    .help("打开 \(item.title)")
+            } else {
+                row
+            }
+        }
+    }
+
+    private var row: some View {
         HStack(spacing: 12) {
             LibraryRemoteImage(url: item.artworkURL, symbol: symbol, size: 52)
             VStack(alignment: .leading, spacing: 4) {
@@ -1200,7 +1245,7 @@ private struct RecentMediaRow: View {
 
 private enum MusicLibrarySection: String, CaseIterable {
     case recommendations = "每日推荐"
-    case listening = "听歌排行"
+    case listening = "听歌足迹"
     case playlists = "我的歌单"
     case following = "我的关注"
     case recommendedUsers = "推荐用户"
@@ -1660,6 +1705,7 @@ private struct CommentRow: View {
     let currentUserID: Int64?
     let isWriting: Bool
     let emojiPictureIDs: [String: String]
+    var showsActions = true
     let onOpenUser: (Int64) -> Void
     let showReplies: () -> Void
     let reply: () -> Void
@@ -1681,7 +1727,8 @@ private struct CommentRow: View {
                     .foregroundStyle(.secondary)
             }
             CommentEmojiText(content: comment.displayContent, remotePictureIDs: emojiPictureIDs)
-            HStack(spacing: 12) {
+            if showsActions {
+                HStack(spacing: 12) {
                 Button(action: toggleLike) {
                     HStack(spacing: 4) {
                         if isWriting {
@@ -1732,9 +1779,33 @@ private struct CommentRow: View {
                     .help("删除评论")
                     .accessibilityLabel("删除评论")
                 }
+                }
             }
         }
         .padding(.vertical, 12)
+    }
+}
+
+struct ReadOnlyCommentRow: View {
+    let comment: MusicComment
+    let emojiPictureIDs: [String: String]
+    let onOpenUser: (Int64) -> Void
+
+    var body: some View {
+        CommentRow(
+            comment: comment,
+            canOpenReplies: false,
+            repliesExpanded: false,
+            currentUserID: nil,
+            isWriting: false,
+            emojiPictureIDs: emojiPictureIDs,
+            showsActions: false,
+            onOpenUser: onOpenUser,
+            showReplies: {},
+            reply: {},
+            toggleLike: {},
+            delete: {}
+        )
     }
 }
 

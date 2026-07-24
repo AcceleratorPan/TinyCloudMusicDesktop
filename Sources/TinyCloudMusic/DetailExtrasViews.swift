@@ -4,6 +4,7 @@ struct ArtistExtrasView: View {
     let artistID: Int64
     let extras: LiveMusicExtras
     let library: LiveMusicLibrary
+    let knowledgeSection: AnyView?
     let onOpenRoute: (Route) -> Void
     let onFollowChanged: (Bool) -> Void
     let songList: AnyView
@@ -19,6 +20,7 @@ struct ArtistExtrasView: View {
         artistID: Int64,
         extras: LiveMusicExtras,
         library: LiveMusicLibrary,
+        knowledgeSection: AnyView?,
         onOpenRoute: @escaping (Route) -> Void,
         onFollowChanged: @escaping (Bool) -> Void,
         songList: AnyView
@@ -26,6 +28,7 @@ struct ArtistExtrasView: View {
         self.artistID = artistID
         self.extras = extras
         self.library = library
+        self.knowledgeSection = knowledgeSection
         self.onOpenRoute = onOpenRoute
         self.onFollowChanged = onFollowChanged
         self.songList = songList
@@ -35,15 +38,85 @@ struct ArtistExtrasView: View {
 
     private var content: AnyView {
         AnyView(VStack(alignment: .leading, spacing: 16) {
-            switch phase {
-            case .loading:
-                DetailExtrasStatusView(status: .loading("正在加载歌手内容"))
+            Picker("艺人主页内容", selection: $selectedSection) {
+                ForEach(visibleSections, id: \.self) { section in
+                    Label(section.rawValue, systemImage: section.symbol)
+                        .tag(section)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 640)
+
+            if selectedSection == .songs, case let .loaded(snapshot) = phase {
+                followControls(snapshot)
+            }
+
+            if selectedSection == .songs, let followError {
+                Label(followError, systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+            }
+
+            switch selectedSection {
+            case .songs:
                 songList
-            case let .failed(message):
-                DetailExtrasStatusView(status: .failed(message)) { reloadID += 1 }
-                songList
-            case let .loaded(snapshot):
-                loadedContent(snapshot)
+            case .albums:
+                switch phase {
+                case .loading:
+                    DetailExtrasStatusView(status: .loading("正在加载专辑"))
+                case let .failed(message):
+                    DetailExtrasStatusView(status: .failed(message)) { reloadID += 1 }
+                case let .loaded(snapshot):
+                    if snapshot.albums.isEmpty {
+                        DetailExtrasStatusView(status: .empty("暂无专辑", "square.stack"))
+                    } else {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 12)], spacing: 8) {
+                            ForEach(snapshot.albums) { item in
+                                DetailExtrasNavigationRow(
+                                    title: item.album.name,
+                                    subtitle: item.isSubscribed ? "\(item.album.artist.name) · 已收藏" : item.album.artist.name,
+                                    imageURL: item.album.artwork.remoteURL,
+                                    symbol: "square.stack",
+                                    accessibilityHint: "打开专辑详情"
+                                ) {
+                                    onOpenRoute(.album(item.album.id))
+                                }
+                            }
+                        }
+                    }
+                }
+            case .similarArtists:
+                switch phase {
+                case .loading:
+                    DetailExtrasStatusView(status: .loading("正在加载相似歌手"))
+                case let .failed(message):
+                    DetailExtrasStatusView(status: .failed(message)) { reloadID += 1 }
+                case let .loaded(snapshot):
+                    if snapshot.similarArtists.isEmpty {
+                        DetailExtrasStatusView(status: .empty("暂无相似歌手", "music.mic"))
+                    } else {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 12)], spacing: 8) {
+                            ForEach(snapshot.similarArtists) { artist in
+                                DetailExtrasNavigationRow(
+                                    title: artist.name,
+                                    subtitle: artist.isFollowed ? "已关注" : "歌手",
+                                    imageURL: artist.imageURL,
+                                    symbol: "music.mic",
+                                    accessibilityHint: "打开歌手详情"
+                                ) {
+                                    onOpenRoute(.artist(artist.id))
+                                }
+                            }
+                        }
+                    }
+                }
+            case .knowledge:
+                if let knowledgeSection {
+                    knowledgeSection
+                } else {
+                    DetailExtrasStatusView(status: .empty("百科不可用", "text.book.closed"))
+                }
             }
         }
         .task(id: "\(artistID):\(reloadID)") { await load() }
@@ -54,95 +127,40 @@ struct ArtistExtrasView: View {
         .onDisappear { followTask?.cancel() })
     }
 
-    private func loadedContent(_ snapshot: ArtistExtrasSnapshot) -> AnyView {
-        AnyView(Group {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("关注状态")
-                        .font(.headline)
-                    Text(followSummary(snapshot.followStatus))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button {
-                    updateFollow(snapshot)
-                } label: {
-                    if isUpdatingFollow {
-                        HStack(spacing: 6) {
-                            ProgressView().controlSize(.small)
-                            Text("更新中")
-                        }
-                    } else {
-                        Label(
-                            snapshot.followStatus.isFollowed ? "取消关注" : "关注歌手",
-                            systemImage: snapshot.followStatus.isFollowed ? "person.badge.minus" : "person.badge.plus"
-                        )
+    private var visibleSections: [ArtistDetailSection] {
+        ArtistDetailSection.allCases.filter { $0 != .knowledge || knowledgeSection != nil }
+    }
+
+    private func followControls(_ snapshot: ArtistExtrasSnapshot) -> some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("关注状态")
+                    .font(.headline)
+                Text(followSummary(snapshot.followStatus))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button {
+                updateFollow(snapshot)
+            } label: {
+                if isUpdatingFollow {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("更新中")
                     }
-                }
-                .buttonStyle(.bordered)
-                .disabled(isUpdatingFollow)
-                .frame(minHeight: 44)
-                .accessibilityHint(snapshot.followStatus.isFollowed ? "取消关注这位歌手" : "关注这位歌手")
-            }
-
-            if let followError {
-                Label(followError, systemImage: "exclamationmark.triangle")
-                    .font(.callout)
-                    .foregroundStyle(.red)
-            }
-
-            Picker("艺人主页内容", selection: $selectedSection) {
-                ForEach(ArtistDetailSection.allCases, id: \.self) { section in
-                    Label(section.rawValue, systemImage: section.symbol)
-                        .tag(section)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(maxWidth: 560)
-
-            switch selectedSection {
-            case .songs:
-                songList
-            case .albums:
-                if snapshot.albums.isEmpty {
-                    DetailExtrasStatusView(status: .empty("暂无专辑", "square.stack"))
                 } else {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 12)], spacing: 8) {
-                        ForEach(snapshot.albums) { item in
-                            DetailExtrasNavigationRow(
-                                title: item.album.name,
-                                subtitle: item.isSubscribed ? "\(item.album.artist.name) · 已收藏" : item.album.artist.name,
-                                imageURL: item.album.artwork.remoteURL,
-                                symbol: "square.stack",
-                                accessibilityHint: "打开专辑详情"
-                            ) {
-                                onOpenRoute(.album(item.album.id))
-                            }
-                        }
-                    }
-                }
-            case .similarArtists:
-                if snapshot.similarArtists.isEmpty {
-                    DetailExtrasStatusView(status: .empty("暂无相似歌手", "music.mic"))
-                } else {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 12)], spacing: 8) {
-                        ForEach(snapshot.similarArtists) { artist in
-                            DetailExtrasNavigationRow(
-                                title: artist.name,
-                                subtitle: artist.isFollowed ? "已关注" : "歌手",
-                                imageURL: artist.imageURL,
-                                symbol: "music.mic",
-                                accessibilityHint: "打开歌手详情"
-                            ) {
-                                onOpenRoute(.artist(artist.id))
-                            }
-                        }
-                    }
+                    Label(
+                        snapshot.followStatus.isFollowed ? "取消关注" : "关注歌手",
+                        systemImage: snapshot.followStatus.isFollowed ? "person.badge.minus" : "person.badge.plus"
+                    )
                 }
             }
-        })
+            .buttonStyle(.bordered)
+            .disabled(isUpdatingFollow)
+            .frame(minHeight: 44)
+            .accessibilityHint(snapshot.followStatus.isFollowed ? "取消关注这位歌手" : "关注这位歌手")
+        }
     }
 
     @MainActor
@@ -206,12 +224,125 @@ private enum ArtistDetailSection: String, CaseIterable {
     case songs = "歌曲"
     case albums = "专辑"
     case similarArtists = "相似歌手"
+    case knowledge = "百科"
 
     var symbol: String {
         switch self {
         case .songs: "music.note"
         case .albums: "square.stack"
         case .similarArtists: "music.mic"
+        case .knowledge: "text.book.closed"
+        }
+    }
+}
+
+struct ArtistSongList: View {
+    private static let pageSize = 100
+
+    let artistID: Int64
+    let hotSongs: [Song]
+    let totalSongCount: Int?
+    let extras: LiveMusicExtras
+    @Bindable var model: AppModel
+    @Bindable var player: PlayerController
+
+    @State private var scope = ArtistSongScope.hot
+    @State private var allSongs: [Song] = []
+    @State private var nextOffset = 0
+    @State private var hasMore = true
+    @State private var isLoading = false
+    @State private var loadError: String?
+    @State private var loadedTotalSongCount: Int?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Picker("歌曲范围", selection: $scope) {
+                ForEach(ArtistSongScope.allCases, id: \.self) { scope in
+                    Text(scope.title(hotCount: hotSongs.count, totalCount: loadedTotalSongCount ?? totalSongCount))
+                        .tag(scope)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 240)
+
+            switch scope {
+            case .hot:
+                if hotSongs.isEmpty {
+                    DetailExtrasStatusView(status: .empty("暂无热门歌曲", "music.note"))
+                } else {
+                    SongList(songs: hotSongs, model: model, player: player, showsHeading: false)
+                }
+            case .all:
+                allSongContent
+            }
+        }
+        .task(id: "\(artistID):\(scope)") {
+            guard scope == .all, allSongs.isEmpty else { return }
+            await loadMore()
+        }
+    }
+
+    @ViewBuilder
+    private var allSongContent: some View {
+        if allSongs.isEmpty, let loadError {
+            DetailExtrasStatusView(status: .failed(loadError)) {
+                Task { await loadMore() }
+            }
+        } else if allSongs.isEmpty, isLoading || hasMore {
+            DetailExtrasStatusView(status: .loading("正在加载全部歌曲"))
+        } else if allSongs.isEmpty {
+            DetailExtrasStatusView(status: .empty("暂无歌曲", "music.note"))
+        } else {
+            SongList(
+                songs: allSongs,
+                model: model,
+                player: player,
+                showsHeading: false,
+                hasMore: hasMore,
+                isLoadingMore: isLoading,
+                loadMoreError: loadError,
+                onLoadMore: { Task { await loadMore() } }
+            )
+        }
+    }
+
+    @MainActor
+    private func loadMore() async {
+        guard !isLoading, hasMore else { return }
+        isLoading = true
+        loadError = nil
+        defer { isLoading = false }
+        do {
+            let page = try await extras.artistSongs(
+                artistID: artistID,
+                offset: nextOffset,
+                limit: Self.pageSize
+            )
+            try Task.checkCancellation()
+            allSongs += page.songs
+            nextOffset = page.offset + Self.pageSize
+            hasMore = page.hasMore && !page.songs.isEmpty
+            if let total = page.total {
+                loadedTotalSongCount = total
+            } else if !hasMore {
+                loadedTotalSongCount = allSongs.count
+            }
+        } catch is CancellationError {
+        } catch {
+            loadError = error.localizedDescription
+        }
+    }
+}
+
+private enum ArtistSongScope: String, CaseIterable {
+    case hot = "热门"
+    case all = "全部"
+
+    func title(hotCount: Int, totalCount: Int?) -> String {
+        switch self {
+        case .hot: "热门 \(hotCount)"
+        case .all: totalCount.map { "全部 \($0)" } ?? rawValue
         }
     }
 }

@@ -128,6 +128,35 @@ struct LiveMusicExtras: Sendable {
         return MusicArtistAlbumPage(albums: albums, offset: offset, hasMore: root.bool("more"))
     }
 
+    func artistSongs(
+        artistID: Int64,
+        offset: Int = 0,
+        limit: Int = 100
+    ) async throws -> MusicArtistSongPage {
+        guard artistID > 0, offset >= 0, (1...100).contains(limit) else { throw EAPIError.invalidPayload }
+        let root = try await call(
+            EAPIEndpoint(
+                "/eapi/v1/artist/songs",
+                signing: "/api/v1/artist/songs",
+                host: Self.interfaceHost
+            ),
+            payload: [
+                "id": artistID,
+                "private_cloud": "true",
+                "work_type": 1,
+                "order": "hot",
+                "offset": offset,
+                "limit": limit
+            ]
+        )
+        return MusicArtistSongPage(
+            songs: root.array("songs").compactMap(repository.decodeLiveSong),
+            offset: offset,
+            hasMore: root.bool("more"),
+            total: root.keys.contains("total") ? root.int("total") : nil
+        )
+    }
+
     func albumSubscription(albumID: Int64) async throws -> MusicAlbumSubscription {
         guard albumID > 0 else { throw EAPIError.invalidPayload }
         let root = try await call(

@@ -1,0 +1,98 @@
+{
+  "total": {"code": 200, "data": {"totalDuration": "1219210"}},
+  "today": {
+    "code": 200,
+    "data": {
+      "songItems": [
+        {
+          "songId": 42,
+          "songName": "First",
+          "artists": [{"id": 7, "name": "Artist"}],
+          "albumName": "Album",
+          "picUrl": "https://example.com/cover.jpg",
+          "playCount": 4,
+          "durationSeconds": 720
+        },
+        {"songId": 42, "songName": "Duplicate", "playCount": 99}
+      ]
+    }
+  },
+  "rank": {
+    "code": 200,
+    "data": {
+      "songItems": [
+        {
+          "songId": 43,
+          "songName": "Second",
+          "artists": [{"id": 9, "name": "Another Artist"}],
+          "albumId": 10,
+          "albumName": "Another Album",
+          "playCount": 6
+        },
+        {
+          "song": {
+            "id": 44,
+            "name": "Third",
+            "ar": [{"id": 11, "name": "Third Artist"}],
+            "al": {"id": 12, "name": "Third Album"},
+            "dt": 180000
+          },
+          "playCount": 3
+        }
+      ]
+    }
+  },
+  "realtime": {
+    "code": 200,
+    "data": {
+      "items": [
+        {"type": "listeningTime", "value": {"listenTime": 23, "desc": "小时"}},
+        {"songId": 999, "playCount": 999, "duration": 1}
+      ],
+      "listenDays": 9
+    }
+  },
+  "report": {
+    "code": 200,
+    "data": {
+      "title": "Weekly report",
+      "listenDuration": 7200,
+      "songCount": 12,
+      "previousEndTime": "1719705600000",
+      "topSongBlock": {
+        "playCount": 23,
+        "duration": 42,
+        "songItems": [
+          {
+            "songId": 45,
+            "songName": "Report Song",
+            "artists": [{"id": 13, "name": "Report Artist"}],
+            "albumId": 14,
+            "albumName": "Report Album",
+            "playCount": 8
+          }
+        ]
+      },
+      "unknownBlock": {"opaque": {"url": "https://invalid.example/never-open"}}
+    }
+  },
+  "year": {
+    "code": 200,
+    "data": {
+      "reportTitle": "Year footprint",
+      "listenDuration": 86400,
+      "listenDays": 120,
+      "artistCount": 80,
+      "albumCount": 64
+    }
+  },
+  "first": {
+    "code": 200,
+    "data": {
+      "firstListenInfo": {
+        "firstListenTime": "1704067200000",
+        "sceneText": "Found in a daily recommendation"
+      }
+    }
+  }
+}

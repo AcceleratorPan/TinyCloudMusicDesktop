@@ -215,7 +215,9 @@ struct FixtureMusicRepository: MusicRepository {
         case let .user(id):
             guard let user = Fixture.users.first(where: { $0.id == id }) else { throw AppError.invalidRoute }
             return .user(user, playlists: Array(Fixture.playlists.prefix(3)))
-        case .home, .search, .cloudMusic, .comments, .similarSongs, .recommendationHistory:
+        case .home, .search, .cloudMusic, .comments, .similarSongs, .recommendationHistory, .listeningFootprints,
+             .mv, .video, .podcast, .podcastEpisode, .broadcast, .podcastSubscriptions,
+             .musicStyles, .musicStyle:
             throw AppError.invalidRoute
         }
     }

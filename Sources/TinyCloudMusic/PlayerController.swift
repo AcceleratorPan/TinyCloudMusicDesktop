@@ -294,6 +294,10 @@ final class PlayerController {
         wantsPlayback ? pause() : resume()
     }
 
+    func pauseForVideo() {
+        if wantsPlayback { pause() }
+    }
+
     func previous() {
         guard let currentIndex else { return }
         if position > 3 {

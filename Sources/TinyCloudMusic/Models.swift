@@ -103,6 +103,7 @@ struct Artist: Identifiable, Hashable, Sendable {
     let biography: String
     let artwork: Artwork
     var isFollowed = false
+    var songCount: Int? = nil
 }
 
 struct Album: Identifiable, Hashable, Sendable {
@@ -242,6 +243,15 @@ enum Route: Hashable, Sendable {
     case comments(Int64)
     case similarSongs(Song)
     case recommendationHistory
+    case listeningFootprints
+    case mv(Int64)
+    case video(String)
+    case podcast(Int64)
+    case podcastEpisode(Int64)
+    case broadcast(String)
+    case podcastSubscriptions
+    case musicStyles
+    case musicStyle(Int64, String)
 }
 
 enum SearchItem: Identifiable, Hashable, Sendable {
@@ -828,9 +838,8 @@ struct AppSettings: Equatable, Sendable {
     var homeSectionIDs: [String]
     var downloadBookmark: Data?
     var imageBookmark: Data?
+    var sheetBookmark: Data?
     var cacheBookmark: Data?
-
-    var preferredImageBookmark: Data? { imageBookmark ?? downloadBookmark }
 }
 
 enum CrossfadeTransition {

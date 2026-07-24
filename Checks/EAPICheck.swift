@@ -38,15 +38,16 @@ enum EAPICheck {
         )
         let decodedEncryptedResponse = try EAPICodec.responseData(encryptedResponse)
         precondition(decodedEncryptedResponse == Data(#"{"code":200,"data":{"value":"encrypted"}}"#.utf8))
-        precondition(
-            EAPICookieHeader.value(
-                cookie: "MUSIC_A=session; __csrf=csrf",
-                musicU: "",
-                vip: true,
-                buildVersion: 123,
-                requestID: "request"
-            ) == "MUSIC_A=session; __csrf=csrf"
+        let fallbackCookie = EAPICookieHeader.value(
+            cookie: "MUSIC_A=session; __csrf=csrf",
+            musicU: "",
+            vip: true,
+            buildVersion: 123,
+            requestID: "request"
         )
+        precondition(fallbackCookie.contains("MUSIC_A=session; __csrf=csrf"))
+        precondition(fallbackCookie.contains("os=iPhone OS; appver=9.0.90"))
+        precondition(!fallbackCookie.contains("os=Android"))
         let vipCookie = EAPICookieHeader.value(
             cookie: "MUSIC_A=session; __csrf=csrf",
             musicU: "vip-token",
@@ -69,15 +70,15 @@ enum EAPICheck {
         precondition(iPhoneVIPCookie.contains("MUSIC_U=vip-token"))
         precondition(!iPhoneVIPCookie.contains("embedded-token"))
         precondition(!iPhoneVIPCookie.contains("os=pc"))
-        precondition(
-            EAPICookieHeader.value(
-                cookie: "__csrf=csrf; MUSIC_U=embedded-token",
-                musicU: "",
-                vip: true,
-                buildVersion: 123,
-                requestID: "request"
-            ) == "__csrf=csrf; MUSIC_U=embedded-token"
+        let embeddedFallbackCookie = EAPICookieHeader.value(
+            cookie: "__csrf=csrf; MUSIC_U=embedded-token",
+            musicU: "",
+            vip: true,
+            buildVersion: 123,
+            requestID: "request"
         )
+        precondition(embeddedFallbackCookie.contains("MUSIC_U=embedded-token"))
+        precondition(embeddedFallbackCookie.contains("os=iPhone OS; appver=9.0.90"))
         let normalCookie = EAPICookieHeader.value(
             cookie: "__csrf=csrf",
             musicU: "music-token",
@@ -110,9 +111,17 @@ enum EAPICheck {
                 musicU: "vip-token"
             ) == nil
         )
-        let explicitCredentials = EAPITransport(cookie: "", musicU: nil).credentials {
-            preconditionFailure("Explicit credentials must bypass Keychain")
-        }
+        let defaultCredentials = EAPITransport().credentials()
+        precondition(defaultCredentials.cookie.isEmpty && defaultCredentials.musicU.isEmpty)
+        let storedCredentials = try SessionCredentials(cookie: "stored=value", musicU: "stored-token")
+        let injectedCredentials = EAPITransport(loadStoredCredentials: { storedCredentials }).credentials()
+        precondition(injectedCredentials.cookie == "stored=value")
+        precondition(injectedCredentials.musicU == "stored-token")
+        let explicitCredentials = EAPITransport(
+            cookie: "",
+            musicU: nil,
+            loadStoredCredentials: { preconditionFailure("Explicit credentials must bypass storage") }
+        ).credentials()
         precondition(explicitCredentials.cookie.isEmpty && explicitCredentials.musicU.isEmpty)
         let throttled = HTTPURLResponse(
             url: URL(string: "https://example.com")!,

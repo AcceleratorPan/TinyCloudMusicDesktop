@@ -175,44 +175,80 @@ struct NowPlayingDetailView: View {
     let close: () -> Void
 
     @State private var showingQueue = false
+    @State private var showingSheets = false
+    @State private var hasSheets = false
+    @State private var knowledgeMetadata: [KnowledgeMetadataDisplayItem] = []
 
     var body: some View {
-        ZStack {
-            Color(nsColor: .windowBackgroundColor)
-            if let song = player.currentSong {
-                song.album.artwork.accent.color.opacity(0.055)
-            }
+        VStack(spacing: 0) {
+            header
 
-            if let song = player.currentSong {
-                HStack(alignment: .top, spacing: 44) {
-                    songDetails(song)
+            ZStack {
+                Color(nsColor: .windowBackgroundColor)
+                if let song = player.currentSong {
+                    song.album.artwork.accent.color.opacity(0.055)
+                }
+
+                if let song = player.currentSong {
+                    HStack(alignment: .top, spacing: 44) {
+                        GeometryReader { geometry in
+                            songDetails(song)
+                                .frame(maxWidth: .infinity, minHeight: geometry.size.height)
+                        }
                         .frame(width: 308)
 
-                    LyricsPane(player: player)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        LyricsPane(player: player)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    .padding(.horizontal, 40)
+                    .padding(.vertical, 32)
+                } else {
+                    ContentUnavailableView(
+                        "尚未播放",
+                        systemImage: "music.note",
+                        description: Text("从发现、搜索或资料库中选择一首歌曲")
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .padding(.horizontal, 40)
-                .padding(.vertical, 32)
-            } else {
-                ContentUnavailableView(
-                    "尚未播放",
-                    systemImage: "music.note",
-                    description: Text("从发现、搜索或资料库中选择一首歌曲")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .tint(.red)
         .preferredColorScheme(model.settings.appearance.colorScheme)
-        .safeAreaInset(edge: .top, spacing: 0) {
-            header
-        }
         .overlay(alignment: .top) {
             InteractionToast(message: model.interactionMessage)
                 .padding(.top, 66)
         }
         .frame(minWidth: 780, idealWidth: 940)
         .frame(height: 720)
+        .sheet(isPresented: $showingSheets) {
+            if let song = player.currentSong, let library = model.knowledgeLibrary {
+                MusicSheetsView(song: song, library: library, model: model)
+            }
+        }
+        .onChange(of: player.currentSong?.id) { _, _ in
+            showingSheets = false
+        }
+        .task(id: player.currentSong?.id) {
+            await loadKnowledgeAvailability()
+        }
+    }
+
+    @MainActor
+    private func loadKnowledgeAvailability() async {
+        hasSheets = false
+        knowledgeMetadata = []
+        guard let songID = player.currentSong?.id, let library = model.knowledgeLibrary else { return }
+
+        async let sheets = try? library.sheets(songID: songID)
+        async let wiki = try? library.songWiki(songID: songID)
+        let (loadedSheets, loadedWiki) = await (sheets, wiki)
+        guard !Task.isCancelled, player.currentSong?.id == songID else { return }
+        hasSheets = loadedSheets?.isEmpty == false
+        knowledgeMetadata = (loadedWiki ?? []).flatMap { block in
+            block.metadataItems.enumerated().map { index, text in
+                KnowledgeMetadataDisplayItem(text: text, separatorSpacing: index == 0 ? 9 : 3)
+            }
+        }
     }
 
     private var header: some View {
@@ -289,25 +325,49 @@ struct NowPlayingDetailView: View {
                 .shadow(color: .black.opacity(0.16), radius: 20, y: 10)
                 .accessibilityLabel("\(song.name) 专辑封面")
 
-            VStack(spacing: 5) {
-                SongTitleText(song: song)
-                    .font(.title2.weight(.bold))
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .help(song.name)
-                Text(song.artistsDisplay)
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
-                    .help(song.artistsDisplay)
-                Text(song.album.name)
-                    .font(.subheadline)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .help(song.album.name)
+            VStack(spacing: 12) {
+                VStack(spacing: 5) {
+                    SongTitleText(song: song)
+                        .font(.title2.weight(.bold))
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .help(song.name)
+                    Text(song.artistsDisplay)
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .help(song.artistsDisplay)
+                    Text(song.album.name)
+                        .font(.subheadline)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .help(song.album.name)
+                    if !knowledgeMetadata.isEmpty {
+                        KnowledgeMetadataFlowLayout(
+                            separatorSpacings: knowledgeMetadata.dropFirst().map(\.separatorSpacing)
+                        ) {
+                            ForEach(0..<(knowledgeMetadata.count * 2 - 1), id: \.self) { index in
+                                if index.isMultiple(of: 2) {
+                                    Text(knowledgeMetadata[index / 2].text)
+                                        .fixedSize()
+                                } else {
+                                    Text("·")
+                                        .accessibilityHidden(true)
+                                }
+                            }
+                        }
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .clipped()
+                    }
+                }
+                .accessibilityElement(children: .combine)
+
+                if let accountID = model.currentUserID, let library = model.library {
+                    FirstListenMemorySection(songID: song.id, accountID: accountID, library: library)
+                }
             }
-            .accessibilityElement(children: .combine)
 
             playbackStatus
 
@@ -325,6 +385,11 @@ struct NowPlayingDetailView: View {
                     close()
                     model.open(.comments(song.id))
                 }
+                if hasSheets {
+                    PlayerIconButton(symbol: "music.quarternote.3", label: "乐谱") {
+                        showingSheets = true
+                    }
+                }
                 PlaybackQualityButton(songID: song.id, repository: model.repository, player: player)
                     .id(song.id)
                 if let downloads = model.downloads {
@@ -334,7 +399,7 @@ struct NowPlayingDetailView: View {
 
             PlaybackControls(player: player)
                 .frame(maxWidth: 304)
-                .padding(.bottom, 16)
+                .padding(.bottom, 24)
         }
     }
 
@@ -413,6 +478,55 @@ struct NowPlayingDetailView: View {
         guard let endSeconds else { return "试听" }
         return String(format: "试听至 %d:%02d", endSeconds / 60, endSeconds % 60)
     }
+}
+
+private struct FirstListenMemorySection: View {
+    let songID: Int64
+    let accountID: Int64
+    let library: LiveMusicLibrary
+
+    @State private var memory: FirstListenMemory?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let memory, memory.listenedAt != nil || memory.text != nil {
+                VStack(spacing: 4) {
+                    if let date = memory.listenedAt {
+                        Label(
+                            "初听于 \(date.formatted(date: .abbreviated, time: .omitted))",
+                            systemImage: "clock.arrow.circlepath"
+                        )
+                        .fontWeight(.medium)
+                    }
+                    if let text = memory.text {
+                        Text(text)
+                            .lineLimit(2)
+                            .help(text)
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 304)
+                .accessibilityElement(children: .combine)
+            }
+        }
+        .task(id: FirstListenTaskID(songID: songID, accountID: accountID)) {
+            memory = nil
+            do {
+                let loaded = try await library.firstListenMemory(songID: songID)
+                try Task.checkCancellation()
+                memory = loaded
+            } catch {
+                memory = nil
+            }
+        }
+    }
+}
+
+private struct FirstListenTaskID: Hashable {
+    let songID: Int64
+    let accountID: Int64
 }
 
 private struct NowPlayingToolbarButtonStyle: ButtonStyle {
@@ -527,7 +641,7 @@ private struct LyricsPane: View {
         } else {
             GeometryReader { geometry in
                 ScrollViewReader { proxy in
-                    ScrollView {
+                    ScrollView(.vertical, showsIndicators: false) {
                         LazyVStack(alignment: .leading, spacing: 8) {
                             ForEach(player.lyrics) { line in
                                 LyricRow(
@@ -542,7 +656,6 @@ private struct LyricsPane: View {
                         }
                         .padding(.vertical, max(96, geometry.size.height * 0.42))
                     }
-                    .scrollIndicators(.hidden)
                     .onAppear { centerCurrentLyric(using: proxy) }
                     .onChange(of: player.currentLyric?.id) { _, _ in
                         centerCurrentLyric(using: proxy)
@@ -722,6 +835,101 @@ private struct LyricWordFlowLayout: Layout {
         }
         let measuredWidth = width.isFinite ? width : contentWidth
         return (CGSize(width: measuredWidth, height: y + rowHeight), points, sizes)
+    }
+}
+
+private struct KnowledgeMetadataDisplayItem {
+    let text: String
+    let separatorSpacing: CGFloat
+}
+
+struct KnowledgeMetadataFlowLayout: Layout {
+    let separatorSpacings: [CGFloat]
+    private let rowSpacing: CGFloat = 2
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        layout(subviews: subviews, width: proposal.width ?? .infinity).size
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        let result = layout(subviews: subviews, width: bounds.width)
+        for (index, subview) in subviews.enumerated() {
+            let size = result.sizes[index]
+            if let point = result.points[index] {
+                subview.place(
+                    at: CGPoint(x: bounds.minX + point.x, y: bounds.minY + point.y),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(width: size.width, height: size.height)
+                )
+            } else {
+                subview.place(
+                    at: CGPoint(x: bounds.minX - 1, y: bounds.minY),
+                    anchor: .topTrailing,
+                    proposal: ProposedViewSize(width: size.width, height: size.height)
+                )
+            }
+        }
+    }
+
+    private func layout(
+        subviews: Subviews,
+        width: CGFloat
+    ) -> (size: CGSize, points: [CGPoint?], sizes: [CGSize]) {
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        let itemSizes = stride(from: 0, to: sizes.count, by: 2).map { sizes[$0] }
+        let separatorWidth = sizes.count > 1 ? sizes[1].width : 0
+        let rows = KnowledgeMetadataRows.indices(
+            itemWidths: itemSizes.map(\.width),
+            separatorWidth: separatorWidth,
+            separatorSpacings: separatorSpacings,
+            width: width
+        )
+        let measuredWidth = width.isFinite
+            ? width
+            : rows.map { rowWidth($0, itemSizes: itemSizes, separatorWidth: separatorWidth) }.max() ?? 0
+        var points = Array<CGPoint?>(repeating: nil, count: sizes.count)
+        var y: CGFloat = 0
+
+        for row in rows {
+            let contentWidth = rowWidth(row, itemSizes: itemSizes, separatorWidth: separatorWidth)
+            let rowHeight = row.map { itemSizes[$0].height }.max() ?? 0
+            var x = max((measuredWidth - contentWidth) / 2, 0)
+
+            for (position, itemIndex) in row.enumerated() {
+                let subviewIndex = itemIndex * 2
+                if position > 0 {
+                    let separatorIndex = subviewIndex - 1
+                    let spacing = separatorSpacings[itemIndex - 1]
+                    x += spacing
+                    points[separatorIndex] = CGPoint(
+                        x: x,
+                        y: y + (rowHeight - sizes[separatorIndex].height) / 2
+                    )
+                    x += sizes[separatorIndex].width + spacing
+                }
+                points[subviewIndex] = CGPoint(x: x, y: y + (rowHeight - itemSizes[itemIndex].height) / 2)
+                x += itemSizes[itemIndex].width
+            }
+            y += rowHeight + rowSpacing
+        }
+
+        return (CGSize(width: measuredWidth, height: max(y - rowSpacing, 0)), points, sizes)
+    }
+
+    private func rowWidth(_ row: [Int], itemSizes: [CGSize], separatorWidth: CGFloat) -> CGFloat {
+        row.reduce(0) { width, index in
+            width + itemSizes[index].width
+                + (width == 0 ? 0 : separatorSpacings[index - 1] * 2 + separatorWidth)
+        }
     }
 }
 

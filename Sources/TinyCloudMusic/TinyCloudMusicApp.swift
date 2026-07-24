@@ -1,5 +1,4 @@
 import AppKit
-import QuartzCore
 import SwiftUI
 
 @main
@@ -31,10 +30,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
 
-        let transport = EAPITransport()
+        let environment = ProcessInfo.processInfo.environment
+        let credentialStore = CredentialStore(service: CredentialStore.productionService)
+        let transport = EAPITransport(
+            cookie: environment["TINYCLOUDMUSIC_COOKIE"],
+            musicU: environment["TINYCLOUDMUSIC_MUSIC_U"],
+            loadStoredCredentials: { try? credentialStore.load() }
+        )
         let repository = LiveMusicRepository(transport: transport)
         let library = LiveMusicLibrary(transport: transport)
+        let videoLibrary = LiveVideoLibrary(transport: transport)
+        let audioLibrary = LiveAudioContentLibrary(transport: transport)
+        let knowledgeLibrary = LiveMusicKnowledgeLibrary(transport: transport)
         let extras = LiveMusicExtras(transport: transport)
+        MusicSheetTemporaryFiles.cleanupExpired()
         let storedConcurrency = UserDefaults.standard.object(forKey: "downloadConcurrency") == nil
             ? 3
             : UserDefaults.standard.integer(forKey: "downloadConcurrency")
@@ -43,6 +52,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             maximumConcurrentDownloads: storedConcurrency
         )
         let session = SessionController(
+            store: credentialStore,
             transport: transport,
             validator: { credentials in
                 let validator = LiveMusicLibrary(
@@ -61,6 +71,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let model = AppModel(
             repository: repository,
             library: library,
+            videoLibrary: videoLibrary,
+            audioLibrary: audioLibrary,
+            knowledgeLibrary: knowledgeLibrary,
             extras: extras,
             downloads: downloads,
             session: session
@@ -262,15 +275,27 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 enum MenuBarMarquee {
+    private static let speed: CGFloat = 28
+    private static let delay: TimeInterval = 1.2
+
     static func duration(textWidth: CGFloat, viewportWidth: CGFloat, gap: CGFloat) -> TimeInterval? {
         guard textWidth > viewportWidth else { return nil }
-        return TimeInterval((textWidth + gap) / 28)
+        return TimeInterval((textWidth + gap) / speed)
+    }
+
+    static func offset(elapsed: TimeInterval, distance: CGFloat) -> CGFloat {
+        guard elapsed > delay, distance > 0 else { return 0 }
+        let traveled = CGFloat(elapsed - delay) * speed
+        return -traveled.truncatingRemainder(dividingBy: distance)
     }
 }
 
 @MainActor
 private final class MenuBarLyricView: NSView {
     private let label = NSTextField(labelWithString: "")
+    private var marqueeTimer: Timer?
+    private var marqueeStartedAt: TimeInterval = 0
+    private var marqueeDistance: CGFloat = 0
 
     init(width: CGFloat) {
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: NSStatusBar.system.thickness))
@@ -297,15 +322,16 @@ private final class MenuBarLyricView: NSView {
         let textWidth = ceil((displayedText as NSString).size(withAttributes: attributes).width)
         let gapText = "        "
         let gapWidth = ceil((gapText as NSString).size(withAttributes: attributes).width)
-        label.layer?.removeAllAnimations()
+        marqueeTimer?.invalidate()
+        marqueeTimer = nil
         toolTip = text
         setAccessibilityValue(text)
 
-        guard let duration = MenuBarMarquee.duration(
+        guard MenuBarMarquee.duration(
             textWidth: textWidth,
             viewportWidth: bounds.width,
             gap: gapWidth
-        ) else {
+        ) != nil else {
             place(displayedText, width: bounds.width, alignment: .center)
             return
         }
@@ -315,17 +341,24 @@ private final class MenuBarLyricView: NSView {
             width: textWidth * 2 + gapWidth,
             alignment: .left
         )
+        marqueeDistance = textWidth + gapWidth
+        marqueeStartedAt = ProcessInfo.processInfo.systemUptime
+        let timer = Timer(
+            timeInterval: 1 / 30,
+            target: self,
+            selector: #selector(advanceMarquee),
+            userInfo: nil,
+            repeats: true
+        )
+        RunLoop.main.add(timer, forMode: .common)
+        marqueeTimer = timer
+    }
 
-        let animation = CABasicAnimation(keyPath: "transform.translation.x")
-        animation.fromValue = 0
-        animation.toValue = -(textWidth + gapWidth)
-        animation.duration = duration
-        animation.beginTime = CACurrentMediaTime() + 1.2
-        animation.repeatCount = .infinity
-        animation.timingFunction = CAMediaTimingFunction(name: .linear)
-        animation.fillMode = .both
-        animation.isRemovedOnCompletion = false
-        label.layer?.add(animation, forKey: "lyric-marquee")
+    @objc private func advanceMarquee() {
+        label.frame.origin.x = MenuBarMarquee.offset(
+            elapsed: ProcessInfo.processInfo.systemUptime - marqueeStartedAt,
+            distance: marqueeDistance
+        )
     }
 
     private func place(_ text: String, width: CGFloat, alignment: NSTextAlignment) {

@@ -3,8 +3,14 @@ import Foundation
 @main
 enum LiveAPICheck {
     static func main() async {
-        let repository = LiveMusicRepository()
+        let environment = ProcessInfo.processInfo.environment
+        let repository = LiveMusicRepository(transport: EAPITransport(
+            cookie: environment["TINYCLOUDMUSIC_COOKIE"] ?? "",
+            musicU: environment["TINYCLOUDMUSIC_MUSIC_U"] ?? ""
+        ))
         let library = LiveMusicLibrary(transport: repository.transport)
+        let audioLibrary = LiveAudioContentLibrary(transport: repository.transport)
+        let knowledgeLibrary = LiveMusicKnowledgeLibrary(transport: repository.transport)
         let extras = LiveMusicExtras(transport: repository.transport)
         var passed: [String] = []
         var failed: [String] = []
@@ -18,6 +24,47 @@ enum LiveAPICheck {
             } catch {
                 failed.append("\(name): \(errorText(error))")
                 return nil
+            }
+        }
+
+        let podcastCategories = await check("audio.podcastCategories") {
+            let values = try await audioLibrary.podcastCategories()
+            guard !values.isEmpty else { throw EAPIError.missingData("categories") }
+            return values
+        }
+        if let category = podcastCategories?.first,
+           let podcasts = await check("audio.recommendedPodcasts", {
+               let values = try await audioLibrary.recommendedPodcasts(categoryID: category.id)
+               guard !values.isEmpty else { throw EAPIError.missingData("djRadios") }
+               return values
+           }),
+           let podcast = podcasts.first {
+            _ = await check("audio.podcastDetail") { try await audioLibrary.podcast(id: podcast.id) }
+            _ = await check("audio.podcastEpisodes") {
+                try await audioLibrary.podcastEpisodes(podcastID: podcast.id)
+            }
+        }
+        _ = await check("audio.broadcastFilters") {
+            let values = try await audioLibrary.broadcastFilters()
+            guard !values.categories.isEmpty || !values.regions.isEmpty else {
+                throw EAPIError.missingData("data")
+            }
+            return values
+        }
+        if let channels = await check("audio.broadcastChannels", {
+            let page = try await audioLibrary.broadcastChannels()
+            guard !page.channels.isEmpty else { throw EAPIError.missingData("channels") }
+            return page.channels
+        }), let channel = channels.first {
+            do {
+                _ = try await audioLibrary.broadcastCurrentInfo(channelID: channel.id)
+                passed.append("audio.broadcastCurrentInfo")
+            } catch {
+                let host = (try? await broadcastStreamHost(
+                    transport: repository.transport,
+                    channelID: channel.id
+                )) ?? "unknown"
+                failed.append("audio.broadcastCurrentInfo: \(errorText(error)) (host: \(host))")
             }
         }
 
@@ -132,6 +179,23 @@ enum LiveAPICheck {
             _ = await check("home.\(descriptor.id)") { try await repository.homeSection(id: descriptor.id) }
         }
 
+        let styles = await check("knowledge.styles") {
+            let values = try await knowledgeLibrary.styles()
+            guard !values.isEmpty else { throw EAPIError.missingData("styles") }
+            return values
+        }
+        if let style = styles?.first(where: { !$0.children.isEmpty })?.children.first ?? styles?.first {
+            _ = await check("knowledge.stylePlaylists") {
+                let page = try await knowledgeLibrary.stylePage(id: style.id, kind: .playlists)
+                guard !page.items.isEmpty else { throw EAPIError.missingData("playlist") }
+                guard page.items.allSatisfy({ item in
+                    guard case let .playlist(playlist) = item else { return false }
+                    return playlist.artwork.remoteURL != nil
+                }) else { throw EAPIError.missingData("playlist artwork") }
+                return page
+            }
+        }
+
         let login = await check("account.loginState") { try await library.loginState() }
         if case let .loggedIn(account)? = login {
             _ = await check("account.dailyRecommendations") { try await library.dailyRecommendations() }
@@ -210,6 +274,28 @@ enum LiveAPICheck {
         guard let response = response as? HTTPURLResponse,
               [200, 206].contains(response.statusCode), !data.isEmpty
         else { throw EAPIError.invalidResponse }
+    }
+
+    private static func broadcastStreamHost(
+        transport: EAPITransport,
+        channelID: String
+    ) async throws -> String {
+        let root = try decodedJSONObject(try await transport.request(
+            EAPIEndpoint(
+                "/eapi/voice/broadcast/channel/currentinfo",
+                signing: "/api/voice/broadcast/channel/currentinfo",
+                host: "https://interface.music.163.com"
+            ),
+            json: compactJSON(["channelId": channelID])
+        ))
+        let data = root.object("data")
+        let current = data.object("currentInfo").isEmpty ? data : data.object("currentInfo")
+        for object in [current.object("playInfo"), current, data, root] {
+            for key in ["playUrl", "streamUrl", "liveUrl", "url"] {
+                if let host = URL(string: object.string(key))?.host { return host }
+            }
+        }
+        throw EAPIError.missingData("stream host")
     }
 
     private static func errorText(_ error: Error) -> String {

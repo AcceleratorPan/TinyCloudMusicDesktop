@@ -42,7 +42,7 @@ final class SessionController {
     @ObservationIgnored private var generation = 0
 
     init(
-        store: CredentialStore = CredentialStore(),
+        store: CredentialStore,
         transport: EAPITransport = EAPITransport(),
         validator: @escaping Validator,
         vipValidator: @escaping VIPValidator

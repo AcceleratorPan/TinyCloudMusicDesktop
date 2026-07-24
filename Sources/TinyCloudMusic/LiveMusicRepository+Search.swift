@@ -117,7 +117,8 @@ extension LiveMusicRepository {
                 accent: .red,
                 remoteURL: firstURL(value, keys: ["cover", "picUrl", "img1v1Url"])
             ),
-            isFollowed: value.bool("followed")
+            isFollowed: value.bool("followed"),
+            songCount: value.keys.contains("musicSize") ? value.int("musicSize") : nil
         )
     }
 
@@ -154,7 +155,7 @@ extension LiveMusicRepository {
             artwork: Artwork(
                 symbol: "music.note.list",
                 accent: .green,
-                remoteURL: firstURL(value, keys: ["coverImgUrl", "coverUrl"])
+                remoteURL: firstURL(value, keys: ["coverImgUrl", "coverUrl", "cover"])
             ),
             trackCount: value.int("trackCount"),
             isSubscribed: value.bool("subscribed"),

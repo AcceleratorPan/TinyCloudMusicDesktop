@@ -1,0 +1,20 @@
+{
+  "total": {"code": 200, "data": {}},
+  "today": {"code": 200, "data": {"items": [{"playCount": 2}]}},
+  "rank": {"code": 200, "data": {"songItems": [{"songId": 0, "songName": "Invalid"}]}},
+  "realtime": {"code": 200},
+  "report": {
+    "code": 200,
+    "data": {
+      "previousEndTime": 1719705600000.5,
+      "listenDuration": -1,
+      "playCount": true,
+      "unknownBlock": {"items": [{"kind": "unsupported", "duration": 1}]}
+    }
+  },
+  "year": {"code": 200, "data": {"unrecognizedMetric": 99}},
+  "first": {
+    "code": 200,
+    "data": {"firstListenTime": "1", "text": "https://invalid.example/hidden"}
+  }
+}

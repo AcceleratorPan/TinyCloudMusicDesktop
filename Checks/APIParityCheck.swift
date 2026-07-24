@@ -32,7 +32,7 @@ enum APIParityCheck {
             ("/eapi/song/enhance/player/url/v1", 1),
             ("/eapi/song/lyric", 1),
             ("/api/v3/discovery/recommend/songs", 1),
-            ("/eapi/v1/discovery/simiSong", 1),
+            ("/weapi/v1/discovery/simiSong", 1),
             ("/eapi/album/v3/detail", 1),
             ("/eapi/artist/albums/\\(artistID)", 1),
             ("/eapi/v6/playlist/detail", 1),

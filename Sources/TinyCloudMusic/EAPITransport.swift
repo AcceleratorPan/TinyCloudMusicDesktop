@@ -536,14 +536,12 @@ enum XEAPICodec {
 }
 
 struct EAPITransport: Sendable {
-    private static let environmentCookie = ProcessInfo.processInfo.environment["TINYCLOUDMUSIC_COOKIE"]
-    private static let environmentMusicU = ProcessInfo.processInfo.environment["TINYCLOUDMUSIC_MUSIC_U"]
-
     private let session: URLSession
     private let authenticationSession: URLSession
     private let authenticationCookieStorage: HTTPCookieStorage?
     private let cookieOverride: String?
     private let musicUOverride: String?
+    private let loadStoredCredentials: @Sendable () -> SessionCredentials?
     private let weapiSecretKeyOverride: String?
     private let responseCache: EAPIResponseCache
 
@@ -551,6 +549,7 @@ struct EAPITransport: Sendable {
         session: URLSession? = nil,
         cookie: String? = nil,
         musicU: String? = nil,
+        loadStoredCredentials: @escaping @Sendable () -> SessionCredentials? = { nil },
         weapiSecretKey: String? = nil,
         responseCache: EAPIResponseCache = EAPIResponseCache()
     ) {
@@ -576,6 +575,7 @@ struct EAPITransport: Sendable {
         }
         cookieOverride = cookie
         musicUOverride = musicU
+        self.loadStoredCredentials = loadStoredCredentials
         weapiSecretKeyOverride = weapiSecretKey
         self.responseCache = responseCache
     }
@@ -923,13 +923,11 @@ struct EAPITransport: Sendable {
         return data
     }
 
-    func credentials(
-        loadStored: () -> SessionCredentials? = { try? CredentialStore().load() }
-    ) -> (cookie: String, musicU: String) {
-        let cookie = cookieOverride ?? Self.environmentCookie
-        let musicU = musicUOverride ?? Self.environmentMusicU
+    func credentials() -> (cookie: String, musicU: String) {
+        let cookie = cookieOverride
+        let musicU = musicUOverride
         if cookie != nil || musicU != nil { return (cookie ?? "", musicU ?? "") }
-        let stored = loadStored()
+        let stored = loadStoredCredentials()
         return (cookie ?? stored?.cookie ?? "", musicU ?? stored?.musicU ?? "")
     }
 
@@ -1391,19 +1389,19 @@ enum EAPICookieHeader {
         if vip, !musicU.isEmpty, !iPhoneClient {
             return "appver=8.9.70; buildver=\(buildVersion); resulution=1920x1080; os=Android; NMTID=00Olq-ZjX3Zh6UjokPQs695eltgPzwAAAGWXOtzdw; MUSIC_U=\(musicU); deviceId=9CC2C781CEEC4408333573ACF975B764BB3D6492A63544CD059A; channel=distribution; requestId=\(requestID)"
         }
-        if vip, !iPhoneClient { return cookie }
+        let usesIPhoneClient = iPhoneClient || (vip && musicU.isEmpty)
         var overriddenKeys = Set(["os", "osver", "appver", "channel"])
-        if iPhoneClient, !musicU.isEmpty { overriddenKeys.insert("music_u") }
+        if usesIPhoneClient, !musicU.isEmpty { overriddenKeys.insert("music_u") }
         var parts = cookie.split(separator: ";").map {
             String($0).trimmingCharacters(in: .whitespacesAndNewlines)
         }.filter {
-            !(macOSClient || iPhoneClient)
+            !(macOSClient || usesIPhoneClient)
                 || !overriddenKeys.contains($0.split(separator: "=", maxSplits: 1).first?.lowercased() ?? "")
         }
         parts += macOSClient
             ? ["osver=15.5", "os=osx", "appver=3.1.10.5100", "channel=netease"]
             : ["osver=16.2", "os=iPhone OS", "appver=9.0.90", "channel=distribution"]
-        if iPhoneClient, !musicU.isEmpty { parts.append("MUSIC_U=\(musicU)") }
+        if usesIPhoneClient, !musicU.isEmpty { parts.append("MUSIC_U=\(musicU)") }
         parts += [
             "versioncode=140", "buildver=\(buildVersion)", "resolution=1920x1080",
             "requestId=\(requestID)"

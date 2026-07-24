@@ -92,6 +92,9 @@ enum WriteAPIContractCheck {
             musicU: ""
         )
         let library = LiveMusicLibrary(transport: transport)
+        let videoLibrary = LiveVideoLibrary(transport: transport)
+        let audioLibrary = LiveAudioContentLibrary(transport: transport)
+        let knowledgeLibrary = LiveMusicKnowledgeLibrary(transport: transport)
         let originalCookieLibrary = LiveMusicLibrary(transport: EAPITransport(
             session: URLSession(configuration: configuration),
             cookie: "MUSIC_U=original-cookie",
@@ -303,6 +306,239 @@ enum WriteAPIContractCheck {
             count += 1
         }
 
+        try await verifyWEAPI("/weapi/videotimeline/get", call: {
+            _ = try await videoLibrary.recommendations(offset: 20)
+        }) {
+            $0.int("offset") == 20
+                && $0.string("filterLives") == "[]"
+                && $0.string("withProgramInfo") == "true"
+                && $0.string("needUrl") == "1"
+                && $0.string("resolution") == "480"
+        }
+        count += 1
+
+        try await verifyWEAPI("/weapi/v1/mv/detail", call: {
+            _ = try await videoLibrary.mvDetail(id: 42)
+        }) { $0.int64("id") == 42 }
+        count += 1
+
+        try await verifyWEAPI("/weapi/song/enhance/play/mv/url", call: {
+            _ = try await videoLibrary.mvPlaybackSource(
+                id: 42,
+                preferredResolution: 720,
+                availableResolutions: [720]
+            )
+        }) { $0.int64("id") == 42 && $0.int("r") == 720 }
+        count += 1
+
+        for subscribed in [true, false] {
+            let action = subscribed ? "sub" : "unsub"
+            try await verifyWEAPI("/weapi/mv/\(action)", call: {
+                try await videoLibrary.setMVSubscribed(42, subscribed: subscribed)
+            }) {
+                $0.int64("mvId") == 42 && $0.string("mvIds") == #"["42"]"#
+            }
+            count += 1
+        }
+
+        try await verifyWEAPI("/weapi/v1/resource/comments/R_MV_5_42", call: {
+            _ = try await videoLibrary.comments(for: .mv(42), offset: 20, limit: 10, beforeTime: 123)
+        }) {
+            $0.string("rid") == "42"
+                && $0.int("offset") == 20
+                && $0.int("limit") == 10
+                && $0.int64("beforeTime") == 123
+        }
+        count += 1
+
+        try await verifyWEAPI("/weapi/cloudvideo/v1/video/detail", call: {
+            _ = try await videoLibrary.videoDetail(id: "00042")
+        }) { $0.string("id") == "00042" }
+        count += 1
+
+        try await verifyWEAPI("/weapi/cloudvideo/playurl", call: {
+            _ = try await videoLibrary.videoPlaybackSource(
+                id: "00042",
+                preferredResolution: 720,
+                availableResolutions: [720]
+            )
+        }) {
+            $0.string("ids") == #"["00042"]"# && $0.int("resolution") == 720
+        }
+        count += 1
+
+        for subscribed in [true, false] {
+            let action = subscribed ? "sub" : "unsub"
+            try await verifyWEAPI("/weapi/cloudvideo/video/\(action)", call: {
+                try await videoLibrary.setVideoSubscribed("00042", subscribed: subscribed)
+            }) { $0.string("id") == "00042" }
+            count += 1
+        }
+
+        try await verifyWEAPI("/weapi/v1/resource/comments/R_VI_62_video-id", call: {
+            _ = try await videoLibrary.comments(
+                for: .video("video-id"),
+                offset: 40,
+                limit: 20,
+                beforeTime: 456
+            )
+        }) {
+            $0.string("rid") == "video-id"
+                && $0.int("offset") == 40
+                && $0.int("limit") == 20
+                && $0.int64("beforeTime") == 456
+        }
+        count += 1
+
+        try await verifyWEAPI("/weapi/cloudvideo/v1/allvideo/rcmd", call: {
+            _ = try await videoLibrary.related(toMV: 42)
+        }) { $0.string("id") == "42" && $0.int("type") == 0 }
+        count += 1
+
+        try await verifyWEAPI("/weapi/cloudvideo/v1/allvideo/rcmd", call: {
+            _ = try await videoLibrary.related(toVideo: "00042")
+        }) { $0.string("id") == "00042" && $0.int("type") == 1 }
+        count += 1
+
+        try await verifyWEAPI("/weapi/djradio/category/get", call: {
+            _ = try await audioLibrary.podcastCategories()
+        }) { _ in true }
+        count += 1
+
+        try await verifyWEAPI("/weapi/djradio/recommend", call: {
+            _ = try await audioLibrary.recommendedPodcasts(categoryID: 11)
+        }) { $0.int64("cateId") == 11 }
+        count += 1
+
+        try await verifyWEAPI("/weapi/djradio/v2/get", call: {
+            _ = try await audioLibrary.podcast(id: 42)
+        }) { $0.int64("id") == 42 }
+        count += 1
+
+        try await verifyWEAPI("/weapi/dj/program/byradio", call: {
+            _ = try await audioLibrary.podcastEpisodes(
+                podcastID: 42,
+                offset: 30,
+                limit: 20,
+                ascending: true
+            )
+        }) {
+            $0.int64("radioId") == 42
+                && $0.int("offset") == 30
+                && $0.int("limit") == 20
+                && $0.bool("asc")
+        }
+        count += 1
+
+        try await verifyWEAPI("/weapi/dj/program/detail", call: {
+            _ = try await audioLibrary.podcastEpisode(id: 43)
+        }) { $0.int64("id") == 43 }
+        count += 1
+
+        try await verifyWEAPI("/weapi/djradio/get/subed", call: {
+            _ = try await audioLibrary.subscribedPodcasts(offset: 20, limit: 10)
+        }) {
+            $0.int("offset") == 20 && $0.int("limit") == 10 && $0.bool("total")
+        }
+        count += 1
+
+        for subscribed in [true, false] {
+            try await verifyWEAPI("/weapi/djradio/\(subscribed ? "sub" : "unsub")", call: {
+                try await audioLibrary.setPodcastSubscribed(42, subscribed: subscribed)
+            }) { $0.int64("id") == 42 }
+            count += 1
+        }
+
+        try await verify(
+            "/eapi/voice/workbench/voice/detail",
+            signing: "/api/voice/workbench/voice/detail",
+            host: "interface.music.163.com",
+            call: { _ = try await audioLibrary.voiceDetail(id: 43) }
+        ) { $0.int64("id") == 43 }
+        count += 1
+
+        try await verify(
+            "/eapi/voice/lyric/get",
+            signing: "/api/voice/lyric/get",
+            host: "interface.music.163.com",
+            call: { _ = try await audioLibrary.voiceLyrics(programID: 43) }
+        ) { $0.int64("programId") == 43 }
+        count += 1
+
+        try await verify(
+            "/eapi/voice/broadcast/category/region/get",
+            signing: "/api/voice/broadcast/category/region/get",
+            host: "interface.music.163.com",
+            call: { _ = try await audioLibrary.broadcastFilters() }
+        ) { $0.isEmpty }
+        count += 1
+
+        try await verify(
+            "/eapi/voice/broadcast/channel/list",
+            signing: "/api/voice/broadcast/channel/list",
+            host: "interface.music.163.com",
+            call: {
+                _ = try await audioLibrary.broadcastChannels(
+                    categoryID: "3",
+                    regionID: "4",
+                    limit: 20,
+                    cursor: BroadcastCursor(lastID: "0007", score: "9")
+                )
+            }
+        ) {
+            $0.string("categoryId") == "3"
+                && $0.string("regionId") == "4"
+                && $0.int("limit") == 20
+                && $0.string("lastId") == "0007"
+                && $0.string("score") == "9"
+        }
+        count += 1
+
+        try await verify(
+            "/eapi/voice/broadcast/channel/currentinfo",
+            signing: "/api/voice/broadcast/channel/currentinfo",
+            host: "interface.music.163.com",
+            call: { _ = try await audioLibrary.broadcastCurrentInfo(channelID: "0007") }
+        ) { $0.string("channelId") == "0007" }
+        count += 1
+
+        for collected in [true, false] {
+            try await verify(
+                "/eapi/content/interact/collect",
+                signing: "/api/content/interact/collect",
+                host: "interface.music.163.com",
+                call: { try await audioLibrary.setBroadcastCollected("0007", collected: collected) }
+            ) {
+                $0.string("contentType") == "BROADCAST"
+                    && $0.string("contentId") == "0007"
+                    && $0.string("cancelCollect") == (collected ? "false" : "true")
+                    && $0["cancelCollect"] is String
+            }
+            count += 1
+        }
+
+        RequestCaptureProtocol.reset(responses: [
+            "/weapi/djradio/category/get": (
+                200,
+                Data(#"{"code":200,"categories":[{"id":11,"name":"History"}]}"#.utf8)
+            )
+        ])
+        _ = try await audioLibrary.podcastCategories()
+        _ = try await audioLibrary.podcastCategories()
+        precondition(RequestCaptureProtocol.requestCount() == 1, "Podcast categories must use the detail cache")
+        count += 1
+
+        RequestCaptureProtocol.reset(responses: [
+            "/eapi/voice/broadcast/channel/currentinfo": (
+                200,
+                Data(#"{"code":200,"data":{"channelId":"0007","channelName":"Broadcast"}}"#.utf8)
+            )
+        ])
+        _ = try await audioLibrary.broadcastCurrentInfo(channelID: "0007")
+        _ = try await audioLibrary.broadcastCurrentInfo(channelID: "0007")
+        precondition(RequestCaptureProtocol.requestCount() == 2, "Live stream info must not be cached")
+        count += 2
+
         RequestCaptureProtocol.reset()
         do {
             _ = try await library.addComment(songID: 42, content: " \n ")
@@ -347,11 +583,147 @@ enum WriteAPIContractCheck {
         try await verify(
             "/eapi/content/activity/listen/data/total",
             signing: "/api/content/activity/listen/data/total",
+            host: "interface.music.163.com",
             cookieMatches: {
                 $0.contains("MUSIC_U=original-cookie") && !$0.contains("vip-requester-cookie")
             },
             call: { _ = try await originalCookieLibrary.totalListeningDuration() }
         ) { $0.isEmpty }
+        count += 1
+
+        let originalCookieMatches: (String) -> Bool = {
+            $0.contains("MUSIC_U=original-cookie") && !$0.contains("vip-requester-cookie")
+        }
+        try await verify(
+            "/eapi/content/activity/listen/data/today/song/play/rank",
+            signing: "/api/content/activity/listen/data/today/song/play/rank",
+            host: "interface.music.163.com",
+            cookieMatches: originalCookieMatches,
+            call: { _ = try await originalCookieLibrary.todayListeningRank() }
+        ) { $0.isEmpty }
+        count += 1
+
+        for period in [ListeningReportPeriod.week, .month] {
+            try await verify(
+                "/eapi/content/activity/listen/data/song/play/rank",
+                signing: "/api/content/activity/listen/data/song/play/rank",
+                host: "interface.music.163.com",
+                cookieMatches: originalCookieMatches,
+                call: { _ = try await originalCookieLibrary.listeningSongRank(period: period) }
+            ) {
+                $0.string("type") == period.rawValue && $0["endTime"] == nil
+            }
+            count += 1
+        }
+
+        let serverCursor = originalCookieLibrary.decodeListeningReport(
+            ["data": ["previousEndTime": 1_719_705_600_000]],
+            period: .month
+        ).previousCursor
+        guard let serverCursor else { preconditionFailure("A valid server cursor was rejected") }
+        try await verify(
+            "/eapi/content/activity/listen/data/song/play/rank",
+            signing: "/api/content/activity/listen/data/song/play/rank",
+            host: "interface.music.163.com",
+            cookieMatches: originalCookieMatches,
+            call: {
+                _ = try await originalCookieLibrary.listeningSongRank(period: .month, cursor: serverCursor)
+            }
+        ) {
+            $0.string("type") == "month" && $0.int64("endTime") == serverCursor.endTime
+        }
+        count += 1
+
+        for period in [ListeningReportPeriod.week, .month] {
+            try await verify(
+                "/eapi/content/activity/listen/data/realtime/report",
+                signing: "/api/content/activity/listen/data/realtime/report",
+                host: "interface.music.163.com",
+                cookieMatches: originalCookieMatches,
+                call: { _ = try await originalCookieLibrary.realtimeListeningReport(period: period) }
+            ) { $0.string("type") == period.rawValue }
+            count += 1
+        }
+
+        for period in ListeningReportPeriod.allCases {
+            try await verify(
+                "/eapi/content/activity/listen/data/report",
+                signing: "/api/content/activity/listen/data/report",
+                host: "interface.music.163.com",
+                cookieMatches: originalCookieMatches,
+                call: { _ = try await originalCookieLibrary.listeningReport(period: period) }
+            ) {
+                $0.string("type") == period.rawValue && $0["endTime"] == nil
+            }
+            count += 1
+        }
+
+        try await verify(
+            "/eapi/content/activity/listen/data/report",
+            signing: "/api/content/activity/listen/data/report",
+            host: "interface.music.163.com",
+            cookieMatches: originalCookieMatches,
+            call: {
+                _ = try await originalCookieLibrary.listeningReport(period: .year, cursor: serverCursor)
+            }
+        ) {
+            $0.string("type") == "year" && $0.int64("endTime") == serverCursor.endTime
+        }
+        count += 1
+
+        try await verify(
+            "/eapi/content/activity/listen/data/year/report",
+            signing: "/api/content/activity/listen/data/year/report",
+            host: "interface.music.163.com",
+            cookieMatches: originalCookieMatches,
+            call: { _ = try await originalCookieLibrary.yearListeningFootprint() }
+        ) { $0.isEmpty }
+        count += 1
+
+        try await verify(
+            "/eapi/content/activity/music/first/listen/info",
+            signing: "/api/content/activity/music/first/listen/info",
+            host: "interface.music.163.com",
+            cookieMatches: originalCookieMatches,
+            call: { _ = try await originalCookieLibrary.firstListenMemory(songID: 42) }
+        ) { $0.int64("songId") == 42 }
+        count += 1
+
+        for invalidCall in [
+            { _ = try await originalCookieLibrary.listeningSongRank(period: .year) },
+            { _ = try await originalCookieLibrary.realtimeListeningReport(period: .year) }
+        ] {
+            RequestCaptureProtocol.reset()
+            do {
+                try await invalidCall()
+                preconditionFailure("An invalid listening period reached the network")
+            } catch EAPIError.invalidPayload {
+            }
+            precondition(RequestCaptureProtocol.requestCount() == 0)
+        }
+
+        RequestCaptureProtocol.reset(responses: [
+            "/eapi/content/activity/listen/data/today/song/play/rank": (
+                200,
+                Data(#"{"code":200,"data":{"songItems":[]}}"#.utf8)
+            )
+        ])
+        _ = try await originalCookieLibrary.todayListeningRank()
+        _ = try await originalCookieLibrary.todayListeningRank()
+        precondition(RequestCaptureProtocol.requestCount() == 1, "Listening library reads must be cached")
+        _ = try await originalCookieLibrary.todayListeningRank(forceRefresh: true)
+        precondition(RequestCaptureProtocol.requestCount() == 2, "Manual refresh must bypass only the requested cache key")
+        count += 1
+
+        RequestCaptureProtocol.reset(responses: [
+            "/eapi/content/activity/music/first/listen/info": (
+                200,
+                Data(#"{"code":200,"data":{}}"#.utf8)
+            )
+        ])
+        _ = try await originalCookieLibrary.firstListenMemory(songID: 43)
+        _ = try await originalCookieLibrary.firstListenMemory(songID: 43)
+        precondition(RequestCaptureProtocol.requestCount() == 1, "First-listen reads must use detail caching")
         count += 1
 
         try await verify(
@@ -426,6 +798,88 @@ enum WriteAPIContractCheck {
         ) { $0.isEmpty }
         count += 1
 
+        try await verifyWEAPI("/weapi/tag/list/get", call: {
+            _ = try await knowledgeLibrary.styles()
+        }) { $0.string("csrf_token") == "csrf" }
+        try await verifyWEAPI("/weapi/style-tag/home/head", call: {
+            _ = try await knowledgeLibrary.styleDetail(id: 42, name: "Style")
+        }) { $0.int64("tagId") == 42 }
+        count += 2
+
+        for kind in MusicStyleResourceKind.allCases {
+            let path = switch kind {
+            case .songs: "/weapi/style-tag/home/song"
+            case .albums: "/weapi/style-tag/home/album"
+            case .artists: "/weapi/style-tag/home/artist"
+            case .playlists: "/weapi/style-tag/home/playlist"
+            }
+            try await verifyWEAPI(path, call: {
+                _ = try await knowledgeLibrary.stylePage(
+                    id: 42,
+                    kind: kind,
+                    cursor: "next",
+                    size: 17,
+                    sort: 1
+                )
+            }) {
+                $0.int64("tagId") == 42
+                    && $0.string("cursor") == "next"
+                    && $0.int("size") == 17
+                    && $0.int("sort") == (kind == .songs || kind == .albums ? 1 : 0)
+            }
+            count += 1
+        }
+
+        try await verifyWEAPI("/weapi/tag/my/preference/get", call: {
+            _ = try await knowledgeLibrary.preferredStyleIDs()
+        }) { $0.string("csrf_token") == "csrf" }
+        count += 1
+
+        try await verify(
+            "/eapi/music/sheet/list/v1",
+            signing: "/api/music/sheet/list/v1",
+            host: "interface.music.163.com",
+            call: { _ = try await knowledgeLibrary.sheets(songID: 42) }
+        ) { $0.int64("id") == 42 && $0.string("abTest") == "b" }
+        try await verify(
+            "/eapi/music/sheet/preview/info",
+            signing: "/api/music/sheet/preview/info",
+            host: "interface.music.163.com",
+            call: { _ = try await knowledgeLibrary.sheetPreview(id: 43) }
+        ) { $0.int64("id") == 43 }
+        count += 2
+
+        try await verify(
+            "/eapi/song/play/about/block/page",
+            signing: "/api/song/play/about/block/page",
+            host: "interface.music.163.com",
+            call: { _ = try await knowledgeLibrary.songWiki(songID: 42) }
+        ) { $0.int64("songId") == 42 }
+        let briefContracts: [(MusicKnowledgeResource, String, String, String)] = [
+            (.song(42), "song", "songId", "42"),
+            (.album(43), "album", "albumId", "43"),
+            (.artist(44), "artist", "artistId", "44"),
+            (.mv(45), "mv", "mvId", "45")
+        ]
+        for (resource, path, key, id) in briefContracts {
+            try await verify(
+                "/eapi/rep/ugc/\(path)/get",
+                signing: "/api/rep/ugc/\(path)/get",
+                host: "interface.music.163.com",
+                call: { _ = try await knowledgeLibrary.briefKnowledge(for: resource) }
+            ) { $0.string(key) == id }
+            count += 1
+        }
+        count += 1
+
+        RequestCaptureProtocol.reset(responses: [
+            "/weapi/tag/list/get": (200, Data(#"{"code":200,"data":[]}"#.utf8))
+        ])
+        _ = try await knowledgeLibrary.styles()
+        _ = try await knowledgeLibrary.styles()
+        precondition(RequestCaptureProtocol.requestCount() == 1)
+        count += 1
+
         print("Write API contract checks passed: \(count) requests captured locally")
     }
 
@@ -463,7 +917,7 @@ enum WriteAPIContractCheck {
 
         let fallbackRepository = LiveMusicRepository(transport: EAPITransport(
             session: URLSession(configuration: configuration),
-            cookie: "MUSIC_A=guest-token",
+            cookie: "MUSIC_U=qr-svip-token; __csrf=csrf; os=pc; appver=old",
             musicU: ""
         ))
         RequestCaptureProtocol.reset(responses: responses)
@@ -471,7 +925,13 @@ enum WriteAPIContractCheck {
         let fallbackCookies = RequestCaptureProtocol.requests()
             .map { $0.value(forHTTPHeaderField: "Cookie") ?? "" }
         precondition(fallbackCookies.count == 2)
-        precondition(fallbackCookies.allSatisfy { $0 == "MUSIC_A=guest-token" })
+        precondition(fallbackCookies.allSatisfy { $0.contains("MUSIC_U=qr-svip-token") })
+        precondition(fallbackCookies.allSatisfy {
+            $0.contains("os=iPhone OS; appver=9.0.90")
+                && !$0.contains("os=pc")
+                && !$0.contains("appver=old")
+                && !$0.contains("os=Android")
+        })
     }
 
     private static func verifyHeartModeFallback(transport: EAPITransport) async throws {

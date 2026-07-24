@@ -144,16 +144,18 @@ struct LiveMusicLibrary: Sendable {
         }
     }
 
-    func totalListeningDuration() async throws -> Int64 {
+    func totalListeningDuration(forceRefresh: Bool = false) async throws -> Int64 {
         // This endpoint rejects the VIP requester and must use the account's original cookie.
         let root = try await call(
             EAPIEndpoint(
                 "/eapi/content/activity/listen/data/total",
-                signing: "/api/content/activity/listen/data/total"
+                signing: "/api/content/activity/listen/data/total",
+                host: Self.eapiHost
             ),
             payload: [:],
-            cache: nil
+            cache: forceRefresh ? nil : .library
         )
+        try requireSuccess(root)
         return try decodeTotalListeningDuration(root)
     }
 
@@ -172,6 +174,128 @@ struct LiveMusicLibrary: Sendable {
         guard let duration else { throw EAPIError.invalidResponse }
         guard duration >= 0 else { throw EAPIError.invalidResponse }
         return duration
+    }
+
+    func todayListeningRank(forceRefresh: Bool = false) async throws -> [ListeningRankEntry] {
+        let root = try await call(
+            EAPIEndpoint(
+                "/eapi/content/activity/listen/data/today/song/play/rank",
+                signing: "/api/content/activity/listen/data/today/song/play/rank",
+                host: Self.eapiHost
+            ),
+            payload: [:],
+            cache: forceRefresh ? nil : .library
+        )
+        try requireSuccess(root)
+        return decodeListeningRank(root)
+    }
+
+    func listeningSongRank(
+        period: ListeningReportPeriod,
+        cursor: ListeningReportCursor? = nil,
+        forceRefresh: Bool = false
+    ) async throws -> [ListeningRankEntry] {
+        guard period != .year else { throw EAPIError.invalidPayload }
+        let root = try await call(
+            EAPIEndpoint(
+                "/eapi/content/activity/listen/data/song/play/rank",
+                signing: "/api/content/activity/listen/data/song/play/rank",
+                host: Self.eapiHost
+            ),
+            payload: listeningPayload(period: period, cursor: cursor),
+            cache: forceRefresh ? nil : .library
+        )
+        try requireSuccess(root)
+        return decodeListeningRank(root)
+    }
+
+    func realtimeListeningReport(
+        period: ListeningReportPeriod,
+        forceRefresh: Bool = false
+    ) async throws -> ListeningReport {
+        guard period != .year else { throw EAPIError.invalidPayload }
+        let root = try await call(
+            EAPIEndpoint(
+                "/eapi/content/activity/listen/data/realtime/report",
+                signing: "/api/content/activity/listen/data/realtime/report",
+                host: Self.eapiHost
+            ),
+            payload: ["type": period.rawValue],
+            cache: forceRefresh ? nil : .library
+        )
+        try requireSuccess(root)
+        return decodeListeningReport(root, period: period, defaultTitle: "\(period.title)实时摘要")
+    }
+
+    func listeningReport(
+        period: ListeningReportPeriod,
+        cursor: ListeningReportCursor? = nil,
+        forceRefresh: Bool = false
+    ) async throws -> ListeningReport {
+        let root = try await call(
+            EAPIEndpoint(
+                "/eapi/content/activity/listen/data/report",
+                signing: "/api/content/activity/listen/data/report",
+                host: Self.eapiHost
+            ),
+            payload: listeningPayload(period: period, cursor: cursor),
+            cache: forceRefresh ? nil : .library
+        )
+        try requireSuccess(root)
+        return decodeListeningReport(root, period: period, defaultTitle: "\(period.title)听歌报告")
+    }
+
+    func yearListeningFootprint(forceRefresh: Bool = false) async throws -> ListeningReport {
+        let root = try await call(
+            EAPIEndpoint(
+                "/eapi/content/activity/listen/data/year/report",
+                signing: "/api/content/activity/listen/data/year/report",
+                host: Self.eapiHost
+            ),
+            payload: [:],
+            cache: forceRefresh ? nil : .library
+        )
+        try requireSuccess(root)
+        return decodeListeningReport(root, period: .year, defaultTitle: "年度听歌足迹")
+    }
+
+    func firstListenMemory(
+        songID: Int64,
+        forceRefresh: Bool = false
+    ) async throws -> FirstListenMemory {
+        guard songID > 0 else { throw EAPIError.invalidPayload }
+        let root = try await call(
+            EAPIEndpoint(
+                "/eapi/content/activity/music/first/listen/info",
+                signing: "/api/content/activity/music/first/listen/info",
+                host: Self.eapiHost
+            ),
+            payload: ["songId": songID],
+            cache: forceRefresh ? nil : .detail
+        )
+        try requireSuccess(root)
+        return decodeFirstListenMemory(root)
+    }
+
+    func decodeListeningRank(_ root: [String: Any]) -> [ListeningRankEntry] {
+        ListeningReportDecoder.rankEntries(root, decodeSong: songDecoder.decodeLiveSong)
+    }
+
+    func decodeListeningReport(
+        _ root: [String: Any],
+        period: ListeningReportPeriod,
+        defaultTitle: String? = nil
+    ) -> ListeningReport {
+        ListeningReportDecoder.report(
+            root,
+            period: period,
+            defaultTitle: defaultTitle ?? "\(period.title)听歌报告",
+            decodeSong: songDecoder.decodeLiveSong
+        )
+    }
+
+    func decodeFirstListenMemory(_ root: [String: Any], now: Date = Date()) -> FirstListenMemory {
+        ListeningReportDecoder.firstListenMemory(root, now: now)
     }
 
     func personalFM(mode: PersonalFMMode, limit: Int = 3) async throws -> [PersonalFMTrack] {
@@ -475,7 +599,7 @@ struct LiveMusicLibrary: Sendable {
             "preloadExpGroupName": "t1",
             "sortType": String(sortType),
             "showInner": "0",
-            "threadId": "R_SO_4_\(songID)"
+            "threadId": try CommentResource.song(songID).threadID()
         ])
         let root = try await call(
             EAPIEndpoint("/eapi/batch", signing: "/batch", host: Self.interfaceHost),
@@ -734,6 +858,15 @@ struct LiveMusicLibrary: Sendable {
             else { return nil }
             return value
         }
+    }
+
+    private func listeningPayload(
+        period: ListeningReportPeriod,
+        cursor: ListeningReportCursor?
+    ) -> [String: Any] {
+        var payload: [String: Any] = ["type": period.rawValue]
+        if let cursor { payload["endTime"] = cursor.endTime }
+        return payload
     }
 
     private func manipulateSongs(_ songIDs: [Int64], playlistID: Int64, operation: String) async throws {

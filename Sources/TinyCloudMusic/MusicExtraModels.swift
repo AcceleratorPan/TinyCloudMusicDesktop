@@ -45,6 +45,13 @@ struct MusicArtistAlbumPage: Equatable, Sendable {
     let hasMore: Bool
 }
 
+struct MusicArtistSongPage: Equatable, Sendable {
+    let songs: [Song]
+    let offset: Int
+    let hasMore: Bool
+    let total: Int?
+}
+
 struct MusicAlbumSubscription: Equatable, Sendable {
     let isSubscribed: Bool
     let subscriberCount: Int64

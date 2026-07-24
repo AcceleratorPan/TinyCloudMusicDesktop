@@ -98,6 +98,21 @@ struct FirstListenMemory: Equatable, Sendable {
 - 周/月实时摘要可手动刷新；刷新按钮使用图标并提供 tooltip/辅助功能标签。
 - 各周期保留各自成功内容和错误状态；切换期间不让上一周期响应闪回。
 
+## App 前端入口（全部）
+
+1. `资料库` > `听歌足迹`：保留累计听歌时长、本周/全部排行和最近播放；右上角 `完整足迹` 进入足迹页。
+2. `完整足迹` 页面：顶部 `今日 / 本周 / 本月 / 年度` 分段选择器分别进入四个周期；工具栏刷新按钮刷新当前周期。
+3. `完整足迹` 的 Top 歌曲：单击播放按钮或双击歌曲开始播放，右键菜单沿用歌曲喜欢、歌单和下载操作。
+4. `正在播放` 的歌曲详情：`第一次听这首歌` 小节按需展示首次收听日期和场景，无记录时不影响详情页。
+
+## 周期与上报语义
+
+- 听歌足迹读取 EAPI 使用 `https://interface.music.163.com`；不能沿用 `EAPIEndpoint` 的 `music.163.com` 默认主机。
+- 周/月请求不传 `endTime` 时，服务端返回当前本周/本月，不是上一个已结束周期；页面使用 `本周`、`本月` 是正确语义。
+- `/listen/data/report?type=year` 在本年度尚未结束时可能无数据；当前年度以 `/listen/data/year/report` 为主，通用年报仅作可选补充。历史年度仍使用服务端返回的 `endTime` 游标。
+- 实时报告的 `listenTime.value` 单位是小时，不能按秒格式化；其余 `listenDuration`/`duration` 字段保持服务端秒数语义。
+- 播放上报继续使用 `clientlog.music.163.com`、EAPI `/api/feedback/weblog` 和 macOS 客户端身份，分别发送 `startplay` 与带实际秒数的 `play`。成功后失效账号读取缓存，让今日、周/月足迹读取最新服务端结果。
+
 ## 修改落点
 
 - 新建 `Sources/TinyCloudMusic/ListeningReportModels.swift`：周期、排行、报告和首次收听 decoder。

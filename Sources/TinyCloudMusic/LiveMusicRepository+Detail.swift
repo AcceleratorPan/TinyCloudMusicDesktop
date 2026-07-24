@@ -11,7 +11,9 @@ extension LiveMusicRepository {
             return try await playlistDetail(id: id)
         case let .user(id):
             return try await userDetail(id: id)
-        case .home, .search, .cloudMusic, .comments, .similarSongs, .recommendationHistory:
+        case .home, .search, .cloudMusic, .comments, .similarSongs, .recommendationHistory, .listeningFootprints,
+             .mv, .video, .podcast, .podcastEpisode, .broadcast, .podcastSubscriptions,
+             .musicStyles, .musicStyle:
             throw AppError.invalidRoute
         }
     }

@@ -9,6 +9,10 @@ export TINYCLOUDMUSIC_MUSIC_U=${TINYCLOUDMUSIC_MUSIC_U-}
 
 COMMON_SOURCES=(
   Sources/TinyCloudMusic/Models.swift
+  Sources/TinyCloudMusic/ListeningReportModels.swift
+  Sources/TinyCloudMusic/VideoModels.swift
+  Sources/TinyCloudMusic/AudioContentModels.swift
+  Sources/TinyCloudMusic/MusicKnowledgeModels.swift
   Sources/TinyCloudMusic/RecommendationMemoryModels.swift
   Sources/TinyCloudMusic/Repository.swift
   Sources/TinyCloudMusic/CredentialStore.swift
@@ -25,6 +29,9 @@ COMMON_SOURCES=(
   Sources/TinyCloudMusic/LiveMusicRepository+Detail.swift
   Sources/TinyCloudMusic/LiveMusicRepository+Home.swift
   Sources/TinyCloudMusic/LiveMusicLibrary.swift
+  Sources/TinyCloudMusic/LiveVideoLibrary.swift
+  Sources/TinyCloudMusic/LiveAudioContentLibrary.swift
+  Sources/TinyCloudMusic/LiveMusicKnowledgeLibrary.swift
   Sources/TinyCloudMusic/LiveMusicExtras.swift
 )
 
@@ -70,6 +77,29 @@ swiftc -warnings-as-errors "${COMMON_SOURCES[@]}" Checks/PlaybackAvailabilityChe
 /tmp/tinycloudmusic-playback-availability-check
 swiftc -warnings-as-errors "${COMMON_SOURCES[@]}" Checks/RecommendationMemoryCheck.swift -o /tmp/tinycloudmusic-recommendation-memory-check
 /tmp/tinycloudmusic-recommendation-memory-check
+swiftc -D LISTENING_REPORT_CHECK -warnings-as-errors \
+  "${COMMON_SOURCES[@]}" \
+  Tests/TinyCloudMusicTests/ListeningReportTests.swift \
+  -o /tmp/tinycloudmusic-listening-report-check
+/tmp/tinycloudmusic-listening-report-check
+swiftc -D VIDEO_CHECK -warnings-as-errors \
+  "${COMMON_SOURCES[@]}" \
+  Tests/TinyCloudMusicTests/VideoTests.swift \
+  -o /tmp/tinycloudmusic-video-check
+/tmp/tinycloudmusic-video-check
+swiftc -D AUDIO_CONTENT_CHECK -warnings-as-errors \
+  "${COMMON_SOURCES[@]}" \
+  Tests/TinyCloudMusicTests/AudioContentTests.swift \
+  -o /tmp/tinycloudmusic-audio-content-check
+/tmp/tinycloudmusic-audio-content-check
+swiftc -D MUSIC_KNOWLEDGE_CHECK -warnings-as-errors \
+  Sources/TinyCloudMusic/Models.swift \
+  Sources/TinyCloudMusic/CredentialStore.swift \
+  Sources/TinyCloudMusic/EAPITransport.swift \
+  Sources/TinyCloudMusic/MusicKnowledgeModels.swift \
+  Tests/TinyCloudMusicTests/MusicKnowledgeTests.swift \
+  -o /tmp/tinycloudmusic-knowledge-check
+/tmp/tinycloudmusic-knowledge-check
 swiftc -D CLOUD_MUSIC_CHECK -warnings-as-errors \
   "${COMMON_SOURCES[@]}" \
   Sources/TinyCloudMusic/MusicDownload.swift \

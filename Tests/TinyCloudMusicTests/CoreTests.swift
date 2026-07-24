@@ -98,15 +98,16 @@ struct CoreTests {
                 == "35701388baf89fed412e11269b9c76625d095ecaf17f03fa018abe19ea2d38b949debf242ee39a71ca1f6cda71b1b86a45aa909ee27f7e78e267d34e732f0de948206c3340a788d0003372183e2f753c1f78b66ac23d134ac1fc9b993156520ea826b8aa89a962d4491b4b8d7e08738e1da9b07aa39bf4a7ef0b1c210728cd52"
         )
         #expect(WEAPICodec.csrfToken(in: "MUSIC_U=session; __csrf=csrf=value; os=pc") == "csrf=value")
-        #expect(
-            EAPICookieHeader.value(
-                cookie: "MUSIC_A=session; __csrf=csrf",
-                musicU: "",
-                vip: true,
-                buildVersion: 123,
-                requestID: "request"
-            ) == "MUSIC_A=session; __csrf=csrf"
+        let fallbackCookie = EAPICookieHeader.value(
+            cookie: "MUSIC_A=session; __csrf=csrf",
+            musicU: "",
+            vip: true,
+            buildVersion: 123,
+            requestID: "request"
         )
+        #expect(fallbackCookie.contains("MUSIC_A=session; __csrf=csrf"))
+        #expect(fallbackCookie.contains("os=iPhone OS; appver=9.0.90"))
+        #expect(!fallbackCookie.contains("os=Android"))
         let vipCookie = EAPICookieHeader.value(
             cookie: "MUSIC_A=session; __csrf=csrf",
             musicU: "vip-token",
@@ -116,15 +117,15 @@ struct CoreTests {
         )
         #expect(vipCookie.contains("MUSIC_U=vip-token"))
         #expect(vipCookie.hasSuffix("requestId=request"))
-        #expect(
-            EAPICookieHeader.value(
-                cookie: "__csrf=csrf; MUSIC_U=embedded-token",
-                musicU: "",
-                vip: true,
-                buildVersion: 123,
-                requestID: "request"
-            ) == "__csrf=csrf; MUSIC_U=embedded-token"
+        let embeddedFallbackCookie = EAPICookieHeader.value(
+            cookie: "__csrf=csrf; MUSIC_U=embedded-token",
+            musicU: "",
+            vip: true,
+            buildVersion: 123,
+            requestID: "request"
         )
+        #expect(embeddedFallbackCookie.contains("MUSIC_U=embedded-token"))
+        #expect(embeddedFallbackCookie.contains("os=iPhone OS; appver=9.0.90"))
         let normalCookie = EAPICookieHeader.value(
             cookie: "__csrf=csrf",
             musicU: "music-token",
@@ -688,6 +689,9 @@ struct CoreTests {
     func menuBarLyricMarquee() {
         #expect(MenuBarMarquee.duration(textWidth: 40, viewportWidth: 40, gap: 14) == nil)
         #expect(MenuBarMarquee.duration(textWidth: 56, viewportWidth: 40, gap: 14) == 2.5)
+        #expect(MenuBarMarquee.offset(elapsed: 1.2, distance: 70) == 0)
+        #expect(abs(MenuBarMarquee.offset(elapsed: 2.2, distance: 70) + 28) < 0.000_001)
+        #expect(abs(MenuBarMarquee.offset(elapsed: 3.7, distance: 70)) < 0.000_001)
     }
 
     @Test("Word lyrics parse safely and merge exact-time annotations")

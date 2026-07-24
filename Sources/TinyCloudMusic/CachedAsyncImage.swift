@@ -224,6 +224,7 @@ final class ArtworkPipeline {
 @MainActor
 struct CachedAsyncImage<Content: View>: View {
     let url: URL?
+    let onSuccess: (CGSize) -> Void
     @ViewBuilder let content: (CachedAsyncImagePhase) -> Content
 
     @Environment(\.displayScale) private var displayScale
@@ -232,8 +233,13 @@ struct CachedAsyncImage<Content: View>: View {
     @State private var lastFailureWasTransient = false
     @State private var retryTask: Task<Void, Never>?
 
-    init(url: URL?, @ViewBuilder content: @escaping (CachedAsyncImagePhase) -> Content) {
+    init(
+        url: URL?,
+        onSuccess: @escaping (CGSize) -> Void = { _ in },
+        @ViewBuilder content: @escaping (CachedAsyncImagePhase) -> Content
+    ) {
         self.url = url
+        self.onSuccess = onSuccess
         self.content = content
     }
 
@@ -283,11 +289,12 @@ struct CachedAsyncImage<Content: View>: View {
 
     private func handleCompletion(_ result: Result<ImageResponse, any Error>) {
         switch result {
-        case .success:
+        case let .success(response):
             retryTask?.cancel()
             retryTask = nil
             retryCount = 0
             lastFailureWasTransient = false
+            onSuccess(response.image.size)
         case let .failure(error):
             let transient = ArtworkPipeline.isTransient(error)
             lastFailureWasTransient = transient

@@ -259,6 +259,18 @@ private struct PrimaryContentView: View {
             HomeView(model: model, player: player)
         case .search:
             SearchView(model: model, player: player)
+        case .videos:
+            if let library = model.videoLibrary {
+                VideoRecommendationsView(library: library, onOpenRoute: model.open)
+            } else {
+                ContentUnavailableView("视频不可用", systemImage: "play.rectangle")
+            }
+        case .audio:
+            if let library = model.audioLibrary {
+                AudioContentView(library: library, model: model, player: player)
+            } else {
+                ContentUnavailableView("播客与广播不可用", systemImage: "radio")
+            }
         case .personalFM:
             if let userID = model.currentUserID, let personalFM = model.personalFM {
                 PersonalFMView(controller: personalFM, userID: userID)
@@ -355,6 +367,96 @@ private struct RouteDestinationView: View {
                     systemImage: "person.crop.circle.badge.exclamationmark"
                 )
             }
+        case .listeningFootprints:
+            if model.currentUserID != nil, let library = model.library {
+                ListeningFootprintsView(model: model, library: library, player: player)
+            } else {
+                ContentUnavailableView(
+                    "需要登录",
+                    systemImage: "person.crop.circle.badge.exclamationmark"
+                )
+            }
+        case let .mv(id):
+            if let library = model.videoLibrary {
+                VideoDetailView(
+                    resource: .mv(id),
+                    library: library,
+                    knowledgeLibrary: model.knowledgeLibrary,
+                    songPlayer: player,
+                    currentUserID: model.currentUserID,
+                    onOpenUser: { model.open(.user($0)) },
+                    onOpenRelated: { model.replaceCurrentRoute(with: $0) },
+                    onLogin: { model.selectSidebar(.session) }
+                )
+            } else {
+                ContentUnavailableView("MV 不可用", systemImage: "play.rectangle")
+            }
+        case let .video(id):
+            if let library = model.videoLibrary {
+                VideoDetailView(
+                    resource: .video(id),
+                    library: library,
+                    knowledgeLibrary: model.knowledgeLibrary,
+                    songPlayer: player,
+                    currentUserID: model.currentUserID,
+                    onOpenUser: { model.open(.user($0)) },
+                    onOpenRelated: { model.replaceCurrentRoute(with: $0) },
+                    onLogin: { model.selectSidebar(.session) }
+                )
+            } else {
+                ContentUnavailableView("视频不可用", systemImage: "play.rectangle")
+            }
+        case let .podcast(id):
+            if let library = model.audioLibrary {
+                PodcastDetailView(podcastID: id, library: library, model: model, player: player)
+            } else {
+                ContentUnavailableView("播客不可用", systemImage: "dot.radiowaves.left.and.right")
+            }
+        case let .podcastEpisode(id):
+            if let library = model.audioLibrary {
+                PodcastEpisodeDetailView(episodeID: id, library: library, model: model, player: player)
+            } else {
+                ContentUnavailableView("节目不可用", systemImage: "waveform")
+            }
+        case let .broadcast(id):
+            if let library = model.audioLibrary {
+                BroadcastChannelDetailView(
+                    channelID: id,
+                    library: library,
+                    model: model,
+                    songPlayer: player
+                )
+            } else {
+                ContentUnavailableView("广播不可用", systemImage: "radio")
+            }
+        case .podcastSubscriptions:
+            if let library = model.audioLibrary {
+                PodcastSubscriptionsView(library: library, model: model)
+            } else {
+                ContentUnavailableView("播客订阅不可用", systemImage: "star")
+            }
+        case .musicStyles:
+            if let library = model.knowledgeLibrary {
+                MusicStylesView(
+                    library: library,
+                    accountID: model.currentUserID,
+                    onOpenRoute: model.open
+                )
+            } else {
+                ContentUnavailableView("曲风不可用", systemImage: "guitars")
+            }
+        case let .musicStyle(id, name):
+            if let library = model.knowledgeLibrary {
+                MusicStyleDetailView(
+                    styleID: id,
+                    styleName: name,
+                    library: library,
+                    player: player,
+                    onOpenRoute: model.open
+                )
+            } else {
+                ContentUnavailableView("曲风不可用", systemImage: "guitars")
+            }
         }
     }
 }
@@ -386,6 +488,10 @@ private struct SidebarView: View {
                     .tag(SidebarItem.home)
                 Label("搜索", systemImage: "magnifyingglass")
                     .tag(SidebarItem.search)
+                Label("MV 与视频", systemImage: "play.rectangle")
+                    .tag(SidebarItem.videos)
+                Label("播客与广播", systemImage: "radio")
+                    .tag(SidebarItem.audio)
                 Label("私人 FM", systemImage: "radio")
                     .tag(SidebarItem.personalFM)
                 Section("资料库") {
@@ -434,6 +540,11 @@ private struct HomeView: View {
                         Text("为今天挑一些合适的声音")
                             .foregroundStyle(.secondary)
                     }
+                    Spacer()
+                    Button { model.open(.musicStyles) } label: {
+                        Label("曲风", systemImage: "guitars")
+                    }
+                    .buttonStyle(.bordered)
                 }
 
                 ForEach(model.homeSlots) { slot in
@@ -1121,18 +1232,30 @@ private struct ArtistDetailContent: View {
                     artistID: artist.id,
                     extras: extras,
                     library: library,
+                    knowledgeSection: model.knowledgeLibrary.map { knowledge in
+                        AnyView(MusicKnowledgeSection(
+                            resource: .artist(artist.id),
+                            library: knowledge,
+                            fallbackText: artist.biography,
+                            showsTitle: false,
+                            onOpenRoute: model.open
+                        ))
+                    },
                     onOpenRoute: { model.open($0) },
                     onFollowChanged: {
                         model.showToast($0 ? "已关注歌手" : "已取消关注歌手")
                     },
-                    songList: AnyView(Group {
-                        if songs.isEmpty {
-                            ContentUnavailableView("暂无歌曲", systemImage: "music.note")
-                                .frame(maxWidth: .infinity, minHeight: 90)
-                        } else {
-                            SongList(songs: songs, model: model, player: player, showsHeading: false)
-                        }
-                    })
+                    songList: AnyView(
+                        ArtistSongList(
+                            artistID: artist.id,
+                            hotSongs: songs,
+                            totalSongCount: artist.songCount,
+                            extras: extras,
+                            model: model,
+                            player: player
+                        )
+                        .id(artist.id)
+                    )
                 )
             } else {
                 SongList(songs: songs, model: model, player: player)
@@ -1157,6 +1280,7 @@ private struct AlbumDetailContent: View {
     let songs: [Song]
     @Bindable var model: AppModel
     @Bindable var player: PlayerController
+    @State private var selectedSection = AlbumDetailSection.songs
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -1170,8 +1294,37 @@ private struct AlbumDetailContent: View {
                 metadata: albumMetadata,
                 actions: headerActions
             )
-            SongList(songs: songs, model: model, player: player)
+            HStack {
+                Picker("专辑内容", selection: $selectedSection) {
+                    ForEach(AlbumDetailSection.allCases, id: \.self) { section in
+                        Label(section.rawValue, systemImage: section.symbol)
+                            .tag(section)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 360)
+                Spacer()
+            }
+            switch selectedSection {
+            case .songs:
+                SongList(songs: songs, model: model, player: player, showsHeading: false)
+            case .knowledge:
+                if let knowledge = model.knowledgeLibrary {
+                    MusicKnowledgeSection(
+                        resource: .album(album.id),
+                        library: knowledge,
+                        fallbackText: album.description,
+                        showsTitle: false,
+                        onOpenRoute: model.open
+                    )
+                } else {
+                    ContentUnavailableView("百科不可用", systemImage: "text.book.closed")
+                        .frame(maxWidth: .infinity, minHeight: 160)
+                }
+            }
         }
+        .onChange(of: album.id) { _, _ in selectedSection = .songs }
     }
 
     private var isSubscribed: Bool {
@@ -1209,6 +1362,18 @@ private struct AlbumDetailContent: View {
             }
             .buttonStyle(.bordered)
         })
+    }
+}
+
+private enum AlbumDetailSection: String, CaseIterable {
+    case songs = "歌曲"
+    case knowledge = "百科"
+
+    var symbol: String {
+        switch self {
+        case .songs: "music.note"
+        case .knowledge: "text.book.closed"
+        }
     }
 }
 
@@ -2454,6 +2619,7 @@ struct SettingsView: View {
     @Bindable var model: AppModel
     @State private var choosingDownloadFolder = false
     @State private var choosingImageFolder = false
+    @State private var choosingSheetFolder = false
     @State private var choosingCacheFolder = false
     @State private var showingClearCacheConfirmation = false
     @State private var musicU = ""
@@ -2518,7 +2684,7 @@ struct SettingsView: View {
             }
 
             Section("存储") {
-                LabeledContent("下载位置") {
+                LabeledContent("歌曲下载位置") {
                     folderControls(path: model.downloadPath, url: model.downloadFolderURL) {
                         choosingDownloadFolder = true
                     }
@@ -2526,6 +2692,11 @@ struct SettingsView: View {
                 LabeledContent("图片保存位置") {
                     folderControls(path: model.imagePath, url: model.imageFolderURL) {
                         choosingImageFolder = true
+                    }
+                }
+                LabeledContent("琴谱保存位置") {
+                    folderControls(path: model.sheetPath, url: model.sheetFolderURL) {
+                        choosingSheetFolder = true
                     }
                 }
                 LabeledContent("缓存位置") {
@@ -2614,6 +2785,13 @@ struct SettingsView: View {
             allowsMultipleSelection: false
         ) { result in
             handleFolderSelection(result, apply: model.setImageFolder)
+        }
+        .fileImporter(
+            isPresented: $choosingSheetFolder,
+            allowedContentTypes: [.folder],
+            allowsMultipleSelection: false
+        ) { result in
+            handleFolderSelection(result, apply: model.setSheetFolder)
         }
         .fileImporter(
             isPresented: $choosingCacheFolder,

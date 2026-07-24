@@ -21,7 +21,8 @@ let package = Package(
         ),
         .testTarget(
             name: "TinyCloudMusicTests",
-            dependencies: ["TinyCloudMusic"]
+            dependencies: ["TinyCloudMusic"],
+            resources: [.process("Fixtures")]
         )
     ],
     swiftLanguageModes: [.v6]

@@ -90,12 +90,12 @@ enum CredentialStoreError: LocalizedError, Equatable, Sendable {
 }
 
 struct CredentialStore: Sendable {
-    static let defaultService = "com.tinycloudmusic.app.session"
+    static let productionService = "com.tinycloudmusic.app.session"
 
     private let service: String
     private let account = "credentials"
 
-    init(service: String = Self.defaultService) {
+    init(service: String) {
         self.service = service
     }
 

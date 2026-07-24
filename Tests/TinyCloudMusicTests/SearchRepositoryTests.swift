@@ -106,6 +106,11 @@ struct SearchRepositoryTests {
             }
             #expect(!page.hasMore)
         }
+
+        #expect(repository.decodeLivePlaylist([
+            "id": 5,
+            "cover": "https://img.test/style.jpg"
+        ])?.artwork.remoteURL == URL(string: "https://img.test/style.jpg"))
     }
 
     @Test("User detail keeps the information shown by the Qt app")

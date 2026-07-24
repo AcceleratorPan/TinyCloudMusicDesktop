@@ -1,0 +1,63 @@
+{
+  "categories": {
+    "code": 200,
+    "categories": [
+      { "id": 10001, "name": "有声书" },
+      { "id": "11", "name": "人文历史" },
+      { "name": "缺少 ID" }
+    ]
+  },
+  "podcasts": {
+    "code": 200,
+    "djRadios": [
+      {
+        "id": "101",
+        "name": "夜间节目",
+        "dj": { "nickname": "主播" },
+        "picUrl": "https://p1.music.126.net/podcast.jpg",
+        "category": "人文历史",
+        "subed": true
+      },
+      { "id": 102 },
+      { "name": "缺少 ID" }
+    ]
+  },
+  "episodes": {
+    "code": 200,
+    "programs": [
+      {
+        "id": "201",
+        "name": "第一期",
+        "duration": 90000,
+        "radio": { "id": 101 },
+        "mainSong": {
+          "id": 301,
+          "name": "第一期音频",
+          "ar": [{ "id": 401, "name": "主播" }],
+          "al": { "id": 501, "name": "夜间节目", "picUrl": "https://p1.music.126.net/episode.jpg" },
+          "dt": 90000
+        }
+      },
+      { "id": 202, "radio": { "id": 101 } },
+      { "name": "缺少 ID" }
+    ],
+    "more": true
+  },
+  "broadcasts": {
+    "code": 200,
+    "data": {
+      "channels": [
+        { "channelId": "0007", "channelName": "城市广播", "regionName": "上海" },
+        { "channelId": 8 },
+        { "channelName": "缺少 ID" }
+      ],
+      "lastId": "0008",
+      "score": "12",
+      "hasMore": true
+    }
+  },
+  "emptyLyrics": {
+    "code": 200,
+    "data": { "lrc": { "lyric": "" } }
+  }
+}

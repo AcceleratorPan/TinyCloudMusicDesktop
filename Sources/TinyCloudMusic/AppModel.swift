@@ -2,7 +2,7 @@ import Foundation
 import Observation
 
 enum SidebarItem: Hashable {
-    case home, search, personalFM, library, history, downloads, session
+    case home, search, videos, audio, personalFM, library, history, downloads, session
 }
 
 enum HomeSectionLoad: Equatable {
@@ -92,6 +92,9 @@ final class AppModel {
 
     let repository: any MusicRepository
     let library: LiveMusicLibrary?
+    let videoLibrary: LiveVideoLibrary?
+    let audioLibrary: LiveAudioContentLibrary?
+    let knowledgeLibrary: LiveMusicKnowledgeLibrary?
     let extras: LiveMusicExtras?
     let downloads: MusicDownloadManager?
     let session: SessionController?
@@ -122,6 +125,9 @@ final class AppModel {
     init(
         repository: any MusicRepository,
         library: LiveMusicLibrary? = nil,
+        videoLibrary: LiveVideoLibrary? = nil,
+        audioLibrary: LiveAudioContentLibrary? = nil,
+        knowledgeLibrary: LiveMusicKnowledgeLibrary? = nil,
         extras: LiveMusicExtras? = nil,
         downloads: MusicDownloadManager? = nil,
         session: SessionController? = nil,
@@ -129,6 +135,9 @@ final class AppModel {
     ) {
         self.repository = repository
         self.library = library
+        self.videoLibrary = videoLibrary
+        self.audioLibrary = audioLibrary
+        self.knowledgeLibrary = knowledgeLibrary
         self.extras = extras
         self.downloads = downloads
         self.session = session
@@ -156,6 +165,7 @@ final class AppModel {
             homeSectionIDs: storedSections.isEmpty ? defaultSections : storedSections,
             downloadBookmark: defaults.data(forKey: "downloadBookmark"),
             imageBookmark: defaults.data(forKey: "imageBookmark"),
+            sheetBookmark: defaults.data(forKey: "sheetBookmark"),
             cacheBookmark: defaults.data(forKey: "cacheBookmark")
         )
         downloads?.setMaximumConcurrentDownloads(settings.downloadConcurrency)
@@ -171,6 +181,10 @@ final class AppModel {
     func open(_ route: Route) {
         guard path.last != route else { return }
         path.append(route)
+    }
+
+    func replaceCurrentRoute(with route: Route) {
+        if path.isEmpty { path = [route] } else { path[path.count - 1] = route }
     }
 
     func loadHome() {
@@ -716,6 +730,18 @@ final class AppModel {
         }
     }
 
+    func setSheetFolder(_ url: URL) {
+        do {
+            let bookmark = try folderBookmark(for: url)
+            settings.sheetBookmark = bookmark
+            defaults.set(bookmark, forKey: "sheetBookmark")
+            settingsMessage = nil
+            showToast("琴谱保存位置已保存")
+        } catch {
+            settingsMessage = "无法保存琴谱目录权限"
+        }
+    }
+
     func download(_ song: Song) {
         guard let downloads else { return }
         downloads.enqueue(
@@ -886,6 +912,10 @@ final class AppModel {
         imageFolderURL.path(percentEncoded: false)
     }
 
+    var sheetPath: String {
+        sheetFolderURL.path(percentEncoded: false)
+    }
+
     var cachePath: String {
         cacheFolderURL.path(percentEncoded: false)
     }
@@ -1030,12 +1060,25 @@ final class AppModel {
     }
 
     var downloadFolderURL: URL {
-        resolveFolder(settings.downloadBookmark) ?? FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
-            .appending(path: "TinyCloudMusic", directoryHint: .isDirectory)
+        customDownloadFolderURL ?? defaultDownloadRoot
+            .appending(path: "歌曲", directoryHint: .isDirectory)
     }
 
     var imageFolderURL: URL {
-        resolveFolder(settings.preferredImageBookmark) ?? downloadFolderURL
+        resolveFolder(settings.imageBookmark) ?? customDownloadFolderURL ?? defaultDownloadRoot
+            .appending(path: "图片", directoryHint: .isDirectory)
+    }
+
+    var sheetFolderURL: URL {
+        resolveFolder(settings.sheetBookmark) ?? customDownloadFolderURL ?? defaultDownloadRoot
+            .appending(path: "琴谱", directoryHint: .isDirectory)
+    }
+
+    private var customDownloadFolderURL: URL? { resolveFolder(settings.downloadBookmark) }
+
+    private var defaultDownloadRoot: URL {
+        FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
+            .appending(path: "TinyCloudMusicDownloads", directoryHint: .isDirectory)
     }
 
     private func folderBookmark(for url: URL) throws -> Data {

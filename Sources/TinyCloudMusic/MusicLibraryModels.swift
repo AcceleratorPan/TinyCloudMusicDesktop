@@ -206,6 +206,48 @@ enum MusicPlaylistPrivacy: Int, Sendable {
     case privatePlaylist = 10
 }
 
+enum CommentResource: Hashable, Sendable {
+    case song(Int64)
+    case mv(Int64)
+    case video(String)
+
+    func threadID() throws -> String {
+        switch self {
+        case let .song(id):
+            guard id > 0 else { throw EAPIError.invalidPayload }
+            return "R_SO_4_\(id)"
+        case let .mv(id):
+            guard id > 0 else { throw EAPIError.invalidPayload }
+            return "R_MV_5_\(id)"
+        case .video:
+            return "R_VI_62_\(try requestID())"
+        }
+    }
+
+    func requestID() throws -> String {
+        switch self {
+        case let .song(id), let .mv(id):
+            guard id > 0 else { throw EAPIError.invalidPayload }
+            return String(id)
+        case let .video(rawID):
+            let id = rawID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !id.isEmpty,
+                  !id.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+                  URLComponents(string: id)?.scheme == nil
+            else { throw EAPIError.invalidPayload }
+            return id
+        }
+    }
+
+    func encodedThreadID() throws -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard let value = try threadID().addingPercentEncoding(withAllowedCharacters: allowed) else {
+            throw EAPIError.invalidPayload
+        }
+        return value
+    }
+}
+
 struct MusicComment: Identifiable, Equatable, Sendable {
     let id: Int64
     let songID: Int64
@@ -391,6 +433,24 @@ enum MusicLibraryDecoder {
             hasMore: bool(data, "hasMore"),
             sortType: int(data, "sortType"),
             totalCount: int(data, "totalCount")
+        )
+    }
+
+    static func readOnlyCommentPage(
+        _ root: [String: Any],
+        resource: CommentResource,
+        offset: Int,
+        limit: Int
+    ) -> VideoCommentPage {
+        let values = array(root, "comments")
+        let songID: Int64 = if case let .song(id) = resource { id } else { 0 }
+        let totalCount = max(0, int(root, "total"))
+        return VideoCommentPage(
+            comments: values.compactMap { comment($0, songID: songID) },
+            totalCount: totalCount,
+            hasMore: bool(root, "more") || bool(root, "hasMore") || offset + values.count < totalCount,
+            nextOffset: offset + limit,
+            beforeTime: values.last.map { int64($0, "time") } ?? 0
         )
     }
 
