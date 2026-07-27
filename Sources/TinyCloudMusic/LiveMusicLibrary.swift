@@ -153,7 +153,8 @@ struct LiveMusicLibrary: Sendable {
                 host: Self.eapiHost
             ),
             payload: [:],
-            cache: forceRefresh ? nil : .library
+            cache: forceRefresh ? nil : .library,
+            includesClientHeader: true
         )
         try requireSuccess(root)
         return try decodeTotalListeningDuration(root)
@@ -184,7 +185,8 @@ struct LiveMusicLibrary: Sendable {
                 host: Self.eapiHost
             ),
             payload: [:],
-            cache: forceRefresh ? nil : .library
+            cache: forceRefresh ? nil : .library,
+            includesClientHeader: true
         )
         try requireSuccess(root)
         return decodeListeningRank(root)
@@ -203,7 +205,8 @@ struct LiveMusicLibrary: Sendable {
                 host: Self.eapiHost
             ),
             payload: listeningPayload(period: period, cursor: cursor),
-            cache: forceRefresh ? nil : .library
+            cache: forceRefresh ? nil : .library,
+            includesClientHeader: true
         )
         try requireSuccess(root)
         return decodeListeningRank(root)
@@ -221,7 +224,8 @@ struct LiveMusicLibrary: Sendable {
                 host: Self.eapiHost
             ),
             payload: ["type": period.rawValue],
-            cache: forceRefresh ? nil : .library
+            cache: forceRefresh ? nil : .library,
+            includesClientHeader: true
         )
         try requireSuccess(root)
         return decodeListeningReport(root, period: period, defaultTitle: "\(period.title)实时摘要")
@@ -239,7 +243,8 @@ struct LiveMusicLibrary: Sendable {
                 host: Self.eapiHost
             ),
             payload: listeningPayload(period: period, cursor: cursor),
-            cache: forceRefresh ? nil : .library
+            cache: forceRefresh ? nil : .library,
+            includesClientHeader: true
         )
         try requireSuccess(root)
         return decodeListeningReport(root, period: period, defaultTitle: "\(period.title)听歌报告")
@@ -253,7 +258,8 @@ struct LiveMusicLibrary: Sendable {
                 host: Self.eapiHost
             ),
             payload: [:],
-            cache: forceRefresh ? nil : .library
+            cache: forceRefresh ? nil : .library,
+            includesClientHeader: true
         )
         try requireSuccess(root)
         return decodeListeningReport(root, period: .year, defaultTitle: "年度听歌足迹")
@@ -927,17 +933,29 @@ struct LiveMusicLibrary: Sendable {
     private func call(
         _ endpoint: EAPIEndpoint,
         payload: [String: Any],
-        cache: EAPIReadCache? = .library
+        cache: EAPIReadCache? = .library,
+        includesClientHeader: Bool = false
     ) async throws -> [String: Any] {
-        try await call(endpoint, json: compactJSON(payload), cache: cache)
+        try await call(
+            endpoint,
+            json: compactJSON(payload),
+            cache: cache,
+            includesClientHeader: includesClientHeader
+        )
     }
 
     private func call(
         _ endpoint: EAPIEndpoint,
         json: Data,
-        cache: EAPIReadCache? = .library
+        cache: EAPIReadCache? = .library,
+        includesClientHeader: Bool = false
     ) async throws -> [String: Any] {
-        try decodedJSONObject(try await transport.request(endpoint, json: json, cache: cache))
+        try decodedJSONObject(try await transport.request(
+            endpoint,
+            json: json,
+            cache: cache,
+            includesClientHeader: includesClientHeader
+        ))
     }
 
     private func mutate(_ endpoint: EAPIEndpoint, payload: [String: Any]) async throws -> [String: Any] {

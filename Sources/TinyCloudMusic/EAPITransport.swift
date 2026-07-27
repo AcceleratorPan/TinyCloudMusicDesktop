@@ -619,30 +619,8 @@ struct EAPITransport: Sendable {
     ) async throws -> EAPIHTTPResponse {
         authenticationCookieStorage?.removeCookies(since: .distantPast)
         defer { authenticationCookieStorage?.removeCookies(since: .distantPast) }
-        let timestamp = Int64(Date().timeIntervalSince1970 * 1_000)
-        let cookieValue: (String, String) -> String = { name, fallback in
-            let value = NeteaseCookieHeader.value(named: name, in: context.cookie)
-            return value.isEmpty ? fallback : value
-        }
-        let profile = Self.authenticationProfile(cookie: context.cookie)
-        let os = cookieValue("os", profile.os)
-        let isMacOS = os.lowercased() == "osx"
-        let headerFields: [(String, String)] = [
-            ("osver", cookieValue("osver", profile.osVersion)),
-            ("deviceId", context.deviceID),
-            ("os", os),
-            ("appver", cookieValue("appver", profile.appVersion)),
-            ("versioncode", cookieValue("versioncode", "140")),
-            ("mobilename", NeteaseCookieHeader.value(named: "mobilename", in: context.cookie)),
-            ("buildver", cookieValue("buildver", String(timestamp).prefix(10).description)),
-            ("resolution", cookieValue("resolution", "1920x1080")),
-            ("__csrf", NeteaseCookieHeader.value(named: "__csrf", in: context.cookie)),
-            ("channel", cookieValue("channel", profile.channel)),
-            ("requestId", "\(timestamp)_\(String(format: "%04d", Int.random(in: 0..<1_000)))")
-        ] + ["MUSIC_U", "MUSIC_A"].compactMap { name in
-            let value = NeteaseCookieHeader.value(named: name, in: context.cookie)
-            return value.isEmpty ? nil : (name, value)
-        }
+        let headerFields = Self.eapiClientHeaderFields(cookie: context.cookie, deviceID: context.deviceID)
+        let isMacOS = headerFields.first { $0.0 == "os" }?.1.lowercased() == "osx"
         var json = payload
         json["e_r"] = false
         json["header"] = Dictionary(uniqueKeysWithValues: headerFields)
@@ -696,10 +674,20 @@ struct EAPITransport: Sendable {
         invalidatesAccountCache: Bool = false,
         macOSClient: Bool = false,
         iPhoneClient: Bool = false,
+        includesClientHeader: Bool = false,
         retryable: Bool = true
     ) async throws -> Data {
-        let body = try EAPICodec.requestBody(path: endpoint.logicalPath, json: json)
-        let (cookie, musicU) = credentials()
+        let credentials = resolvedCredentials()
+        let cookie = credentials.cookie
+        let musicU = credentials.musicU
+        let requestJSON = includesClientHeader
+            ? try Self.addingEAPIClientHeader(
+                to: json,
+                cookie: cookie,
+                deviceID: credentials.deviceID
+            )
+            : json
+        let body = try EAPICodec.requestBody(path: endpoint.logicalPath, json: requestJSON)
         let account = Self.accountFingerprint(cookie: cookie, musicU: musicU)
         let policy: EAPIRequestCachePolicy = invalidatesAccountCache
             ? .invalidateAccount
@@ -725,7 +713,8 @@ struct EAPITransport: Sendable {
                     json: json,
                     vip: vip,
                     macOSClient: macOSClient,
-                    iPhoneClient: iPhoneClient
+                    iPhoneClient: iPhoneClient,
+                    includesClientHeader: includesClientHeader
                 ),
                 group: cache ?? .detail
             )
@@ -924,11 +913,19 @@ struct EAPITransport: Sendable {
     }
 
     func credentials() -> (cookie: String, musicU: String) {
+        let credentials = resolvedCredentials()
+        return (credentials.cookie, credentials.musicU)
+    }
+
+    private func resolvedCredentials() -> (cookie: String, musicU: String, deviceID: String) {
         let cookie = cookieOverride
         let musicU = musicUOverride
-        if cookie != nil || musicU != nil { return (cookie ?? "", musicU ?? "") }
+        if cookie != nil || musicU != nil {
+            let cookie = cookie ?? ""
+            return (cookie, musicU ?? "", NeteaseCookieHeader.value(named: "deviceId", in: cookie))
+        }
         let stored = loadStoredCredentials()
-        return (cookie ?? stored?.cookie ?? "", musicU ?? stored?.musicU ?? "")
+        return (stored?.cookie ?? "", stored?.musicU ?? "", stored?.deviceID ?? "")
     }
 
     private func performRequest(
@@ -1084,6 +1081,50 @@ struct EAPITransport: Sendable {
         }
     }
 
+    private static func addingEAPIClientHeader(
+        to json: Data,
+        cookie: String,
+        deviceID: String
+    ) throws -> Data {
+        guard var payload = try JSONSerialization.jsonObject(with: json) as? [String: Any] else {
+            throw EAPIError.invalidPayload
+        }
+        payload["header"] = Dictionary(uniqueKeysWithValues: eapiClientHeaderFields(
+            cookie: cookie,
+            deviceID: deviceID
+        ))
+        return try compactJSON(payload)
+    }
+
+    private static func eapiClientHeaderFields(
+        cookie: String,
+        deviceID: String? = nil
+    ) -> [(String, String)] {
+        let timestamp = Int64(Date().timeIntervalSince1970 * 1_000)
+        let cookieValue: (String, String) -> String = { name, fallback in
+            let value = NeteaseCookieHeader.value(named: name, in: cookie)
+            return value.isEmpty ? fallback : value
+        }
+        let profile = authenticationProfile(cookie: cookie)
+        let fields = [
+            ("osver", cookieValue("osver", profile.osVersion)),
+            ("deviceId", deviceID ?? cookieValue("deviceId", "")),
+            ("os", cookieValue("os", profile.os)),
+            ("appver", cookieValue("appver", profile.appVersion)),
+            ("versioncode", cookieValue("versioncode", "140")),
+            ("mobilename", NeteaseCookieHeader.value(named: "mobilename", in: cookie)),
+            ("buildver", cookieValue("buildver", String(timestamp).prefix(10).description)),
+            ("resolution", cookieValue("resolution", "1920x1080")),
+            ("__csrf", NeteaseCookieHeader.value(named: "__csrf", in: cookie)),
+            ("channel", cookieValue("channel", profile.channel)),
+            ("requestId", "\(timestamp)_\(String(format: "%04d", Int.random(in: 0..<1_000)))")
+        ]
+        return fields + ["MUSIC_U", "MUSIC_A"].compactMap { name in
+            let value = NeteaseCookieHeader.value(named: name, in: cookie)
+            return value.isEmpty ? nil : (name, value)
+        }
+    }
+
     private func responseCookies(
         _ response: HTTPURLResponse,
         url: URL,
@@ -1104,7 +1145,8 @@ struct EAPITransport: Sendable {
         json: Data,
         vip: Bool,
         macOSClient: Bool,
-        iPhoneClient: Bool
+        iPhoneClient: Bool,
+        includesClientHeader: Bool = false
     ) -> String {
         var source = Data(endpoint.physicalURL.absoluteString.utf8)
         source.append(0)
@@ -1113,6 +1155,7 @@ struct EAPITransport: Sendable {
         source.append(vip ? 1 : 0)
         source.append(macOSClient ? 1 : 0)
         source.append(iPhoneClient ? 1 : 0)
+        source.append(includesClientHeader ? 1 : 0)
         source.append(endpoint.responseEncoding.rawValue)
         source.append(json)
         return sha256(source)

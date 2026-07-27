@@ -366,15 +366,18 @@ struct ListeningFootprintsView: View {
                 )
             }
             async let report = try? library.listeningReport(period: .year, forceRefresh: force)
-            let footprint = try await library.yearListeningFootprint(forceRefresh: force)
-            let loadedReport = await report
-            let ranks = loadedReport?.topSongs ?? []
+            async let footprint = try? library.yearListeningFootprint(forceRefresh: force)
+            let (loadedReport, loadedFootprint) = await (report, footprint)
+            let reportHasContent = loadedReport.map { !$0.metrics.isEmpty || !$0.topSongs.isEmpty } == true
+            let primary = reportHasContent ? loadedReport : loadedFootprint ?? loadedReport
+            guard let primary else { throw EAPIError.missingData("年度听歌足迹") }
+            let reportRanks = loadedReport?.topSongs ?? []
             return FootprintPage(
                 cursor: nil,
-                title: footprint.title,
-                metrics: mergedMetrics(footprint.metrics, loadedReport?.metrics ?? []),
-                ranks: ranks.isEmpty ? footprint.topSongs : ranks,
-                previousCursor: loadedReport?.previousCursor ?? footprint.previousCursor
+                title: primary.title,
+                metrics: mergedMetrics(loadedReport?.metrics ?? [], loadedFootprint?.metrics ?? []),
+                ranks: reportRanks.isEmpty ? loadedFootprint?.topSongs ?? [] : reportRanks,
+                previousCursor: loadedReport?.previousCursor ?? loadedFootprint?.previousCursor
             )
         }
     }

@@ -97,7 +97,7 @@ enum WriteAPIContractCheck {
         let knowledgeLibrary = LiveMusicKnowledgeLibrary(transport: transport)
         let originalCookieLibrary = LiveMusicLibrary(transport: EAPITransport(
             session: URLSession(configuration: configuration),
-            cookie: "MUSIC_U=original-cookie",
+            cookie: "MUSIC_U=original-cookie; deviceId=test-device",
             musicU: "vip-requester-cookie"
         ))
         let repository = LiveMusicRepository(transport: reportingTransport)
@@ -580,27 +580,32 @@ enum WriteAPIContractCheck {
             count += 1
         }
 
+        let originalCookieMatches: (String) -> Bool = {
+            $0.contains("MUSIC_U=original-cookie") && !$0.contains("vip-requester-cookie")
+        }
+        let originalClientHeaderMatches: ([String: Any]) -> Bool = {
+            let header = $0.object("header")
+            return header.string("MUSIC_U") == "original-cookie"
+                && header.string("deviceId") == "test-device"
+                && !header.string("requestId").isEmpty
+                && !header.string("os").isEmpty
+        }
         try await verify(
             "/eapi/content/activity/listen/data/total",
             signing: "/api/content/activity/listen/data/total",
             host: "interface.music.163.com",
-            cookieMatches: {
-                $0.contains("MUSIC_U=original-cookie") && !$0.contains("vip-requester-cookie")
-            },
+            cookieMatches: originalCookieMatches,
             call: { _ = try await originalCookieLibrary.totalListeningDuration() }
-        ) { $0.isEmpty }
+        ) { originalClientHeaderMatches($0) }
         count += 1
 
-        let originalCookieMatches: (String) -> Bool = {
-            $0.contains("MUSIC_U=original-cookie") && !$0.contains("vip-requester-cookie")
-        }
         try await verify(
             "/eapi/content/activity/listen/data/today/song/play/rank",
             signing: "/api/content/activity/listen/data/today/song/play/rank",
             host: "interface.music.163.com",
             cookieMatches: originalCookieMatches,
             call: { _ = try await originalCookieLibrary.todayListeningRank() }
-        ) { $0.isEmpty }
+        ) { originalClientHeaderMatches($0) }
         count += 1
 
         for period in [ListeningReportPeriod.week, .month] {
@@ -611,7 +616,9 @@ enum WriteAPIContractCheck {
                 cookieMatches: originalCookieMatches,
                 call: { _ = try await originalCookieLibrary.listeningSongRank(period: period) }
             ) {
-                $0.string("type") == period.rawValue && $0["endTime"] == nil
+                $0.string("type") == period.rawValue
+                    && $0["endTime"] == nil
+                    && originalClientHeaderMatches($0)
             }
             count += 1
         }
@@ -630,7 +637,9 @@ enum WriteAPIContractCheck {
                 _ = try await originalCookieLibrary.listeningSongRank(period: .month, cursor: serverCursor)
             }
         ) {
-            $0.string("type") == "month" && $0.int64("endTime") == serverCursor.endTime
+            $0.string("type") == "month"
+                && $0.int64("endTime") == serverCursor.endTime
+                && originalClientHeaderMatches($0)
         }
         count += 1
 
@@ -641,7 +650,9 @@ enum WriteAPIContractCheck {
                 host: "interface.music.163.com",
                 cookieMatches: originalCookieMatches,
                 call: { _ = try await originalCookieLibrary.realtimeListeningReport(period: period) }
-            ) { $0.string("type") == period.rawValue }
+            ) {
+                $0.string("type") == period.rawValue && originalClientHeaderMatches($0)
+            }
             count += 1
         }
 
@@ -653,7 +664,9 @@ enum WriteAPIContractCheck {
                 cookieMatches: originalCookieMatches,
                 call: { _ = try await originalCookieLibrary.listeningReport(period: period) }
             ) {
-                $0.string("type") == period.rawValue && $0["endTime"] == nil
+                $0.string("type") == period.rawValue
+                    && $0["endTime"] == nil
+                    && originalClientHeaderMatches($0)
             }
             count += 1
         }
@@ -667,7 +680,9 @@ enum WriteAPIContractCheck {
                 _ = try await originalCookieLibrary.listeningReport(period: .year, cursor: serverCursor)
             }
         ) {
-            $0.string("type") == "year" && $0.int64("endTime") == serverCursor.endTime
+            $0.string("type") == "year"
+                && $0.int64("endTime") == serverCursor.endTime
+                && originalClientHeaderMatches($0)
         }
         count += 1
 
@@ -677,7 +692,7 @@ enum WriteAPIContractCheck {
             host: "interface.music.163.com",
             cookieMatches: originalCookieMatches,
             call: { _ = try await originalCookieLibrary.yearListeningFootprint() }
-        ) { $0.isEmpty }
+        ) { originalClientHeaderMatches($0) }
         count += 1
 
         try await verify(
@@ -686,7 +701,9 @@ enum WriteAPIContractCheck {
             host: "interface.music.163.com",
             cookieMatches: originalCookieMatches,
             call: { _ = try await originalCookieLibrary.firstListenMemory(songID: 42) }
-        ) { $0.int64("songId") == 42 }
+        ) {
+            $0.int64("songId") == 42
+        }
         count += 1
 
         for invalidCall in [
