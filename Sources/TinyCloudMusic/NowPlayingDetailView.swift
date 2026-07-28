@@ -21,14 +21,16 @@ struct PlaybackControls: View {
                         player.toggleShuffle()
                     }
 
-                    PlayerIconButton(
-                        symbol: "waveform.path.ecg",
-                        label: heartModeLabel,
-                        isActive: player.isHeartModeEnabled,
-                        isDisabled: player.currentSong == nil || player.isLoadingHeartMode,
-                        badge: player.isLoadingHeartMode ? "…" : (player.heartModeErrorMessage == nil ? nil : "!")
-                    ) {
-                        player.toggleHeartMode()
+                    if player.currentSong?.isPodcastEpisode != true {
+                        PlayerIconButton(
+                            symbol: "waveform.path.ecg",
+                            label: heartModeLabel,
+                            isActive: player.isHeartModeEnabled,
+                            isDisabled: player.currentSong == nil || player.isLoadingHeartMode,
+                            badge: player.isLoadingHeartMode ? "…" : (player.heartModeErrorMessage == nil ? nil : "!")
+                        ) {
+                            player.toggleHeartMode()
+                        }
                     }
                 }
 
@@ -374,16 +376,18 @@ struct NowPlayingDetailView: View {
             Spacer(minLength: 0)
 
             HStack(spacing: 10) {
-                PlayerIconButton(
-                    symbol: model.likedSongIDs.contains(song.id) ? "heart.fill" : "heart",
-                    label: model.likedSongIDs.contains(song.id) ? "取消喜欢" : "喜欢",
-                    isActive: model.likedSongIDs.contains(song.id)
-                ) {
-                    model.toggleSongLiked(song.id)
-                }
-                CommentButton(songID: song.id, library: model.library) {
-                    close()
-                    model.open(.comments(song.id))
+                if !song.isPodcastEpisode {
+                    PlayerIconButton(
+                        symbol: model.likedSongIDs.contains(song.id) ? "heart.fill" : "heart",
+                        label: model.likedSongIDs.contains(song.id) ? "取消喜欢" : "喜欢",
+                        isActive: model.likedSongIDs.contains(song.id)
+                    ) {
+                        model.toggleSongLiked(song.id)
+                    }
+                    CommentButton(songID: song.id, library: model.library) {
+                        close()
+                        model.open(.comments(song.id))
+                    }
                 }
                 if hasSheets {
                     PlayerIconButton(symbol: "music.quarternote.3", label: "乐谱") {

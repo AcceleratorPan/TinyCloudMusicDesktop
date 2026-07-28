@@ -237,11 +237,10 @@ private struct BroadcastDiscoveryView: View {
                         Divider().padding(.leading, 76)
                     }
                     if page.hasMore {
-                        Button(isLoadingMore ? "正在加载…" : "加载更多") {
+                        LoadMoreTrigger(title: isLoadingMore ? "正在加载更多…" : "继续加载") {
                             Task { await loadMore(page) }
                         }
-                        .disabled(isLoadingMore)
-                        .padding(16)
+                        .id(page.channels.count)
                     }
                 }
                 .padding(.horizontal, 24)
@@ -333,11 +332,10 @@ struct PodcastDetailView: View {
                                 Divider().padding(.leading, 64)
                             }
                             if page.hasMore {
-                                Button(isLoadingMore ? "正在加载…" : "加载更多") {
+                                LoadMoreTrigger(title: isLoadingMore ? "正在加载更多…" : "继续加载") {
                                     Task { await loadMore(page) }
                                 }
-                                .disabled(isLoadingMore)
-                                .padding(16)
+                                .id(page.nextOffset)
                             }
                         }
                     }
@@ -437,8 +435,9 @@ struct PodcastDetailView: View {
                 guard accountID == model.currentUserID else { return }
                 podcast = podcast?.settingSubscribed(subscribed)
             } catch {
-                if accountID == model.currentUserID,
-                   let confirmed = try? await library.podcast(id: podcastID),
+                guard accountID == model.currentUserID else { return }
+                await library.invalidateCachedResponses(in: [.detail, .library])
+                if let confirmed = try? await library.podcast(id: podcastID),
                    confirmed.isSubscribed == subscribed {
                     podcast = confirmed
                     return
@@ -468,6 +467,10 @@ struct PodcastEpisodeDetailView: View {
                             AudioArtwork(url: episode.coverURL, symbol: "waveform", size: 132)
                             VStack(alignment: .leading, spacing: 10) {
                                 Text(episode.title).font(.title.weight(.bold))
+                                let context = [episode.podcastName, episode.hostName].filter { !$0.isEmpty }
+                                if !context.isEmpty {
+                                    Text(context.joined(separator: " · ")).foregroundStyle(.secondary)
+                                }
                                 Text(episode.durationText).foregroundStyle(.secondary)
                                 if let publishedAt = episode.publishedAt {
                                     Text(publishedAt.formatted(date: .abbreviated, time: .omitted))
@@ -563,6 +566,10 @@ struct BroadcastChannelDetailView: View {
     @State private var streamPlayer = BroadcastPagePlayer()
     @State private var playbackTask: Task<Void, Never>?
 
+    private var isStreamActive: Bool {
+        playbackTask != nil || streamPlayer.isLoading || streamPlayer.isPlaying
+    }
+
     var body: some View {
         Group {
             if let info {
@@ -583,15 +590,13 @@ struct BroadcastChannelDetailView: View {
                                 }
                                 HStack(spacing: 12) {
                                     Button {
-                                        streamPlayer.isPlaying || streamPlayer.isLoading
-                                            ? streamPlayer.stop()
-                                            : startPlayback()
+                                        isStreamActive ? stopPlayback() : startPlayback()
                                     } label: {
                                         Label(
-                                            streamPlayer.isLoading ? "连接中" : streamPlayer.isPlaying ? "停止" : "播放",
-                                            systemImage: streamPlayer.isPlaying || streamPlayer.isLoading
-                                                ? "stop.fill"
-                                                : "play.fill"
+                                            playbackTask != nil || streamPlayer.isLoading
+                                                ? "连接中"
+                                                : streamPlayer.isPlaying ? "停止" : "播放",
+                                            systemImage: isStreamActive ? "stop.fill" : "play.fill"
                                         )
                                     }
                                     Button { collect(!info.channel.isCollected) } label: {
@@ -623,18 +628,12 @@ struct BroadcastChannelDetailView: View {
         }
         .navigationTitle(info?.channel.name ?? "广播")
         .task(id: "\(channelID):\(model.currentUserID ?? 0)") { await load() }
-        .onDisappear {
-            playbackTask?.cancel()
-            playbackTask = nil
-            streamPlayer.stop()
-        }
+        .onDisappear(perform: stopPlayback)
     }
 
     @MainActor
     private func load() async {
-        playbackTask?.cancel()
-        playbackTask = nil
-        streamPlayer.stop()
+        stopPlayback()
         info = nil
         errorMessage = nil
         do {
@@ -646,25 +645,32 @@ struct BroadcastChannelDetailView: View {
     }
 
     private func startPlayback() {
-        playbackTask?.cancel()
-        streamPlayer.stop()
+        stopPlayback()
         playbackTask = Task { @MainActor in
             do {
                 let current = try await library.broadcastCurrentInfo(channelID: channelID)
                 try Task.checkCancellation()
-                guard let url = current.streamURL else {
+                guard let streamURL = current.streamURL else {
                     throw AudioContentError.unavailable("当前频道暂无可用直播流")
                 }
-                if songPlayer.isPlaybackRequested { songPlayer.togglePlayback() }
+                let url = try await BroadcastStreamURLPolicy.playableURL(streamURL.absoluteString)
+                songPlayer.pauseForVideo()
                 info = withoutStream(current)
                 streamPlayer.play(url)
                 playbackTask = nil
             } catch is CancellationError {
             } catch {
+                guard !Task.isCancelled else { return }
                 playbackTask = nil
                 streamPlayer.fail(error.localizedDescription)
             }
         }
+    }
+
+    private func stopPlayback() {
+        playbackTask?.cancel()
+        playbackTask = nil
+        streamPlayer.stop()
     }
 
     private func collect(_ collected: Bool) {
@@ -689,8 +695,8 @@ struct BroadcastChannelDetailView: View {
                     )
                 }
             } catch {
-                if accountID == model.currentUserID,
-                   let confirmed = try? await library.broadcastCurrentInfo(channelID: channelID),
+                guard accountID == model.currentUserID else { return }
+                if let confirmed = try? await library.broadcastCurrentInfo(channelID: channelID),
                    confirmed.channel.isCollected == collected {
                     info = withoutStream(confirmed)
                     return
@@ -747,11 +753,10 @@ struct PodcastSubscriptionsView: View {
                         Divider().padding(.leading, 76)
                     }
                     if page.hasMore {
-                        Button(isLoadingMore ? "正在加载…" : "加载更多") {
+                        LoadMoreTrigger(title: isLoadingMore ? "正在加载更多…" : "继续加载") {
                             Task { await loadMore(page) }
                         }
-                        .disabled(isLoadingMore)
-                        .padding(16)
+                        .id(page.nextOffset)
                     }
                 }
                 .padding(24)
@@ -881,6 +886,7 @@ private final class BroadcastPagePlayer {
     private(set) var errorMessage: String?
     @ObservationIgnored private let player = AVPlayer()
     @ObservationIgnored private var statusObservation: NSKeyValueObservation?
+    @ObservationIgnored private var timeoutTask: Task<Void, Never>?
 
     func play(_ url: URL) {
         errorMessage = nil
@@ -892,6 +898,8 @@ private final class BroadcastPagePlayer {
             Task { @MainActor [weak self] in
                 switch status {
                 case .readyToPlay:
+                    self?.timeoutTask?.cancel()
+                    self?.timeoutTask = nil
                     self?.isLoading = false
                     self?.isPlaying = true
                 case .failed:
@@ -905,11 +913,18 @@ private final class BroadcastPagePlayer {
         }
         player.replaceCurrentItem(with: item)
         player.play()
+        timeoutTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(12)) } catch { return }
+            guard self?.isLoading == true else { return }
+            self?.fail("连接直播流超时，请稍后重试")
+        }
     }
 
     func stop() {
         statusObservation?.invalidate()
         statusObservation = nil
+        timeoutTask?.cancel()
+        timeoutTask = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
         isPlaying = false

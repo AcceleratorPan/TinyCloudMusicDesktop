@@ -593,16 +593,29 @@ enum WriteAPIContractCheck {
         try await verify(
             "/eapi/content/activity/listen/data/total",
             signing: "/api/content/activity/listen/data/total",
-            host: "interface.music.163.com",
+            host: "interfacepc.music.163.com",
             cookieMatches: originalCookieMatches,
             call: { _ = try await originalCookieLibrary.totalListeningDuration() }
         ) { originalClientHeaderMatches($0) }
+        guard let listeningRequest = RequestCaptureProtocol.request(),
+              let listeningBody = listeningRequest.httpBody,
+              let listeningPayload = try decode(body: listeningBody)?.payload
+        else { preconditionFailure("Missing listening request") }
+        let listeningHeader = listeningPayload.object("header")
+        let listeningCookie = listeningRequest.value(forHTTPHeaderField: "Cookie") ?? ""
+        precondition(listeningPayload["e_r"] as? Bool == false)
+        for field in [
+            "osver", "deviceId", "os", "appver", "versioncode", "buildver", "resolution",
+            "channel", "requestId", "MUSIC_U"
+        ] {
+            precondition(NeteaseCookieHeader.value(named: field, in: listeningCookie) == listeningHeader.string(field))
+        }
         count += 1
 
         try await verify(
             "/eapi/content/activity/listen/data/today/song/play/rank",
             signing: "/api/content/activity/listen/data/today/song/play/rank",
-            host: "interface.music.163.com",
+            host: "interfacepc.music.163.com",
             cookieMatches: originalCookieMatches,
             call: { _ = try await originalCookieLibrary.todayListeningRank() }
         ) { originalClientHeaderMatches($0) }
@@ -612,7 +625,7 @@ enum WriteAPIContractCheck {
             try await verify(
                 "/eapi/content/activity/listen/data/song/play/rank",
                 signing: "/api/content/activity/listen/data/song/play/rank",
-                host: "interface.music.163.com",
+                host: "interfacepc.music.163.com",
                 cookieMatches: originalCookieMatches,
                 call: { _ = try await originalCookieLibrary.listeningSongRank(period: period) }
             ) {
@@ -631,7 +644,7 @@ enum WriteAPIContractCheck {
         try await verify(
             "/eapi/content/activity/listen/data/song/play/rank",
             signing: "/api/content/activity/listen/data/song/play/rank",
-            host: "interface.music.163.com",
+            host: "interfacepc.music.163.com",
             cookieMatches: originalCookieMatches,
             call: {
                 _ = try await originalCookieLibrary.listeningSongRank(period: .month, cursor: serverCursor)
@@ -647,7 +660,7 @@ enum WriteAPIContractCheck {
             try await verify(
                 "/eapi/content/activity/listen/data/realtime/report",
                 signing: "/api/content/activity/listen/data/realtime/report",
-                host: "interface.music.163.com",
+                host: "interfacepc.music.163.com",
                 cookieMatches: originalCookieMatches,
                 call: { _ = try await originalCookieLibrary.realtimeListeningReport(period: period) }
             ) {
@@ -660,7 +673,7 @@ enum WriteAPIContractCheck {
             try await verify(
                 "/eapi/content/activity/listen/data/report",
                 signing: "/api/content/activity/listen/data/report",
-                host: "interface.music.163.com",
+                host: "interfacepc.music.163.com",
                 cookieMatches: originalCookieMatches,
                 call: { _ = try await originalCookieLibrary.listeningReport(period: period) }
             ) {
@@ -674,7 +687,7 @@ enum WriteAPIContractCheck {
         try await verify(
             "/eapi/content/activity/listen/data/report",
             signing: "/api/content/activity/listen/data/report",
-            host: "interface.music.163.com",
+            host: "interfacepc.music.163.com",
             cookieMatches: originalCookieMatches,
             call: {
                 _ = try await originalCookieLibrary.listeningReport(period: .year, cursor: serverCursor)
@@ -689,16 +702,16 @@ enum WriteAPIContractCheck {
         try await verify(
             "/eapi/content/activity/listen/data/year/report",
             signing: "/api/content/activity/listen/data/year/report",
-            host: "interface.music.163.com",
+            host: "interfacepc.music.163.com",
             cookieMatches: originalCookieMatches,
-            call: { _ = try await originalCookieLibrary.yearListeningFootprint() }
+            call: { _ = try await originalCookieLibrary.yearListeningFootprints() }
         ) { originalClientHeaderMatches($0) }
         count += 1
 
         try await verify(
             "/eapi/content/activity/music/first/listen/info",
             signing: "/api/content/activity/music/first/listen/info",
-            host: "interface.music.163.com",
+            host: "interfacepc.music.163.com",
             cookieMatches: originalCookieMatches,
             call: { _ = try await originalCookieLibrary.firstListenMemory(songID: 42) }
         ) {
@@ -771,6 +784,23 @@ enum WriteAPIContractCheck {
                 && json.int64("id") == 17
                 && json.int("time") == 42
                 && json.string("end") == "playend"
+        }
+        count += 1
+
+        try await verify(
+            "/eapi/dj/playrecord/upload",
+            signing: "/api/dj/playrecord/upload",
+            call: {
+                try await repository.recordPodcastPlayback(
+                    for: 201,
+                    positionMilliseconds: 12_345,
+                    completed: false
+                )
+            }
+        ) {
+            $0.string("programId") == "201"
+                && $0.string("listenLocation") == "12345"
+                && $0.string("isListened") == "false"
         }
         count += 1
 

@@ -1,6 +1,6 @@
 {
   "total": {"code": 200, "data": {"totalDuration": 0}},
-  "today": {"code": 200, "data": {"songItems": []}},
+  "today": {"code": 200, "data": {"songDTOs": []}},
   "rank": {"code": 200, "data": {"songItems": []}},
   "realtime": {"code": 200, "data": {}},
   "report": {"code": 200, "data": {}},

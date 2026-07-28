@@ -61,7 +61,7 @@ private func verifyVideoFixtures() throws {
     else { throw VideoCheckError.failed }
 }
 
-private func verifyVideoValidation() throws {
+private func verifyVideoValidation() async throws {
     guard try CommentResource.mv(42).threadID() == "R_MV_5_42",
           try CommentResource.video(" 00042 ").threadID() == "R_VI_62_00042",
           try CommentResource.video("a/b").encodedThreadID() == "R_VI_62_a%2Fb",
@@ -69,7 +69,6 @@ private func verifyVideoValidation() throws {
           VideoResolutionPolicy.fallback(below: 720, available: [1080, 720, 480]) == 480,
           VideoPlaybackURLPolicy.isAllowed(URL(string: "https://vodkgeyttp9.vod.126.net/file.mp4")!),
           !VideoPlaybackURLPolicy.isAllowed(URL(string: "http://vodkgeyttp9.vod.126.net/file.mp4")!),
-          try VideoPlaybackURLPolicy.validate("http://vodkgeyttp9.vod.126.net/file.mp4").scheme == "https",
           !VideoPlaybackURLPolicy.isAllowed(URL(string: "https://vod.126.net.evil.test/file.mp4")!)
     else { throw VideoCheckError.failed }
 
@@ -98,6 +97,7 @@ private func verifyVideoValidation() throws {
     else { throw VideoCheckError.failed }
 
     for root in [
+        ["data": ["url": "http://vodkgeyttp9.vod.126.net/file.mp4"]],
         ["data": ["url": "http://unknown.example/file.mp4"]],
         ["data": ["url": "https://unknown.example/file.mp4"]],
         ["data": ["url": ""]]
@@ -107,6 +107,32 @@ private func verifyVideoValidation() throws {
             throw VideoCheckError.failed
         } catch is VideoLibraryError {
         }
+    }
+
+    let library = LiveVideoLibrary()
+    var attempts: [Int] = []
+    let fallbackSource = try await library.playbackSource(720, available: [720, 480]) { resolution in
+        attempts.append(resolution)
+        if resolution == 720 { throw VideoLibraryError.unavailable("unavailable") }
+        return VideoPlaybackSource(
+            url: URL(string: "https://vod.126.net/file.mp4")!,
+            resolution: resolution,
+            expiresAt: nil
+        )
+    }
+    guard attempts == [720, 480], fallbackSource.resolution == 480 else {
+        throw VideoCheckError.failed
+    }
+
+    attempts = []
+    do {
+        _ = try await library.playbackSource(720, available: [720, 480]) { resolution in
+            attempts.append(resolution)
+            throw EAPIError.http(500)
+        }
+        throw VideoCheckError.failed
+    } catch let EAPIError.http(status) where status == 500 {
+        guard attempts == [720] else { throw VideoCheckError.failed }
     }
 }
 
@@ -137,9 +163,9 @@ private func verifyVideoCommentPage() throws {
 #if VIDEO_CHECK
 @main
 private enum VideoCheck {
-    static func main() throws {
+    static func main() async throws {
         try verifyVideoFixtures()
-        try verifyVideoValidation()
+        try await verifyVideoValidation()
         try verifyVideoCommentPage()
         print("MV and video check passed")
     }
@@ -151,7 +177,7 @@ struct VideoTests {
     func fixtureDecoding() throws { try verifyVideoFixtures() }
 
     @Test("IDs, playback URLs, and resolutions are validated")
-    func validation() throws { try verifyVideoValidation() }
+    func validation() async throws { try await verifyVideoValidation() }
 
     @Test("Read-only comments keep pagination metadata")
     func commentPage() throws { try verifyVideoCommentPage() }

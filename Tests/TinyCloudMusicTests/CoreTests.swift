@@ -1,3 +1,5 @@
+import CoreGraphics
+import Foundation
 import Testing
 @testable import TinyCloudMusic
 
@@ -551,6 +553,7 @@ struct CoreTests {
     }
 
     @Test("Artwork requests are bounded, bucketed thumbnails")
+    @MainActor
     func artworkRequestPolicy() throws {
         let url = try #require(URL(string: "https://example.com/artwork.png"))
         let now = Date(timeIntervalSince1970: 1_700_000_000)

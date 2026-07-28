@@ -57,6 +57,8 @@ struct PodcastEpisode: Identifiable, Equatable, Sendable {
     let durationMilliseconds: Int64
     let publishedAt: Date?
     let song: Song?
+    let podcastName: String
+    let hostName: String
     let description: String
     let unavailableReason: String?
 
@@ -68,6 +70,8 @@ struct PodcastEpisode: Identifiable, Equatable, Sendable {
         durationMilliseconds: Int64,
         publishedAt: Date?,
         song: Song?,
+        podcastName: String = "",
+        hostName: String = "",
         description: String = "",
         unavailableReason: String? = nil
     ) {
@@ -77,7 +81,13 @@ struct PodcastEpisode: Identifiable, Equatable, Sendable {
         self.coverURL = coverURL
         self.durationMilliseconds = durationMilliseconds
         self.publishedAt = publishedAt
-        self.song = song
+        self.song = song.map {
+            var song = $0
+            song.podcastEpisodeID = id
+            return song
+        }
+        self.podcastName = podcastName
+        self.hostName = hostName
         self.description = description
         self.unavailableReason = unavailableReason
     }
@@ -212,8 +222,44 @@ enum AudioContentError: LocalizedError, Equatable, Sendable {
 }
 
 enum BroadcastStreamURLPolicy {
+    static func playableURL(_ value: String) async throws -> URL {
+        let url = try validate(value)
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10)
+        request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        do {
+            let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            guard let response = response as? HTTPURLResponse,
+                  isPlayableResponse(statusCode: response.statusCode, mimeType: response.mimeType),
+                  try await bytes.first(where: { _ in true }) != nil
+            else { throw AudioContentError.unavailable("当前频道直播源不可用") }
+            return url
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled && Task.isCancelled {
+            throw CancellationError()
+        } catch let error as AudioContentError {
+            throw error
+        } catch {
+            throw AudioContentError.unavailable("无法连接直播源，请稍后重试")
+        }
+    }
+
+    static func isPlayableResponse(statusCode: Int, mimeType: String?) -> Bool {
+        (200..<300).contains(statusCode) && mimeType?.lowercased() != "text/html"
+    }
+
     static func validate(_ value: String) throws -> URL {
-        guard let url = URL(string: value), isAllowed(url) else {
+        guard var components = URLComponents(string: value),
+              components.user == nil,
+              components.password == nil,
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              isTrustedHost(components.host)
+        else {
+            throw AudioContentError.unsafeStreamURL
+        }
+        components.scheme = "https"
+        guard let url = components.url, isAllowed(url) else {
             throw AudioContentError.unsafeStreamURL
         }
         return url
@@ -223,11 +269,17 @@ enum BroadcastStreamURLPolicy {
         guard url.scheme?.lowercased() == "https",
               url.user == nil,
               url.password == nil,
-              let host = url.host?.lowercased()
+              isTrustedHost(url.host)
         else { return false }
+        return true
+    }
+
+    private static func isTrustedHost(_ value: String?) -> Bool {
+        guard let host = value?.lowercased() else { return false }
         return host == "music.126.net" || host.hasSuffix(".music.126.net")
             || host == "music.163.com" || host.hasSuffix(".music.163.com")
-            || host == "lhttp.qtfm.cn"
+            || host == "qtfm.cn" || host.hasSuffix(".qtfm.cn")
+            || host == "qingting.fm" || host.hasSuffix(".qingting.fm")
     }
 }
 
@@ -363,7 +415,7 @@ enum AudioContentDecoder {
             channel: channel,
             currentProgramTitle: firstString(in: [program, current], keys: ["title", "name", "programName"]),
             currentProgramDescription: firstString(in: [program, current], keys: ["description", "desc", "introduction"]),
-            streamURL: rawURL.isEmpty ? nil : try BroadcastStreamURLPolicy.validate(rawURL)
+            streamURL: rawURL.isEmpty ? nil : URL(string: rawURL)
         )
     }
 
@@ -396,19 +448,44 @@ enum AudioContentDecoder {
         let radio = [value.object("radio"), value.object("djRadio"), value.object("podcast")]
             .first { !$0.isEmpty } ?? [:]
         let songValue = [value.object("mainSong"), value.object("song")].first { !$0.isEmpty } ?? [:]
-        let song = songValue.isEmpty ? nil : decodeSong(songValue)
+        let host = [value.object("dj"), radio.object("dj"), radio.object("creator"), songValue.array("ar").first ?? [:]]
+            .first { !$0.isEmpty } ?? [:]
+        let decodedSong = songValue.isEmpty ? nil : decodeSong(songValue)
+        let coverURL = firstURL(value, keys: ["coverUrl", "coverImgUrl", "blurCoverUrl"])
+            ?? firstURL(radio, keys: ["picUrl", "coverUrl"])
+            ?? decodedSong?.album.artwork.remoteURL
+        let song = decodedSong.map { song in
+            guard let coverURL, song.album.artwork.remoteURL != coverURL else { return song }
+            return Song(
+                id: song.id,
+                name: song.primaryName,
+                artists: song.artists,
+                album: AlbumSummary(
+                    id: song.album.id,
+                    name: song.album.name,
+                    artwork: Artwork(
+                        symbol: song.album.artwork.symbol,
+                        accent: song.album.artwork.accent,
+                        remoteURL: coverURL
+                    )
+                ),
+                duration: song.duration,
+                translatedName: song.translatedName,
+                aliasName: song.aliasName
+            )
+        }
         let reason = firstString(value, keys: ["reason", "unavailableReason", "message"])
         return PodcastEpisode(
             id: id,
             podcastID: firstInt64(radio, keys: ["id", "radioId"]).nonzero ?? podcastID,
             title: firstString(value, keys: ["name", "title"]),
-            coverURL: firstURL(value, keys: ["coverUrl", "coverImgUrl", "blurCoverUrl"])
-                ?? firstURL(radio, keys: ["picUrl", "coverUrl"])
-                ?? firstURL(songValue.object("al"), keys: ["picUrl"]),
+            coverURL: coverURL,
             durationMilliseconds: firstInt64(value, keys: ["duration", "durationMilliseconds", "durationMs"])
                 .nonzero ?? firstInt64(songValue, keys: ["dt", "duration"]),
             publishedAt: millisecondsDate(value, keys: ["createTime", "publishTime", "publishedAt"]),
             song: song,
+            podcastName: firstString(in: [radio, songValue.object("al")], keys: ["name", "title"]),
+            hostName: firstString(in: [host, value], keys: ["nickname", "name", "hostName"]),
             description: firstString(value, keys: ["description", "desc", "introduction"]),
             unavailableReason: nonempty(reason)
         )

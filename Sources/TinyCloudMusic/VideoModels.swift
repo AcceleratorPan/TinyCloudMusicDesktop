@@ -107,21 +107,10 @@ enum VideoLibraryError: LocalizedError, Equatable, Sendable {
 
 enum VideoPlaybackURLPolicy {
     static func validate(_ value: String) throws -> URL {
-        guard let url = URL(string: value), let normalizedURL = normalized(url) else {
+        guard let url = URL(string: value), isAllowed(url) else {
             throw VideoLibraryError.unsafePlaybackURL
         }
-        return normalizedURL
-    }
-
-    static func normalized(_ url: URL) -> URL? {
-        if isAllowed(url) { return url }
-        guard url.scheme?.lowercased() == "http", url.port == nil || url.port == 80,
-              var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        else { return nil }
-        components.scheme = "https"
-        components.port = nil
-        guard let upgraded = components.url, isAllowed(upgraded) else { return nil }
-        return upgraded
+        return url
     }
 
     static func isAllowed(_ url: URL) -> Bool {

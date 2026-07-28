@@ -107,10 +107,10 @@ struct FirstListenMemory: Equatable, Sendable {
 
 ## 周期与上报语义
 
-- 听歌足迹读取 EAPI 使用 `https://interface.music.163.com`；不能沿用 `EAPIEndpoint` 的 `music.163.com` 默认主机。
+- 听歌足迹读取 EAPI 使用 `https://interfacepc.music.163.com`；不能沿用 `EAPIEndpoint` 的 `music.163.com` 默认主机。
 - 周/月请求不传 `endTime` 时，服务端返回当前本周/本月，不是上一个已结束周期；页面使用 `本周`、`本月` 是正确语义。
 - `/listen/data/report?type=year` 在本年度尚未结束时可能无数据；当前年度以 `/listen/data/year/report` 为主，通用年报仅作可选补充。历史年度仍使用服务端返回的 `endTime` 游标。
-- 实时报告的 `listenTime.value` 单位是小时，不能按秒格式化；其余 `listenDuration`/`duration` 字段保持服务端秒数语义。
+- 实时摘要读取 `data.listenTimeDistributionBlock.playDuration`（分钟）与 `listenDays`，进入模型时将时长换算为秒；年度足迹读取 `data.yearItems[]` 的 `year`、`playNum` 与秒单位 `playDuration`。
 - 播放上报继续使用 `clientlog.music.163.com`、EAPI `/api/feedback/weblog` 和 macOS 客户端身份，分别发送 `startplay` 与带实际秒数的 `play`。成功后失效账号读取缓存，让今日、周/月足迹读取最新服务端结果。
 
 ## 修改落点

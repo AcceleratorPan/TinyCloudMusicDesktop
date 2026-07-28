@@ -2,7 +2,7 @@ import Foundation
 
 struct LiveMusicLibrary: Sendable {
     private static let interfaceHost = "https://interface3.music.163.com"
-    private static let eapiHost = "https://interface.music.163.com"
+    private static let eapiHost = "https://interfacepc.music.163.com"
     static let cloudLyricEndpoint = EAPIEndpoint("/eapi/cloud/lyric/get", signing: "/api/cloud/lyric/get")
     static let cloudDownloadEndpoint = EAPIEndpoint("/eapi/cloud/dowonload", signing: "/api/cloud/dowonload")
     let transport: EAPITransport
@@ -228,7 +228,7 @@ struct LiveMusicLibrary: Sendable {
             includesClientHeader: true
         )
         try requireSuccess(root)
-        return decodeListeningReport(root, period: period, defaultTitle: "\(period.title)实时摘要")
+        return decodeRealtimeListeningReport(root, period: period)
     }
 
     func listeningReport(
@@ -250,7 +250,7 @@ struct LiveMusicLibrary: Sendable {
         return decodeListeningReport(root, period: period, defaultTitle: "\(period.title)听歌报告")
     }
 
-    func yearListeningFootprint(forceRefresh: Bool = false) async throws -> ListeningReport {
+    func yearListeningFootprints(forceRefresh: Bool = false) async throws -> [YearListeningFootprint] {
         let root = try await call(
             EAPIEndpoint(
                 "/eapi/content/activity/listen/data/year/report",
@@ -262,7 +262,7 @@ struct LiveMusicLibrary: Sendable {
             includesClientHeader: true
         )
         try requireSuccess(root)
-        return decodeListeningReport(root, period: .year, defaultTitle: "年度听歌足迹")
+        return decodeYearListeningFootprints(root)
     }
 
     func firstListenMemory(
@@ -298,6 +298,21 @@ struct LiveMusicLibrary: Sendable {
             defaultTitle: defaultTitle ?? "\(period.title)听歌报告",
             decodeSong: songDecoder.decodeLiveSong
         )
+    }
+
+    func decodeRealtimeListeningReport(
+        _ root: [String: Any],
+        period: ListeningReportPeriod
+    ) -> ListeningReport {
+        ListeningReportDecoder.realtimeReport(
+            root,
+            period: period,
+            defaultTitle: "\(period.title)实时摘要"
+        )
+    }
+
+    func decodeYearListeningFootprints(_ root: [String: Any]) -> [YearListeningFootprint] {
+        ListeningReportDecoder.yearFootprints(root)
     }
 
     func decodeFirstListenMemory(_ root: [String: Any], now: Date = Date()) -> FirstListenMemory {

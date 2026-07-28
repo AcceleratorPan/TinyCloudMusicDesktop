@@ -85,7 +85,7 @@ struct PlaybackAvailabilityTests {
             privileges: Data(#"{"code":200,"privileges":[{"plLevel":"sky","flLevel":"exhigh"}]}"#.utf8)
         )
         #expect(premium.map(\.id) == ["jymaster", "sky"])
-        #expect(premium.allSatisfy(\.isAvailable))
+        #expect(premium.allSatisfy { $0.isAvailable })
         #expect(SongQualityDetail.highestAvailableLevel(in: premium) == "jymaster")
     }
 

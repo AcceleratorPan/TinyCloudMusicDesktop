@@ -988,6 +988,7 @@ struct ListeningHistoryView: View {
     @State private var selectedKind = RecentPlaybackKind.song
     @State private var history = RecentPlaybackState()
     @State private var tasks: [RecentPlaybackKind: Task<Void, Never>] = [:]
+    @State private var pendingRefreshes: Set<RecentPlaybackKind> = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1025,6 +1026,13 @@ struct ListeningHistoryView: View {
         }
         .task(id: model.currentUserID) { reset(accountID: model.currentUserID) }
         .onChange(of: selectedKind) { _, kind in startLoad(kind) }
+        .onChange(of: player.playbackReportRevision) { oldValue, newValue in
+            guard newValue > oldValue else { return }
+            let kinds: [RecentPlaybackKind] = player.lastPlaybackReportWasPodcast
+                ? [.voice, .podcast]
+                : [.song]
+            for kind in kinds { startLoad(kind, force: true) }
+        }
     }
 
     @MainActor
@@ -1141,6 +1149,7 @@ struct ListeningHistoryView: View {
     private func reset(accountID: Int64?) {
         tasks.values.forEach { $0.cancel() }
         tasks.removeAll()
+        pendingRefreshes.removeAll()
         history.reset(accountID: accountID)
         selectedKind = .song
         if accountID != nil { startLoad(.song) }
@@ -1148,7 +1157,11 @@ struct ListeningHistoryView: View {
 
     @MainActor
     private func startLoad(_ kind: RecentPlaybackKind, force: Bool = false) {
-        guard let accountID = model.currentUserID, tasks[kind] == nil else { return }
+        guard let accountID = model.currentUserID else { return }
+        if tasks[kind] != nil {
+            if force { pendingRefreshes.insert(kind) }
+            return
+        }
         if !force {
             switch history.load(for: kind) {
             case .loading, .loaded: return
@@ -1159,6 +1172,12 @@ struct ListeningHistoryView: View {
         let generation = history.generation
         history.setLoading(kind)
         tasks[kind] = Task { @MainActor in
+            defer {
+                if history.generation == generation, model.currentUserID == accountID {
+                    tasks[kind] = nil
+                    if pendingRefreshes.remove(kind) != nil { startLoad(kind, force: true) }
+                }
+            }
             do {
                 if force { await library.invalidateCachedResponses(in: [.library]) }
                 let content = try await load(kind)
@@ -1169,12 +1188,10 @@ struct ListeningHistoryView: View {
                     generation: generation,
                     accountID: accountID
                 ) else { return }
-                tasks[kind] = nil
             } catch is CancellationError {
                 guard model.currentUserID == accountID,
                       history.accept(.idle, for: kind, generation: generation, accountID: accountID)
                 else { return }
-                tasks[kind] = nil
             } catch {
                 guard model.currentUserID == accountID, history.accept(
                     .failed(error.localizedDescription),
@@ -1182,7 +1199,6 @@ struct ListeningHistoryView: View {
                     generation: generation,
                     accountID: accountID
                 ) else { return }
-                tasks[kind] = nil
             }
         }
     }

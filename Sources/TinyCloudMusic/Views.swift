@@ -2969,16 +2969,18 @@ private struct PlayerBar: View {
 
             HStack(spacing: 0) {
                 if let song = player.currentSong {
-                    PlayerIconButton(
-                        symbol: model.likedSongIDs.contains(song.id) ? "heart.fill" : "heart",
-                        label: model.likedSongIDs.contains(song.id) ? "取消喜欢" : "喜欢",
-                        isActive: model.likedSongIDs.contains(song.id)
-                    ) {
-                        model.toggleSongLiked(song.id)
-                    }
+                    if !song.isPodcastEpisode {
+                        PlayerIconButton(
+                            symbol: model.likedSongIDs.contains(song.id) ? "heart.fill" : "heart",
+                            label: model.likedSongIDs.contains(song.id) ? "取消喜欢" : "喜欢",
+                            isActive: model.likedSongIDs.contains(song.id)
+                        ) {
+                            model.toggleSongLiked(song.id)
+                        }
 
-                    CommentButton(songID: song.id, library: model.library) {
-                        model.open(.comments(song.id))
+                        CommentButton(songID: song.id, library: model.library) {
+                            model.open(.comments(song.id))
+                        }
                     }
 
                     PlayerIconButton(

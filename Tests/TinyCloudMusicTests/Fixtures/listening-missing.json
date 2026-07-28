@@ -2,7 +2,15 @@
   "total": {"code": 200, "data": {}},
   "today": {"code": 200, "data": {"items": [{"playCount": 2}]}},
   "rank": {"code": 200, "data": {"songItems": [{"songId": 0, "songName": "Invalid"}]}},
-  "realtime": {"code": 200},
+  "realtime": {
+    "code": 200,
+    "data": {
+      "listenTimeDistributionBlock": {
+        "playDuration": "9223372036854775807",
+        "listenDays": -1
+      }
+    }
+  },
   "report": {
     "code": 200,
     "data": {
@@ -12,7 +20,16 @@
       "unknownBlock": {"items": [{"kind": "unsupported", "duration": 1}]}
     }
   },
-  "year": {"code": 200, "data": {"unrecognizedMetric": 99}},
+  "year": {
+    "code": 200,
+    "data": {
+      "yearItems": [
+        {"year": 2025, "playNum": true, "playDuration": 1},
+        {"year": 2024, "playNum": 1, "playDuration": -1},
+        {"year": 0, "playNum": 1, "playDuration": 1}
+      ]
+    }
+  },
   "first": {
     "code": 200,
     "data": {"firstListenTime": "1", "text": "https://invalid.example/hidden"}

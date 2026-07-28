@@ -47,6 +47,7 @@ final class PlayerController {
     private(set) var heartModeErrorMessage: String?
     private(set) var sourcePlaylistID: Int64?
     private(set) var playbackReportRevision = 0
+    private(set) var lastPlaybackReportWasPodcast = false
 
     @ObservationIgnored private let repository: any MusicRepository
     @ObservationIgnored private var cache: TrackCache
@@ -78,6 +79,7 @@ final class PlayerController {
     @ObservationIgnored private var standbyPlaybackAvailability: PlaybackAvailability?
     @ObservationIgnored private var qualityBeforeSwitch: String?
     @ObservationIgnored private var reportedPlaybackGeneration = -1
+    @ObservationIgnored private var reportedPodcastPlaybackGeneration = -1
     @ObservationIgnored private var timedPlaybackSongID: Int64?
     @ObservationIgnored private var playbackTimingStartedAt: ContinuousClock.Instant?
     @ObservationIgnored private var listenedDuration: Duration = .zero
@@ -1258,6 +1260,7 @@ final class PlayerController {
         else { return }
         position = seconds
         updateCurrentLyricIndex()
+        reportPodcastPlaybackIfNeeded(at: seconds)
         replenishHeartModeIfNeeded()
         prepareNextTransitionIfNeeded(position: seconds)
     }
@@ -1374,11 +1377,13 @@ final class PlayerController {
         case .playing:
             state = .playing(songID: songID)
             startPlaybackTiming(for: songID)
-            if reportedPlaybackGeneration != playbackGeneration {
+            if currentSong?.podcastEpisodeID == nil,
+               reportedPlaybackGeneration != playbackGeneration {
                 reportedPlaybackGeneration = playbackGeneration
                 Task { @MainActor [weak self, repository] in
                     do {
                         try await repository.recordPlaybackStart(for: songID)
+                        self?.lastPlaybackReportWasPodcast = false
                         self?.playbackReportRevision += 1
                     } catch {}
                 }
@@ -1479,12 +1484,44 @@ final class PlayerController {
         stopPlaybackTiming()
         let songID = timedPlaybackSongID
         let seconds = Int(listenedDuration.components.seconds)
+        let podcastEpisodeID = currentSong?.podcastEpisodeID
+        let positionMilliseconds = Int(position * 1_000)
+        let completed = duration > 0 && position >= duration - 1
         timedPlaybackSongID = nil
         listenedDuration = .zero
         guard let songID, seconds > 0 else { return }
         Task { @MainActor [weak self, repository] in
             do {
-                try await repository.recordPlayback(for: songID, playedSeconds: seconds)
+                if let podcastEpisodeID, positionMilliseconds > 0 {
+                    try await repository.recordPodcastPlayback(
+                        for: podcastEpisodeID,
+                        positionMilliseconds: positionMilliseconds,
+                        completed: completed
+                    )
+                    self?.lastPlaybackReportWasPodcast = true
+                } else {
+                    try await repository.recordPlayback(for: songID, playedSeconds: seconds)
+                    self?.lastPlaybackReportWasPodcast = false
+                }
+                self?.playbackReportRevision += 1
+            } catch {}
+        }
+    }
+
+    private func reportPodcastPlaybackIfNeeded(at seconds: TimeInterval) {
+        guard reportedPodcastPlaybackGeneration != playbackGeneration,
+              let episodeID = currentSong?.podcastEpisodeID,
+              seconds >= 1
+        else { return }
+        reportedPodcastPlaybackGeneration = playbackGeneration
+        Task { @MainActor [weak self, repository] in
+            do {
+                try await repository.recordPodcastPlayback(
+                    for: episodeID,
+                    positionMilliseconds: Int(seconds * 1_000),
+                    completed: false
+                )
+                self?.lastPlaybackReportWasPodcast = true
                 self?.playbackReportRevision += 1
             } catch {}
         }

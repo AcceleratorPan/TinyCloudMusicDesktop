@@ -627,9 +627,8 @@ private func verifyManagerRecoveryAndPause() async throws {
 
     manager.pause(songID: request.songID)
     manager.retry(songID: request.songID)
-    for _ in 0..<200 where ScriptedDownloadProtocol.requestCount(
-        for: "/eapi/song/enhance/player/url/v1"
-    ) == 0 {
+    for _ in 0..<200 where manager.states[request.songID] != .running(progress: nil)
+        || ScriptedDownloadProtocol.requestCount(for: "/eapi/song/enhance/player/url/v1") == 0 {
         try await Task.sleep(for: .milliseconds(10))
     }
     guard manager.states[request.songID] == .running(progress: nil) else {
@@ -637,9 +636,21 @@ private func verifyManagerRecoveryAndPause() async throws {
     }
     manager.pause(songID: request.songID)
     await manager.pauseAll()
-    guard case .paused? = manager.states[request.songID],
-          store.recoverableDownloads().first?.request == request
-    else { throw MusicDownloadCheckError.failed }
+    guard case .paused? = manager.states[request.songID] else {
+        throw MusicDownloadCheckError.failed
+    }
+    guard let recovered = store.recoverableDownloads().first?.request,
+          recovered.songID == request.songID,
+          recovered.songName == request.songName,
+          recovered.artists == request.artists,
+          recovered.destination.resolvingSymlinksInPath() == request.destination.resolvingSymlinksInPath(),
+          recovered.quality == request.quality,
+          recovered.includeLyrics == request.includeLyrics,
+          recovered.source == request.source,
+          recovered.expectedBytes == request.expectedBytes
+    else {
+        throw MusicDownloadCheckError.failed
+    }
 
     let restarted = MusicDownloadManager(
         transport: network.transport,
@@ -649,10 +660,14 @@ private func verifyManagerRecoveryAndPause() async throws {
         resumeStore: store,
         targetAllocator: MusicDownloadTargetAllocator()
     )
-    guard restarted.isActive(songID: request.songID) else { throw MusicDownloadCheckError.failed }
+    guard restarted.isActive(songID: request.songID) else {
+        throw MusicDownloadCheckError.failed
+    }
     await restarted.pauseAll()
     restarted.cancel(songID: request.songID)
-    guard store.recoverableDownloads().isEmpty else { throw MusicDownloadCheckError.failed }
+    guard store.recoverableDownloads().isEmpty else {
+        throw MusicDownloadCheckError.failed
+    }
 }
 
 #if MUSIC_DOWNLOAD_CHECK
@@ -672,7 +687,7 @@ private enum MusicDownloadCheck {
     }
 }
 #elseif canImport(Testing)
-@Suite("Music download files")
+@Suite("Music download files", .serialized)
 struct MusicDownloadTests {
     @Test("Filename cleanup and atomic finalization")
     func filenameAndAtomicFinalization() throws {

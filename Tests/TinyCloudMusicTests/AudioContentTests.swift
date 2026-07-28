@@ -44,6 +44,11 @@ private func verifyAudioFixtureDecoding() throws {
           podcasts.map(\.id) == [101, 102],
           episodes.episodes.map(\.id) == [201, 202],
           episodes.episodes[0].song?.id == 301,
+          episodes.episodes[0].song?.album.artwork.remoteURL?.absoluteString == "https://p1.music.126.net/episode.jpg",
+          episodes.episodes[0].song?.isPodcastEpisode == true,
+          episodes.episodes[0].song?.podcastEpisodeID == 201,
+          episodes.episodes[0].podcastName == "夜间节目",
+          episodes.episodes[0].hostName == "主播",
           episodes.episodes[1].song == nil,
           broadcasts.channels.map(\.id) == ["0007", "8"],
           broadcasts.nextCursor == BroadcastCursor(lastID: "0008", score: "12")
@@ -90,18 +95,33 @@ private func verifyEmptyVoiceLyrics() throws {
 private func verifyBroadcastStreamPolicy() throws {
     guard BroadcastStreamURLPolicy.isAllowed(URL(string: "https://m7.music.126.net/live.aac")!),
           BroadcastStreamURLPolicy.isAllowed(URL(string: "https://lhttp.qtfm.cn/live.aac")!),
+          BroadcastStreamURLPolicy.isAllowed(URL(string: "https://lhttp-hw.qtfm.cn/live.aac")!),
+          BroadcastStreamURLPolicy.isAllowed(URL(string: "https://lhttp.qingting.fm/live.aac")!),
           !BroadcastStreamURLPolicy.isAllowed(URL(string: "http://m7.music.126.net/live.aac")!),
-          !BroadcastStreamURLPolicy.isAllowed(URL(string: "https://sub.lhttp.qtfm.cn/live.aac")!),
+          !BroadcastStreamURLPolicy.isAllowed(URL(string: "https://qtfm.cn.evil.test/live.aac")!),
           !BroadcastStreamURLPolicy.isAllowed(URL(string: "https://music.126.net.evil.test/live.aac")!)
     else { throw AudioContentCheckError.failed }
+
+    guard BroadcastStreamURLPolicy.isPlayableResponse(statusCode: 200, mimeType: "audio/mpeg"),
+          BroadcastStreamURLPolicy.isPlayableResponse(statusCode: 206, mimeType: nil),
+          !BroadcastStreamURLPolicy.isPlayableResponse(statusCode: 404, mimeType: "text/html"),
+          !BroadcastStreamURLPolicy.isPlayableResponse(statusCode: 200, mimeType: "text/html")
+    else { throw AudioContentCheckError.failed }
+
+    guard try BroadcastStreamURLPolicy.validate("http://lhttp-hw.qtfm.cn/live.aac").absoluteString
+        == "https://lhttp-hw.qtfm.cn/live.aac"
+    else { throw AudioContentCheckError.failed }
+
+    let current = try AudioContentDecoder.broadcastCurrentInfo([
+        "data": [
+            "channelId": "7",
+            "channelName": "Channel",
+            "streamUrl": "https://example.test/live.aac"
+        ]
+    ], channelID: "7")
+    guard current.streamURL?.host == "example.test" else { throw AudioContentCheckError.failed }
     do {
-        _ = try AudioContentDecoder.broadcastCurrentInfo([
-            "data": [
-                "channelId": "7",
-                "channelName": "Channel",
-                "streamUrl": "https://example.test/live.aac"
-            ]
-        ], channelID: "7")
+        _ = try BroadcastStreamURLPolicy.validate(current.streamURL!.absoluteString)
         throw AudioContentCheckError.failed
     } catch AudioContentError.unsafeStreamURL {
     }

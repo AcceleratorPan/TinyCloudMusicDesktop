@@ -281,7 +281,7 @@ struct VideoDetailView: View {
                 VideoPlayer(player: videoPlayer)
             } else {
                 VideoArtwork(url: detail.coverURL, symbol: "play.rectangle")
-                Button(action: startPlayback) {
+                Button(action: { startPlayback() }) {
                     if isPreparingPlayback {
                         ProgressView().controlSize(.large)
                     } else {
@@ -342,6 +342,11 @@ struct VideoDetailView: View {
                         .pickerStyle(.menu)
                         .fixedSize()
                         .frame(minHeight: 44)
+                        .disabled(isPreparingPlayback)
+                        .onChange(of: selectedResolution) { previousResolution, _ in
+                            guard videoPlayer != nil, !isPreparingPlayback else { return }
+                            startPlayback(revertingTo: previousResolution)
+                        }
                     }
                     Button(action: toggleSubscription) {
                         Group {
@@ -458,9 +463,10 @@ struct VideoDetailView: View {
     }
 
     @MainActor
-    private func startPlayback() {
+    private func startPlayback(revertingTo previousResolution: Int? = nil) {
         guard let detail, !isPreparingPlayback else { return }
         let requestGeneration = generation
+        let previousPlayer = videoPlayer
         playbackTask?.cancel()
         playbackError = nil
         isPreparingPlayback = true
@@ -485,12 +491,23 @@ struct VideoDetailView: View {
                 guard generation == requestGeneration else { return }
                 songPlayer.pauseForVideo()
                 let player = AVPlayer(url: playbackURL)
+                if let position = previousPlayer?.currentTime(), position.isNumeric {
+                    _ = await player.seek(to: position, toleranceBefore: .zero, toleranceAfter: .zero)
+                }
+                try Task.checkCancellation()
+                guard generation == requestGeneration else { return }
+                let shouldPlay = previousPlayer?.timeControlStatus != .paused
+                previousPlayer?.pause()
+                previousPlayer?.replaceCurrentItem(with: nil)
                 videoPlayer = player
                 selectedResolution = source.resolution
-                player.play()
+                if shouldPlay { player.play() }
             } catch is CancellationError {
             } catch {
                 guard generation == requestGeneration else { return }
+                if previousPlayer != nil, let previousResolution {
+                    selectedResolution = previousResolution
+                }
                 playbackError = error.localizedDescription
             }
             guard generation == requestGeneration else { return }

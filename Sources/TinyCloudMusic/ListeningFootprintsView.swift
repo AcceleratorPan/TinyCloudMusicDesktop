@@ -74,7 +74,15 @@ struct ListeningFootprintsView: View {
                     if !page.metrics.isEmpty {
                         metrics(page.metrics)
                     }
-                    rankList(page.ranks)
+                    if !page.yearFootprints.isEmpty {
+                        yearlyFootprints(page.yearFootprints)
+                    }
+                    if selectedPeriod != .year || !page.ranks.isEmpty {
+                        rankList(page.ranks)
+                    } else if page.metrics.isEmpty, page.yearFootprints.isEmpty {
+                        ContentUnavailableView("暂无年度听歌足迹", systemImage: "calendar")
+                            .frame(maxWidth: .infinity, minHeight: 220)
+                    }
                 }
                 .padding(.horizontal, 28)
                 .padding(.vertical, 22)
@@ -149,6 +157,21 @@ struct ListeningFootprintsView: View {
                 .padding(12)
                 .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
                 .accessibilityElement(children: .combine)
+            }
+        }
+    }
+
+    private func yearlyFootprints(_ values: [YearListeningFootprint]) -> some View {
+        VStack(alignment: .leading, spacing: 20) {
+            ForEach(values) { footprint in
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("\(footprint.year) 年")
+                        .font(.title3.weight(.semibold).monospacedDigit())
+                    metrics([
+                        ListeningMetric(kind: .duration, value: .number(footprint.durationSeconds)),
+                        ListeningMetric(kind: .songs, value: .number(footprint.playCount))
+                    ])
+                }
             }
         }
     }
@@ -329,6 +352,7 @@ struct ListeningFootprintsView: View {
                 title: "今日听歌",
                 metrics: [],
                 ranks: try await library.todayListeningRank(forceRefresh: force),
+                yearFootprints: [],
                 previousCursor: nil
             )
         case .week, .month:
@@ -343,15 +367,18 @@ struct ListeningFootprintsView: View {
                 cursor: cursor,
                 forceRefresh: force
             )
-            let realtime = cursor == nil
-                ? try? await library.realtimeListeningReport(period: reportPeriod, forceRefresh: force)
-                : nil
+            let realtime: ListeningReport? = if cursor == nil {
+                try await library.realtimeListeningReport(period: reportPeriod, forceRefresh: force)
+            } else {
+                nil
+            }
             let (loadedReport, loadedRanks) = try await (report, ranks)
             return FootprintPage(
                 cursor: cursor,
                 title: loadedReport.title,
                 metrics: mergedMetrics(realtime?.metrics ?? [], loadedReport.metrics),
                 ranks: loadedRanks.isEmpty ? loadedReport.topSongs : loadedRanks,
+                yearFootprints: [],
                 previousCursor: loadedReport.previousCursor
             )
         case .year:
@@ -362,22 +389,20 @@ struct ListeningFootprintsView: View {
                     title: report.title,
                     metrics: report.metrics,
                     ranks: report.topSongs,
+                    yearFootprints: [],
                     previousCursor: report.previousCursor
                 )
             }
             async let report = try? library.listeningReport(period: .year, forceRefresh: force)
-            async let footprint = try? library.yearListeningFootprint(forceRefresh: force)
-            let (loadedReport, loadedFootprint) = await (report, footprint)
-            let reportHasContent = loadedReport.map { !$0.metrics.isEmpty || !$0.topSongs.isEmpty } == true
-            let primary = reportHasContent ? loadedReport : loadedFootprint ?? loadedReport
-            guard let primary else { throw EAPIError.missingData("年度听歌足迹") }
-            let reportRanks = loadedReport?.topSongs ?? []
+            let footprints = try await library.yearListeningFootprints(forceRefresh: force)
+            let loadedReport = await report
             return FootprintPage(
                 cursor: nil,
-                title: primary.title,
-                metrics: mergedMetrics(loadedReport?.metrics ?? [], loadedFootprint?.metrics ?? []),
-                ranks: reportRanks.isEmpty ? loadedFootprint?.topSongs ?? [] : reportRanks,
-                previousCursor: loadedReport?.previousCursor ?? loadedFootprint?.previousCursor
+                title: "年度听歌足迹",
+                metrics: footprints.isEmpty ? loadedReport?.metrics ?? [] : [],
+                ranks: loadedReport?.topSongs ?? [],
+                yearFootprints: footprints,
+                previousCursor: loadedReport?.previousCursor
             )
         }
     }
@@ -420,8 +445,10 @@ struct ListeningFootprintsView: View {
         }
     }
 
-    private func durationText(_ seconds: Int64) -> String {
-        let minutes = max(0, seconds) / 60
+    private func durationText(_ rawSeconds: Int64) -> String {
+        let seconds = max(0, rawSeconds)
+        if seconds == 0 { return "0 分钟" }
+        let minutes = seconds / 60
         let hours = minutes / 60
         let remainder = minutes % 60
         if hours == 0 { return remainder == 0 ? "不足 1 分钟" : "\(remainder) 分钟" }
@@ -456,6 +483,7 @@ private struct FootprintPage {
     let title: String
     let metrics: [ListeningMetric]
     let ranks: [ListeningRankEntry]
+    let yearFootprints: [YearListeningFootprint]
     let previousCursor: ListeningReportCursor?
 }
 

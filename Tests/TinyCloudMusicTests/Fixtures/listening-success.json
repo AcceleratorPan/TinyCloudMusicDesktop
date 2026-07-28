@@ -3,17 +3,19 @@
   "today": {
     "code": 200,
     "data": {
-      "songItems": [
+      "songDTOs": [
         {
           "songId": 42,
           "songName": "First",
+          "aliasName": "First Alias",
+          "lastPlayTime": 1719705600000,
           "artists": [{"id": 7, "name": "Artist"}],
           "albumName": "Album",
           "picUrl": "https://example.com/cover.jpg",
           "playCount": 4,
           "durationSeconds": 720
         },
-        {"songId": 42, "songName": "Duplicate", "playCount": 99}
+        {"songId": 42, "songName": "Duplicate", "lastPlayTime": 1719705601000, "playCount": 99}
       ]
     }
   },
@@ -45,18 +47,20 @@
   "realtime": {
     "code": 200,
     "data": {
-      "items": [
-        {"type": "listeningTime", "value": {"listenTime": 23, "desc": "小时"}},
-        {"songId": 999, "playCount": 999, "duration": 1}
-      ],
-      "listenDays": 9
+      "listenTimeDistributionBlock": {
+        "playDuration": 1395,
+        "listenDays": 9,
+        "durationDetails": [
+          {"duration": 180, "podcastDuration": 30, "audiobookDuration": 0}
+        ]
+      }
     }
   },
   "report": {
     "code": 200,
     "data": {
       "title": "Weekly report",
-      "listenDuration": 7200,
+      "listenTimeDistributionBlock": {"playDuration": 120, "listenDays": 5},
       "songCount": 12,
       "previousEndTime": "1719705600000",
       "topSongBlock": {
@@ -79,11 +83,10 @@
   "year": {
     "code": 200,
     "data": {
-      "reportTitle": "Year footprint",
-      "listenDuration": 86400,
-      "listenDays": 120,
-      "artistCount": 80,
-      "albumCount": 64
+      "yearItems": [
+        {"year": 2025, "playNum": 1234, "playDuration": 567890},
+        {"year": 2024, "playNum": 987, "playDuration": 3600}
+      ]
     }
   },
   "first": {

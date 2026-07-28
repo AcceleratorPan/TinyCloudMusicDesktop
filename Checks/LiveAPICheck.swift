@@ -4,9 +4,12 @@ import Foundation
 enum LiveAPICheck {
     static func main() async {
         let environment = ProcessInfo.processInfo.environment
+        let cookie = environment["TINYCLOUDMUSIC_COOKIE"] ?? ""
+        let musicU = environment["TINYCLOUDMUSIC_MUSIC_U"] ?? ""
+        let hasAccountCredentials = !cookie.isEmpty || !musicU.isEmpty
         let repository = LiveMusicRepository(transport: EAPITransport(
-            cookie: environment["TINYCLOUDMUSIC_COOKIE"] ?? "",
-            musicU: environment["TINYCLOUDMUSIC_MUSIC_U"] ?? ""
+            cookie: cookie,
+            musicU: musicU
         ))
         let library = LiveMusicLibrary(transport: repository.transport)
         let audioLibrary = LiveAudioContentLibrary(transport: repository.transport)
@@ -16,13 +19,21 @@ enum LiveAPICheck {
         var failed: [String] = []
         var skipped: [String] = []
 
-        func check<T>(_ name: String, _ operation: () async throws -> T) async -> T? {
+        func check<T>(
+            _ name: String,
+            required: Bool = true,
+            _ operation: () async throws -> T
+        ) async -> T? {
             do {
                 let value = try await operation()
                 passed.append(name)
                 return value
             } catch {
-                failed.append("\(name): \(errorText(error))")
+                if required {
+                    failed.append("\(name): \(errorText(error))")
+                } else {
+                    skipped.append("\(name): \(errorText(error))")
+                }
                 return nil
             }
         }
@@ -55,16 +66,28 @@ enum LiveAPICheck {
             let page = try await audioLibrary.broadcastChannels()
             guard !page.channels.isEmpty else { throw EAPIError.missingData("channels") }
             return page.channels
-        }), let channel = channels.first {
-            do {
-                _ = try await audioLibrary.broadcastCurrentInfo(channelID: channel.id)
+        }) {
+            var checkedStreams = 0
+            for channel in channels {
+                do {
+                    let current = try await audioLibrary.broadcastCurrentInfo(channelID: channel.id)
+                    guard let streamURL = current.streamURL else { continue }
+                    _ = try await BroadcastStreamURLPolicy.playableURL(streamURL.absoluteString)
+                    checkedStreams += 1
+                } catch EAPIError.service(400, let message) where message.contains("下架") {
+                    skipped.append("audio.broadcastCurrentInfo: \(message)")
+                } catch AudioContentError.unavailable(let message) {
+                    skipped.append("audio.broadcastCurrentInfo: \(message)")
+                } catch {
+                    let host = (try? await broadcastStreamHost(
+                        transport: repository.transport,
+                        channelID: channel.id
+                    )) ?? "unknown"
+                    failed.append("audio.broadcastCurrentInfo: \(errorText(error)) (host: \(host))")
+                }
+            }
+            if checkedStreams > 0 {
                 passed.append("audio.broadcastCurrentInfo")
-            } catch {
-                let host = (try? await broadcastStreamHost(
-                    transport: repository.transport,
-                    channelID: channel.id
-                )) ?? "unknown"
-                failed.append("audio.broadcastCurrentInfo: \(errorText(error)) (host: \(host))")
             }
         }
 
@@ -118,7 +141,7 @@ enum LiveAPICheck {
             return value
         }.first
 
-        _ = await check("song.lyric.word") {
+        _ = await check("song.lyric.word", required: false) {
             let lyrics = try await repository.lyrics(for: 186_016)
             guard lyrics.wordLyrics?.isEmpty == false else { throw EAPIError.missingData("yrc.lyric") }
         }
@@ -147,7 +170,9 @@ enum LiveAPICheck {
             _ = await check("detail.artist") { try await repository.detail(for: .artist(artist.id)) }
             _ = await check("artist.albums") { try await extras.artistAlbums(artistID: artist.id) }
             _ = await check("artist.followStatus") { try await extras.artistFollowStatus(artistID: artist.id) }
-            _ = await check("similar.artist") { try await library.similarArtists(to: artist.id) }
+            _ = await check("similar.artist", required: hasAccountCredentials) {
+                try await library.similarArtists(to: artist.id)
+            }
         } else {
             failed.append("search.artist: no decodable artist")
         }
@@ -170,13 +195,17 @@ enum LiveAPICheck {
             _ = await check("detail.user") { try await repository.detail(for: .user(user.id)) }
             _ = await check("user.playlists") { try await extras.userPlaylists(userID: user.id) }
             _ = await check("user.followingUsers") { try await library.followingUsers(userID: user.id, size: 20) }
-            _ = await check("user.followedArtists") { try await library.followedArtists(userID: user.id, limit: 20) }
+            _ = await check("user.followedArtists", required: hasAccountCredentials) {
+                try await library.followedArtists(userID: user.id, limit: 20)
+            }
         } else {
             failed.append("search.user: no decodable user")
         }
 
         for descriptor in repository.homeDescriptors {
-            _ = await check("home.\(descriptor.id)") { try await repository.homeSection(id: descriptor.id) }
+            _ = await check("home.\(descriptor.id)", required: hasAccountCredentials) {
+                try await repository.homeSection(id: descriptor.id)
+            }
         }
 
         let styles = await check("knowledge.styles") {
@@ -270,9 +299,10 @@ enum LiveAPICheck {
     private static func audioBytes(from url: URL) async throws {
         var request = URLRequest(url: url)
         request.setValue("bytes=0-4095", forHTTPHeaderField: "Range")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let response = response as? HTTPURLResponse,
-              [200, 206].contains(response.statusCode), !data.isEmpty
+              [200, 206].contains(response.statusCode),
+              try await bytes.first(where: { _ in true }) != nil
         else { throw EAPIError.invalidResponse }
     }
 

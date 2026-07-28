@@ -75,6 +75,7 @@ protocol MusicRepository: Sendable {
     func heartModeSongs(seedSongID: Int64, playlistID: Int64?, startSongID: Int64) async throws -> [Song]
     func recordPlaybackStart(for songID: Int64) async throws
     func recordPlayback(for songID: Int64, playedSeconds: Int) async throws
+    func recordPodcastPlayback(for episodeID: Int64, positionMilliseconds: Int, completed: Bool) async throws
 }
 
 extension MusicRepository {
@@ -89,6 +90,8 @@ extension MusicRepository {
     func heartModeSongs(seedSongID: Int64, playlistID: Int64?, startSongID: Int64) async throws -> [Song] {
         throw AppError.unavailable("心动模式暂时不可用")
     }
+
+    func recordPodcastPlayback(for episodeID: Int64, positionMilliseconds: Int, completed: Bool) async throws {}
 }
 
 struct AuthorizedTransportRequest: Sendable {

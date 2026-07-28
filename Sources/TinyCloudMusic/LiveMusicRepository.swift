@@ -219,6 +219,29 @@ struct LiveMusicRepository: MusicRepository {
         ])
     }
 
+    func recordPodcastPlayback(
+        for episodeID: Int64,
+        positionMilliseconds: Int,
+        completed: Bool
+    ) async throws {
+        guard episodeID > 0, positionMilliseconds > 0 else { throw EAPIError.invalidPayload }
+        _ = try decodedJSONObject(
+            try await transport.request(
+                EAPIEndpoint(
+                    "/eapi/dj/playrecord/upload",
+                    signing: "/api/dj/playrecord/upload"
+                ),
+                json: try compactJSON([
+                    "programId": String(episodeID),
+                    "listenLocation": String(positionMilliseconds),
+                    "isListened": String(completed)
+                ]),
+                invalidatesAccountCache: true,
+                retryable: false
+            )
+        )
+    }
+
     private func recordPlaybackLog(_ log: [String: Any]) async throws {
         let logsJSON = String(
             decoding: try JSONSerialization.data(withJSONObject: [log], options: [.sortedKeys]),
@@ -232,6 +255,7 @@ struct LiveMusicRepository: MusicRepository {
                     host: "https://clientlog.music.163.com"
                 ),
                 json: try compactJSON(["logs": logsJSON]),
+                invalidatesAccountCache: true,
                 macOSClient: true,
                 retryable: false
             )

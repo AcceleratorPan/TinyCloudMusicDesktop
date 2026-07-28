@@ -66,6 +66,13 @@ struct ListeningReport: Equatable, Sendable {
     }
 }
 
+struct YearListeningFootprint: Identifiable, Equatable, Sendable {
+    let year: Int
+    let playCount: Int64
+    let durationSeconds: Int64
+    var id: Int { year }
+}
+
 struct FirstListenMemory: Equatable, Sendable {
     let listenedAt: Date?
     let text: String?
@@ -114,6 +121,46 @@ enum ListeningReportDecoder {
         )
     }
 
+    static func realtimeReport(
+        _ root: [String: Any],
+        period: ListeningReportPeriod,
+        defaultTitle: String
+    ) -> ListeningReport {
+        let data = root.object("data").isEmpty ? root : root.object("data")
+        let distribution = data.object("listenTimeDistributionBlock")
+        var metrics: [ListeningMetric] = []
+        if let duration = secondsFromMinutes(distribution["playDuration"]) {
+            metrics.append(ListeningMetric(kind: .duration, value: .number(duration)))
+        }
+        if let days = int64Value(distribution["listenDays"]), days >= 0 {
+            metrics.append(ListeningMetric(kind: .days, value: .number(days)))
+        }
+        return ListeningReport(
+            period: period,
+            title: shortText(value(in: data, keys: ["title", "reportTitle", "dateDesc", "timeRange"]))
+                ?? defaultTitle,
+            metrics: metrics,
+            topSongs: [],
+            previousEndTime: nil
+        )
+    }
+
+    static func yearFootprints(_ root: [String: Any]) -> [YearListeningFootprint] {
+        let data = root.object("data").isEmpty ? root : root.object("data")
+        guard let rawItems = data["yearItems"] as? [Any] else { return [] }
+        var seen = Set<Int>()
+        return rawItems.compactMap { raw -> YearListeningFootprint? in
+            guard let item = raw as? [String: Any],
+                  let rawYear = int64(in: item, keys: ["year"]),
+                  let year = Int(exactly: rawYear), (2000...2100).contains(year),
+                  let playCount = int64(in: item, keys: ["playNum"]), playCount >= 0,
+                  let duration = int64(in: item, keys: ["playDuration"]), duration >= 0,
+                  seen.insert(year).inserted
+            else { return nil }
+            return YearListeningFootprint(year: year, playCount: playCount, durationSeconds: duration)
+        }
+    }
+
     static func firstListenMemory(_ root: [String: Any], now: Date = Date()) -> FirstListenMemory {
         let data = root.object("data").isEmpty ? root : root.object("data")
         let listenedAt = timestamp(
@@ -137,11 +184,11 @@ enum ListeningReportDecoder {
         (.albums, ["albumCount", "totalAlbumCount"]),
         (.days, ["dayCount", "listenDays"])
     ]
-    private static let rankContainerKeys = Set(["songItems", "topSongBlock", "topSongs", "songs"])
+    private static let rankContainerKeys = Set(["songDTOs", "songItems", "topSongBlock", "topSongs", "songs"])
 
     private static func metrics(in root: [String: Any]) -> [ListeningMetric] {
         var result: [ListeningMetric] = []
-        if let value = listeningTimeValue(value(in: root, keys: ["listenTime"]))
+        if let value = realtimeDurationValue(in: root)
             ?? metricValue(value(in: root, keys: ["totalDuration", "listenDuration"])) {
             result.append(ListeningMetric(kind: .duration, value: value))
         }
@@ -152,21 +199,9 @@ enum ListeningReportDecoder {
         return result
     }
 
-    private static func listeningTimeValue(_ raw: Any?) -> ListeningMetricValue? {
-        if let object = raw as? [String: Any] {
-            if let text = shortText(object["text"] ?? object["desc"]) { return .text(text) }
-            for key in ["value", "count", "duration"] {
-                if let value = listeningTimeValue(object[key]) { return value }
-            }
-            return nil
-        }
-        guard let hours = doubleValue(raw), hours >= 0 else {
-            return shortText(raw).map(ListeningMetricValue.text)
-        }
-        let text = hours >= 0.1 && hours < 1
-            ? String(format: "%.1f", hours)
-            : String(format: "%.0f", hours)
-        return .text("\(text) 小时")
+    private static func realtimeDurationValue(in root: [String: Any]) -> ListeningMetricValue? {
+        secondsFromMinutes(root.object("listenTimeDistributionBlock")["playDuration"])
+            .map(ListeningMetricValue.number)
     }
 
     private static func metricValue(_ raw: Any?) -> ListeningMetricValue? {
@@ -224,7 +259,7 @@ enum ListeningReportDecoder {
     }
 
     private static func rankArrays(in root: [String: Any]) -> [[[String: Any]]] {
-        findArrays(in: root, keys: ["songItems", "topSongs", "songs", "items"])
+        findArrays(in: root, keys: ["songDTOs", "songItems", "topSongs", "songs", "items"])
     }
 
     private static func durationSeconds(in value: [String: Any]) -> Int64? {
@@ -315,6 +350,12 @@ enum ListeningReportDecoder {
         int64Value(raw)
     }
 
+    private static func secondsFromMinutes(_ raw: Any?) -> Int64? {
+        guard let minutes = int64Value(raw), minutes >= 0 else { return nil }
+        let (seconds, overflow) = minutes.multipliedReportingOverflow(by: 60)
+        return overflow ? nil : seconds
+    }
+
     private static func int64Value(_ raw: Any?) -> Int64? {
         if let value = raw as? NSNumber {
             guard CFGetTypeID(value) != CFBooleanGetTypeID() else { return nil }
@@ -325,18 +366,6 @@ enum ListeningReportDecoder {
             return Int64(exactly: number)
         }
         if let value = raw as? String { return Int64(value.trimmingCharacters(in: .whitespacesAndNewlines)) }
-        return nil
-    }
-
-    private static func doubleValue(_ raw: Any?) -> Double? {
-        if let value = raw as? NSNumber {
-            guard CFGetTypeID(value) != CFBooleanGetTypeID(), value.doubleValue.isFinite else { return nil }
-            return value.doubleValue
-        }
-        if let value = raw as? String {
-            let number = Double(value.trimmingCharacters(in: .whitespacesAndNewlines))
-            return number?.isFinite == true ? number : nil
-        }
         return nil
     }
 

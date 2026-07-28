@@ -680,13 +680,13 @@ struct EAPITransport: Sendable {
         let credentials = resolvedCredentials()
         let cookie = credentials.cookie
         let musicU = credentials.musicU
-        let requestJSON = includesClientHeader
-            ? try Self.addingEAPIClientHeader(
-                to: json,
-                cookie: cookie,
-                deviceID: credentials.deviceID
-            )
-            : json
+        let clientHeaderFields = includesClientHeader
+            ? Self.eapiClientHeaderFields(cookie: cookie, deviceID: credentials.deviceID)
+            : nil
+        let requestJSON = try clientHeaderFields.map {
+            try Self.addingEAPIClientHeader(to: json, fields: $0)
+        } ?? json
+        let clientCookie = try clientHeaderFields.map(XEAPICodec.encodedCookie)
         let body = try EAPICodec.requestBody(path: endpoint.logicalPath, json: requestJSON)
         let account = Self.accountFingerprint(cookie: cookie, musicU: musicU)
         let policy: EAPIRequestCachePolicy = invalidatesAccountCache
@@ -703,6 +703,7 @@ struct EAPITransport: Sendable {
                 vip: vip,
                 macOSClient: macOSClient,
                 iPhoneClient: iPhoneClient,
+                cookieHeaderOverride: clientCookie,
                 retryable: retryable && !invalidatesAccountCache
             )
         case let .read(ttl, staleIfError):
@@ -731,6 +732,7 @@ struct EAPITransport: Sendable {
                     vip: vip,
                     macOSClient: macOSClient,
                     iPhoneClient: iPhoneClient,
+                    cookieHeaderOverride: clientCookie,
                     retryable: retryable
                 )
             }
@@ -743,6 +745,7 @@ struct EAPITransport: Sendable {
                 vip: vip,
                 macOSClient: macOSClient,
                 iPhoneClient: iPhoneClient,
+                cookieHeaderOverride: clientCookie,
                 retryable: false
             )
             if EAPIResponseCache.isSuccessfulResponse(data) {
@@ -936,6 +939,7 @@ struct EAPITransport: Sendable {
         vip: Bool,
         macOSClient: Bool,
         iPhoneClient: Bool,
+        cookieHeaderOverride: String?,
         retryable: Bool
     ) async throws -> Data {
         try await performHTTPRequest(
@@ -949,7 +953,7 @@ struct EAPITransport: Sendable {
             retryable: retryable,
             session: session,
             cookieStorage: nil,
-            cookieHeaderOverride: nil,
+            cookieHeaderOverride: cookieHeaderOverride,
             userAgentOverride: nil
         ).data
     }
@@ -1083,16 +1087,13 @@ struct EAPITransport: Sendable {
 
     private static func addingEAPIClientHeader(
         to json: Data,
-        cookie: String,
-        deviceID: String
+        fields: [(String, String)]
     ) throws -> Data {
         guard var payload = try JSONSerialization.jsonObject(with: json) as? [String: Any] else {
             throw EAPIError.invalidPayload
         }
-        payload["header"] = Dictionary(uniqueKeysWithValues: eapiClientHeaderFields(
-            cookie: cookie,
-            deviceID: deviceID
-        ))
+        payload["e_r"] = false
+        payload["header"] = Dictionary(uniqueKeysWithValues: fields)
         return try compactJSON(payload)
     }
 

@@ -177,7 +177,7 @@ let settings = AppSettings(
 expect(settings.quality == .lossless && settings.playbackQuality == .best, "Playback and download qualities must be independent")
 expect(settings.downloadConcurrency == 3, "Download concurrency must persist in app settings")
 expect(settings.crossfadeDuration == 3, "Crossfade duration must persist in app settings")
-expect(settings.preferredImageBookmark == settings.downloadBookmark, "Images must follow the song folder by default")
+expect(settings.imageBookmark == settings.downloadBookmark, "Images must follow the song folder by default")
 let lowResolutionArtworkURL = URL(string: "https://p1.music.126.net/cover.jpg?foo=bar&param=64y64")!
 let highResolutionArtworkURL = ArtworkURLPolicy.highResolutionURL(for: lowResolutionArtworkURL)
 let artworkQueryItems = URLComponents(url: highResolutionArtworkURL, resolvingAgainstBaseURL: false)!.queryItems!

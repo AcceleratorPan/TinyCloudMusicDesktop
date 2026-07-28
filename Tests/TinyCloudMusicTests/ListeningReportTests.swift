@@ -34,9 +34,12 @@ private func verifyListeningSuccessFixture() throws {
 
     let today = library.decodeListeningRank(try fixtureObject(fixture, "today"))
     let rank = library.decodeListeningRank(try fixtureObject(fixture, "rank"))
-    let realtime = library.decodeListeningReport(try fixtureObject(fixture, "realtime"), period: .month)
+    let realtime = library.decodeRealtimeListeningReport(
+        try fixtureObject(fixture, "realtime"),
+        period: .month
+    )
     let report = library.decodeListeningReport(try fixtureObject(fixture, "report"), period: .week)
-    let year = library.decodeListeningReport(try fixtureObject(fixture, "year"), period: .year)
+    let years = library.decodeYearListeningFootprints(try fixtureObject(fixture, "year"))
     let memory = library.decodeFirstListenMemory(
         try fixtureObject(fixture, "first"),
         now: Date(timeIntervalSince1970: 1_735_689_600)
@@ -49,15 +52,22 @@ private func verifyListeningSuccessFixture() throws {
           rank.map(\.id) == [43, 44],
           rank.map(\.playCount) == [6, 3],
           realtime.metrics == [
-              ListeningMetric(kind: .duration, value: .text("23 小时")),
+              ListeningMetric(kind: .duration, value: .number(83_700)),
               ListeningMetric(kind: .days, value: .number(9))
           ],
           report.title == "Weekly report",
-          report.metrics.map(\.kind) == [.duration, .songs],
+          report.metrics == [
+              ListeningMetric(kind: .duration, value: .number(7_200)),
+              ListeningMetric(kind: .songs, value: .number(12)),
+              ListeningMetric(kind: .days, value: .number(5))
+          ],
           report.topSongs.map(\.id) == [45],
           report.previousEndTime == 1_719_705_600_000,
           report.previousCursor?.endTime == report.previousEndTime,
-          year.metrics.map(\.kind) == [.duration, .artists, .albums, .days],
+          years == [
+              YearListeningFootprint(year: 2025, playCount: 1_234, durationSeconds: 567_890),
+              YearListeningFootprint(year: 2024, playCount: 987, durationSeconds: 3_600)
+          ],
           memory.listenedAt == Date(timeIntervalSince1970: 1_704_067_200),
           memory.text == "Found in a daily recommendation"
     else { throw ListeningReportCheckError.failed }
@@ -71,12 +81,20 @@ private func verifyListeningEmptyFixture() throws {
           library.decodeListeningRank(try fixtureObject(fixture, "rank")).isEmpty
     else { throw ListeningReportCheckError.failed }
 
-    for key in ["realtime", "report", "year"] {
-        let report = library.decodeListeningReport(try fixtureObject(fixture, key), period: .month)
-        guard report.metrics.isEmpty, report.topSongs.isEmpty, report.previousEndTime == nil else {
-            throw ListeningReportCheckError.failed
-        }
+    let realtime = library.decodeRealtimeListeningReport(
+        try fixtureObject(fixture, "realtime"),
+        period: .month
+    )
+    let report = library.decodeListeningReport(try fixtureObject(fixture, "report"), period: .month)
+    guard realtime.metrics.isEmpty,
+          report.metrics.isEmpty,
+          report.topSongs.isEmpty,
+          report.previousEndTime == nil
+    else {
+        throw ListeningReportCheckError.failed
     }
+    guard library.decodeYearListeningFootprints(try fixtureObject(fixture, "year")).isEmpty
+    else { throw ListeningReportCheckError.failed }
     guard library.decodeFirstListenMemory(try fixtureObject(fixture, "first")) == FirstListenMemory(
         listenedAt: nil,
         text: nil
@@ -97,11 +115,17 @@ private func verifyListeningMissingFixture() throws {
         try fixtureObject(fixture, "first"),
         now: Date(timeIntervalSince1970: 1_735_689_600)
     )
+    let realtime = library.decodeRealtimeListeningReport(
+        try fixtureObject(fixture, "realtime"),
+        period: .week
+    )
     guard library.decodeListeningRank(try fixtureObject(fixture, "today")).isEmpty,
           library.decodeListeningRank(try fixtureObject(fixture, "rank")).isEmpty,
           report.metrics.isEmpty,
           report.topSongs.isEmpty,
           report.previousCursor == nil,
+          realtime.metrics.isEmpty,
+          library.decodeYearListeningFootprints(try fixtureObject(fixture, "year")).isEmpty,
           memory.listenedAt == nil,
           memory.text == nil
     else { throw ListeningReportCheckError.failed }

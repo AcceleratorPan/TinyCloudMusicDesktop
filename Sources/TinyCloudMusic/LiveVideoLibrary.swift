@@ -162,7 +162,7 @@ struct LiveVideoLibrary: Sendable {
         ))
     }
 
-    private func playbackSource(
+    func playbackSource(
         _ preferredResolution: Int,
         available: [Int],
         load: (Int) async throws -> VideoPlaybackSource
@@ -172,9 +172,11 @@ struct LiveVideoLibrary: Sendable {
         }
         do {
             return try await load(resolution)
-        } catch {
+        } catch let error as VideoLibraryError {
             try Task.checkCancellation()
-            guard let fallback = VideoResolutionPolicy.fallback(below: resolution, available: available) else {
+            guard case .unavailable = error,
+                  let fallback = VideoResolutionPolicy.fallback(below: resolution, available: available)
+            else {
                 throw error
             }
             return try await load(fallback)

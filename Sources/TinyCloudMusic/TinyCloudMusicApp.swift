@@ -545,11 +545,12 @@ private final class MenuBarPlayerController: NSObject {
         )
         update(nextButton, symbol: "forward.end.fill", label: "下一首", enabled: player.canGoNext)
         let isLiked = song.map { model.likedSongIDs.contains($0.id) } ?? false
+        let isPodcastEpisode = song?.isPodcastEpisode == true
         update(
             favoriteButton,
-            symbol: isLiked ? "heart.fill" : "heart",
-            label: isLiked ? "取消喜欢" : "喜欢",
-            enabled: song != nil
+            symbol: isPodcastEpisode ? "heart.slash" : (isLiked ? "heart.fill" : "heart"),
+            label: isPodcastEpisode ? "播客音频不支持收藏" : (isLiked ? "取消喜欢" : "喜欢"),
+            enabled: song != nil && !isPodcastEpisode
         )
         updateDownloadButton(for: song)
         update(windowButton, symbol: "music.note.house.fill", label: "打开小云音乐", enabled: true)
@@ -559,7 +560,7 @@ private final class MenuBarPlayerController: NSObject {
     @objc private func togglePlayback() { player.togglePlayback() }
     @objc private func next() { player.next() }
     @objc private func toggleFavorite() {
-        guard let song = player.currentSong else { return }
+        guard let song = player.currentSong, !song.isPodcastEpisode else { return }
         model.toggleSongLiked(song.id)
     }
 

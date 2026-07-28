@@ -58,6 +58,9 @@ struct Song: Identifiable, Hashable, Sendable {
     let artists: [ArtistSummary]
     let album: AlbumSummary
     let duration: Duration
+    var podcastEpisodeID: Int64?
+
+    var isPodcastEpisode: Bool { podcastEpisodeID != nil }
 
     init(
         id: Int64,
@@ -66,7 +69,8 @@ struct Song: Identifiable, Hashable, Sendable {
         album: AlbumSummary,
         duration: Duration,
         translatedName: String? = nil,
-        aliasName: String? = nil
+        aliasName: String? = nil,
+        podcastEpisodeID: Int64? = nil
     ) {
         self.id = id
         self.primaryName = name
@@ -80,6 +84,7 @@ struct Song: Identifiable, Hashable, Sendable {
         self.artists = artists
         self.album = album
         self.duration = duration
+        self.podcastEpisodeID = podcastEpisodeID
     }
 
     var titleMetadata: String {
