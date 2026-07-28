@@ -85,6 +85,22 @@ private func verifyTrackCache() async throws {
           !FileManager.default.fileExists(atPath: finalURL.appendingPathExtension("part").path)
     else { throw TrackCacheCheckError.failed }
 
+    try Data("ID3-corrupted-size".utf8).write(to: finalURL)
+    guard cache.readyFile(for: 42, quality: "standard") == nil else { throw TrackCacheCheckError.failed }
+    let repaired = root.appending(path: "repaired.tmp")
+    try Data("ID3".utf8).write(to: repaired)
+    _ = try cache.finalize(repaired, for: 42, quality: "standard")
+
+    let actualFLAC = root.appending(path: "actual-flac.tmp")
+    try Data("fLaC".utf8).write(to: actualFLAC)
+    let stored = try await cache.storeCopy(
+        of: actualFLAC,
+        for: 46,
+        quality: "standard",
+        fileExtension: "flac"
+    )
+    guard stored.fileExtension == "flac", stored.size == 4 else { throw TrackCacheCheckError.failed }
+
     let losslessDownload = root.appending(path: "lossless.tmp")
     try Data("fLaC".utf8).write(to: losslessDownload)
     guard try cache.finalize(losslessDownload, for: 42, quality: "lossless") == losslessURL,

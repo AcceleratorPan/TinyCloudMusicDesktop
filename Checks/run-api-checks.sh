@@ -22,6 +22,7 @@ COMMON_SOURCES=(
   Sources/TinyCloudMusic/MusicDownloadModels.swift
   Sources/TinyCloudMusic/MusicDownloadTransfer.swift
   Sources/TinyCloudMusic/MusicDownloadInfrastructure.swift
+  Sources/TinyCloudMusic/TrackCache.swift
   Sources/TinyCloudMusic/CloudMusicModels.swift
   Sources/TinyCloudMusic/MusicLibraryModels.swift
   Sources/TinyCloudMusic/MusicExtraModels.swift
@@ -91,6 +92,7 @@ swiftc -D LISTENING_REPORT_CHECK -warnings-as-errors \
 /tmp/tinycloudmusic-listening-report-check
 swiftc -D VIDEO_CHECK -warnings-as-errors \
   "${COMMON_SOURCES[@]}" \
+  Sources/TinyCloudMusic/MusicDownload.swift \
   Tests/TinyCloudMusicTests/VideoTests.swift \
   -o /tmp/tinycloudmusic-video-check
 /tmp/tinycloudmusic-video-check

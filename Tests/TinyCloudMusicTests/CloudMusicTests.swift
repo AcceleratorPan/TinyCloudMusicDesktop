@@ -274,6 +274,14 @@ private func verifyDownloadConcurrencyLimit() async throws {
             includeLyrics: false
         )
     }
+    guard manager.enqueue(
+        video: .mv(42),
+        title: "Queued video",
+        creator: "Artist",
+        availableResolutions: [720, 480],
+        to: root,
+        quality: .high
+    ) else { throw CloudMusicCheckError.failed("Video was not added to the shared queue") }
     let duplicateAccepted = manager.enqueue(
         cloudSong: CloudSong(
             id: 201,
@@ -297,7 +305,8 @@ private func verifyDownloadConcurrencyLimit() async throws {
         try await Task.sleep(for: .milliseconds(10))
     }
     guard manager.runningDownloadCount == 2,
-          manager.queuedDownloadCount == 3,
+          manager.queuedDownloadCount == 4,
+          manager.videoStates["mv-42"] == .queued,
           CloudMusicProtocol.requestCount(for: "/cloud-audio") == 2
     else { throw CloudMusicCheckError.failed("Download concurrency exceeded the configured limit") }
 
@@ -306,7 +315,7 @@ private func verifyDownloadConcurrencyLimit() async throws {
         try await Task.sleep(for: .milliseconds(10))
     }
     guard manager.runningDownloadCount == 4,
-          manager.queuedDownloadCount == 1,
+          manager.queuedDownloadCount == 2,
           CloudMusicProtocol.requestCount(for: "/cloud-audio") == 4
     else { throw CloudMusicCheckError.failed("Increasing concurrency did not fill available slots") }
 
@@ -318,7 +327,10 @@ private func verifyDownloadConcurrencyLimit() async throws {
     for _ in 0..<100 where manager.runningDownloadCount > 0 {
         try await Task.sleep(for: .milliseconds(10))
     }
-    guard manager.runningDownloadCount == 0, manager.queuedDownloadCount == 0 else {
+    guard manager.runningDownloadCount == 0,
+          manager.queuedDownloadCount == 0,
+          manager.videoStates["mv-42"] == .cancelled
+    else {
         throw CloudMusicCheckError.failed("Cancelling downloads did not release scheduler slots")
     }
 }

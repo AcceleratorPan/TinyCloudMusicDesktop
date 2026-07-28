@@ -145,6 +145,17 @@ private func verifySheetAndKnowledgeFixtures() throws {
     try Data("%PDF-first\n%%EOF".utf8).write(to: firstPDF)
     try Data("%PDF-updated\n%%EOF".utf8).write(to: updatedPDF)
 
+    let cacheRoot = downloadRoot.appending(path: "cache", directoryHint: .isDirectory)
+    let cachedPDF = try MusicSheetFiles.cachePDF(
+        at: firstPDF,
+        sheetID: sheets[0].id,
+        cacheRoot: cacheRoot
+    )
+    guard cachedPDF.lastPathComponent == "171018.pdf",
+          MusicSheetFiles.cachedPDF(sheetID: sheets[0].id, cacheRoot: cacheRoot) == cachedPDF,
+          try Data(contentsOf: cachedPDF) == Data("%PDF-first\n%%EOF".utf8)
+    else { throw MusicKnowledgeCheckError.failed }
+
     let firstSave = try MusicSheetFiles.savePDF(at: firstPDF, song: song, sheet: sheets[0], to: downloadRoot)
     let duplicateSave = try MusicSheetFiles.savePDF(at: updatedPDF, song: song, sheet: sheets[0], to: downloadRoot)
     guard firstSave.saved,

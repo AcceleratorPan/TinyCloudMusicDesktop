@@ -475,7 +475,7 @@ enum AnnualListeningReportDecoder {
             listeningTimes(data),
             lateListening(data, decodeSong: decodeSong),
             loopSong(data, decodeSong: decodeSong),
-            crowdMemory(data, decodeSong: decodeSong),
+            crowdMemory(data),
             monthlyMoods(data),
             listenTogether(data),
             singerComparison(data)
@@ -487,16 +487,6 @@ enum AnnualListeningReportDecoder {
     private static func listeningMethods(_ data: [String: Any]) -> AnnualReportSection? {
         let value = data.object("meetTimeOverview")
         var metrics: [AnnualReportMetric] = []
-        for (key, label) in [
-            ("pcTerminalPlayTime", "电脑端"),
-            ("carTerminalPlayTime", "车载"),
-            ("homeTerminalPlayTime", "家庭设备"),
-            ("podcastPlayTime", "播客")
-        ] {
-            if let seconds = int64(value, [key]), seconds > 0 {
-                metrics.append(AnnualReportMetric(label: label, value: .duration(seconds)))
-            }
-        }
         if let timestamp = timestamp(value, ["regTime"]) {
             metrics.append(AnnualReportMetric(label: "相遇日期", value: .date(timestamp)))
         }
@@ -655,15 +645,14 @@ enum AnnualListeningReportDecoder {
 
     private static func seasons(_ data: [String: Any], decodeSong: SongDecoder) -> AnnualReportSection? {
         let value = data.object("seasonsListen")
-        let seasons = [("spring", "春日"), ("summer", "夏日"), ("autumn", "秋日"), ("winter", "冬日")]
+        let seasons = ["spring", "summer", "autumn", "winter"]
         let tracks = seasons.enumerated().compactMap { index, season -> AnnualReportTrack? in
-            let item = value.object(season.0)
+            let item = value.object(season)
             return track(
                 item,
                 id: "season-\(index)",
                 pictureKeys: ["picUrl"],
                 playCountKeys: ["playNum"],
-                captionPrefix: season.1,
                 decodeSong: decodeSong
             )
         }
@@ -757,40 +746,13 @@ enum AnnualListeningReportDecoder {
         )
     }
 
-    private static func crowdMemory(_ data: [String: Any], decodeSong: SongDecoder) -> AnnualReportSection? {
-        var value = data.object("minorMassDTO")
-        var metrics: [AnnualReportMetric] = []
-        var details: [String] = []
-        var tracks: [AnnualReportTrack] = []
-        if let name = text(value["massSongName"]) {
-            let artist = text(value["massSingerName"]).map { " · \($0)" } ?? ""
-            details.append("很多人也在听：\(name)\(artist)")
-            if let count = int64(value, ["massFindUserCount"]), count > 0 {
-                metrics.append(AnnualReportMetric(label: "共同听众", value: .number(count, suffix: "人")))
-            }
-        }
-        if int64(value, ["minoritySongId"]).map({ $0 > 0 }) == true {
-            value["songId"] = value["minoritySongId"]
-            value["songName"] = value["minoritySongName"]
-            value["artistName"] = value["minoritySingerName"]
-            value["songPicUrl"] = value["minoritySongCoverUrl"]
-            if let item = track(
-                value,
-                id: "minority-song",
-                pictureKeys: ["minoritySongCoverUrl"],
-                playCountKeys: ["minoritySongPlayCount"],
-                captionPrefix: "小众珍藏",
-                decodeSong: decodeSong
-            ) { tracks.append(item) }
-        }
-        guard !metrics.isEmpty || !details.isEmpty || !tracks.isEmpty else { return nil }
+    private static func crowdMemory(_ data: [String: Any]) -> AnnualReportSection? {
+        let value = data.object("minorMassDTO")
+        guard let count = int64(value, ["massFindUserCount"]), count > 0 else { return nil }
         return section(
             id: "crowd-memory",
             title: "听众坐标",
-            artworkURL: firstURL(value["massSongCoverUrl"]) ?? firstURL(value["minorityCoverUrl"]),
-            metrics: metrics,
-            details: details,
-            tracks: tracks
+            metrics: [AnnualReportMetric(label: "共同听众", value: .number(count, suffix: "人"))]
         )
     }
 
@@ -892,7 +854,8 @@ enum AnnualListeningReportDecoder {
             id: id,
             name: name,
             imageURL: firstURL(value, [
-                "artistPicUrl", "singerPicUrl", "picUrl", "img1v1Url", "avatarUrl", "cover"
+                "imageUrl", "coverimgUrl", "coverImgUrl", "artistPicUrl", "singerPicUrl", "singerCoverUrl",
+                "picUrl", "img1v1Url", "avatarUrl", "cover"
             ]),
             note: note
         )

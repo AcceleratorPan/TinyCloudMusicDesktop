@@ -111,7 +111,14 @@ extension LiveMusicRepository {
             page = result
             values = result.array("videos")
             countKey = "videoCount"
-            items = values.compactMap(VideoDecoder.videoSummary).map(SearchItem.video)
+            items = values.compactMap { value in
+                guard value["type"] != nil else { return nil }
+                return switch value.int("type") {
+                case 0: VideoDecoder.mvSummary(value).map(SearchItem.mv)
+                case 1: VideoDecoder.videoSummary(value).map(SearchItem.video)
+                default: nil
+                }
+            }
         }
 
         let hasMore = page.keys.contains("hasMore")

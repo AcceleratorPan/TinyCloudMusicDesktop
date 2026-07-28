@@ -156,7 +156,7 @@ private final class ScriptedDownloadProtocol: URLProtocol, @unchecked Sendable {
             return Reply(
                 status: 200,
                 headers: json,
-                body: Data(#"{"code":200,"lrc":{"lyric":""},"tlyric":{"lyric":""}}"#.utf8),
+                body: Data(#"{"code":200,"lrc":{"lyric":"[00:00.000]cached lyric"},"tlyric":{"lyric":""}}"#.utf8),
                 delay: 0.2
             )
 
@@ -257,6 +257,7 @@ private func verifyHighestQualityFallback() async throws {
     let root = FileManager.default.temporaryDirectory
         .appending(path: UUID().uuidString, directoryHint: .isDirectory)
     defer { try? FileManager.default.removeItem(at: root) }
+    let cacheRoot = root.appending(path: "cache", directoryHint: .isDirectory)
     let request = MusicDownloadRequest(
         songID: 1,
         songName: "测试歌曲",
@@ -276,7 +277,8 @@ private func verifyHighestQualityFallback() async throws {
         maximumConcurrentDownloads: 1,
         retryPolicy: MusicDownloadRetryPolicy(maximumAttempts: 4, baseDelay: 0, maximumDelay: 0),
         resumeStore: MusicDownloadResumeStore(directory: root.appending(path: "resume")),
-        targetAllocator: MusicDownloadTargetAllocator()
+        targetAllocator: MusicDownloadTargetAllocator(),
+        cacheRoot: cacheRoot
     )
     let song = Song(
         id: 1,
@@ -292,8 +294,28 @@ private func verifyHighestQualityFallback() async throws {
     guard ScriptedDownloadProtocol.requestCount(for: "/eapi/song/enhance/player/url/v1") == 4,
           result.audioURL.pathExtension == "flac",
           result.audioURL.lastPathComponent.contains("【无损】"),
-          result.audioURL.lastPathComponent.contains(" [1]"),
+          !result.audioURL.lastPathComponent.contains("[1]"),
           try Data(contentsOf: result.audioURL) == Data("fLaC".utf8)
+    else { throw MusicDownloadCheckError.failed }
+
+    let mediaRequests = ScriptedDownloadProtocol.requestCount(for: "/quality-audio")
+    let cachedManager = MusicDownloadManager(
+        transport: network.transport,
+        session: network.session,
+        maximumConcurrentDownloads: 1,
+        retryPolicy: MusicDownloadRetryPolicy(maximumAttempts: 4, baseDelay: 0, maximumDelay: 0),
+        resumeStore: MusicDownloadResumeStore(directory: root.appending(path: "cached-resume")),
+        targetAllocator: MusicDownloadTargetAllocator(),
+        cacheRoot: cacheRoot
+    )
+    let destination = root.appending(path: "cached-best", directoryHint: .isDirectory)
+    guard cachedManager.enqueue(song: song, to: destination, quality: .best, includeLyrics: false) else {
+        throw MusicDownloadCheckError.failed
+    }
+    let cached = try await completedDownload(from: cachedManager, songID: song.id)
+    guard ScriptedDownloadProtocol.requestCount(for: "/quality-audio") == mediaRequests,
+          cached.audioURL.lastPathComponent.contains("【无损】"),
+          try Data(contentsOf: cached.audioURL) == Data("fLaC".utf8)
     else { throw MusicDownloadCheckError.failed }
 }
 
@@ -304,13 +326,15 @@ private func verifySourceRetryAndParallelLyrics() async throws {
     let root = FileManager.default.temporaryDirectory
         .appending(path: UUID().uuidString, directoryHint: .isDirectory)
     defer { try? FileManager.default.removeItem(at: root) }
+    let cacheRoot = root.appending(path: "cache", directoryHint: .isDirectory)
     let manager = MusicDownloadManager(
         transport: network.transport,
         session: network.session,
         maximumConcurrentDownloads: 1,
         retryPolicy: MusicDownloadRetryPolicy(maximumAttempts: 4, baseDelay: 0, maximumDelay: 0),
         resumeStore: MusicDownloadResumeStore(directory: root.appending(path: "resume")),
-        targetAllocator: MusicDownloadTargetAllocator()
+        targetAllocator: MusicDownloadTargetAllocator(),
+        cacheRoot: cacheRoot
     )
     let song = Song(
         id: 2,
@@ -331,9 +355,35 @@ private func verifySourceRetryAndParallelLyrics() async throws {
           ScriptedDownloadProtocol.didDownloadBeforeLyricsCompleted,
           result.audioURL.pathExtension == "flac",
           result.audioURL.lastPathComponent.contains("【标准】"),
-          result.audioURL.lastPathComponent.contains(" [2]"),
+          !result.audioURL.lastPathComponent.contains("[2]"),
           try Data(contentsOf: result.audioURL) == Data("fLaC".utf8),
+          result.lyricURL.map({ FileManager.default.fileExists(atPath: $0.path) }) == true,
           manager.items[song.id]?.quality == "标准"
+    else { throw MusicDownloadCheckError.failed }
+
+    let sourceRequests = ScriptedDownloadProtocol.requestCount(for: "/eapi/song/enhance/player/url/v1")
+    let lyricRequests = ScriptedDownloadProtocol.requestCount(for: "/eapi/song/lyric")
+    let audioRequests = ScriptedDownloadProtocol.requestCount(for: "/good-audio")
+    let cachedDestination = root.appending(path: "cached-output", directoryHint: .isDirectory)
+    let cachedManager = MusicDownloadManager(
+        transport: network.transport,
+        session: network.session,
+        maximumConcurrentDownloads: 1,
+        retryPolicy: MusicDownloadRetryPolicy(maximumAttempts: 1, baseDelay: 0, maximumDelay: 0),
+        resumeStore: MusicDownloadResumeStore(directory: root.appending(path: "cached-resume")),
+        targetAllocator: MusicDownloadTargetAllocator(),
+        cacheRoot: cacheRoot
+    )
+    guard cachedManager.enqueue(song: song, to: cachedDestination, quality: .standard, includeLyrics: true) else {
+        throw MusicDownloadCheckError.failed
+    }
+    let cachedResult = try await completedDownload(from: cachedManager, songID: song.id)
+    guard ScriptedDownloadProtocol.requestCount(for: "/eapi/song/enhance/player/url/v1") == sourceRequests,
+          ScriptedDownloadProtocol.requestCount(for: "/eapi/song/lyric") == lyricRequests,
+          ScriptedDownloadProtocol.requestCount(for: "/good-audio") == audioRequests,
+          cachedResult.audioURL.pathExtension == "flac",
+          try Data(contentsOf: cachedResult.audioURL) == Data("fLaC".utf8),
+          cachedResult.lyricURL.flatMap({ try? String(contentsOf: $0, encoding: .utf8) })?.contains("cached lyric") == true
     else { throw MusicDownloadCheckError.failed }
 }
 

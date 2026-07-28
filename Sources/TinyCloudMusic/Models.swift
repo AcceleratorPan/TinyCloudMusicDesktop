@@ -872,14 +872,33 @@ enum AudioQuality: String, CaseIterable, Codable, Sendable {
     }
 }
 
+enum VideoQuality: String, CaseIterable, Codable, Sendable {
+    case lowest = "最低"
+    case standard = "标清（480P）"
+    case high = "高清（720P）"
+    case highest = "最高"
+
+    var resolution: Int {
+        switch self {
+        case .lowest: 240
+        case .standard: 480
+        case .high: 720
+        case .highest: 1080
+        }
+    }
+}
+
 struct AppSettings: Equatable, Sendable {
     var appearance: Appearance
     var quality: AudioQuality
     var downloadConcurrency: Int
     var playbackQuality: AudioQuality
+    var videoPlaybackQuality: VideoQuality
+    var videoDownloadQuality: VideoQuality
     var crossfadeDuration: TimeInterval
     var homeSectionIDs: [String]
     var downloadBookmark: Data?
+    var videoDownloadBookmark: Data?
     var imageBookmark: Data?
     var sheetBookmark: Data?
     var cacheBookmark: Data?

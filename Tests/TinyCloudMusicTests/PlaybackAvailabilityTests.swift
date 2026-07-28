@@ -206,8 +206,13 @@ private actor SwitchingPlaybackRepository: MusicRepository {
     func songs(ids: [Int64]) async throws -> [Song] { ids.compactMap { songsByID[$0] } }
     func songQualityDetails(for songID: Int64) async throws -> [SongQualityDetail] { [] }
     func lyrics(for songID: Int64) async throws -> SongLyrics { SongLyrics(lineLyrics: "") }
-    func recordPlaybackStart(for songID: Int64) async throws {}
-    func recordPlayback(for songID: Int64, playedSeconds: Int) async throws {}
+    func recordPlaybackStart(for songID: Int64, sourceID: Int64, totalSeconds: Int) async throws {}
+    func recordPlayback(
+        for songID: Int64,
+        sourceID: Int64,
+        playedSeconds: Int,
+        totalSeconds: Int
+    ) async throws {}
     func homeSection(id: String) async throws -> HomeSection { throw AppError.invalidRoute }
     func search(query: String, scope: SearchScope, offset: Int, limit: Int) async throws -> SearchPage {
         throw AppError.invalidRoute
@@ -245,8 +250,13 @@ private actor QualityRecordingRepository: MusicRepository {
     func songs(ids: [Int64]) async throws -> [Song] { ids.compactMap { songsByID[$0] } }
     func songQualityDetails(for songID: Int64) async throws -> [SongQualityDetail] { [] }
     func lyrics(for songID: Int64) async throws -> SongLyrics { SongLyrics(lineLyrics: "") }
-    func recordPlaybackStart(for songID: Int64) async throws {}
-    func recordPlayback(for songID: Int64, playedSeconds: Int) async throws {}
+    func recordPlaybackStart(for songID: Int64, sourceID: Int64, totalSeconds: Int) async throws {}
+    func recordPlayback(
+        for songID: Int64,
+        sourceID: Int64,
+        playedSeconds: Int,
+        totalSeconds: Int
+    ) async throws {}
     func homeSection(id: String) async throws -> HomeSection { throw AppError.invalidRoute }
     func search(query: String, scope: SearchScope, offset: Int, limit: Int) async throws -> SearchPage {
         throw AppError.invalidRoute

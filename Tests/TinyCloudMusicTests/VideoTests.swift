@@ -34,6 +34,7 @@ private enum VideoCheckError: Error {
 
 private func verifyVideoFixtures() throws {
     let mv = VideoDecoder.mvDetail([
+        "subed": true,
         "data": [
             "id": 42,
             "name": "MV",
@@ -43,11 +44,11 @@ private func verifyVideoFixtures() throws {
             "publishTime": "2026-07-28",
             "playCount": 123,
             "duration": 12_000,
-            "subed": true,
             "brs": ["1080": "url", "480": "url"]
         ]
     ])
     let video = VideoDecoder.videoDetail([
+        "subscribed": true,
         "data": [
             "vid": "00042",
             "title": "Video",
@@ -117,6 +118,7 @@ private func verifyVideoFixtures() throws {
         ]
     ], offset: firstSubscriptions.nextOffset, limit: 3))
     guard mv?.id == 42,
+          mv?.isSubscribed == true,
           mv?.description == "MV description",
           mv?.publishTime == "2026-07-28",
           mv?.playCount == 123,
@@ -124,6 +126,7 @@ private func verifyVideoFixtures() throws {
           mvWithArrayResolutions?.availableResolutions == [720, 480],
           mvWithoutBitrates?.availableResolutions == [1080, 720, 480, 240],
           video?.id == "00042",
+          video?.isSubscribed == true,
           video?.creatorName == "Creator",
           video?.description == "Video description",
           video?.publishTime == "2026-07-27",
@@ -155,7 +158,20 @@ private func verifyVideoValidation() async throws {
           try CommentResource.video(" 00042 ").threadID() == "R_VI_62_00042",
           try CommentResource.video("a/b").encodedThreadID() == "R_VI_62_a%2Fb",
           VideoResolutionPolicy.preferred(1080, available: [720, 480]) == 720,
-          VideoResolutionPolicy.fallback(below: 720, available: [1080, 720, 480]) == 480,
+          VideoResolutionPolicy.preferred(.lowest, available: [1080, 720, 480]) == 480,
+          VideoResolutionPolicy.preferred(.highest, available: [720, 480]) == 720,
+          VideoResolutionPolicy.downloadCandidates(
+              for: .high,
+              available: [1080, 720, 480, 240]
+          ) == [720, 480, 240],
+          VideoResolutionPolicy.downloadCandidates(
+              for: .standard,
+              available: [1080, 240]
+          ) == [480, 240],
+          VideoResolutionPolicy.downloadCandidates(
+              for: .highest,
+              available: []
+          ) == [1080, 720, 480, 240],
           VideoPlaybackURLPolicy.isAllowed(URL(string: "https://vodkgeyttp9.vod.126.net/file.mp4")!),
           !VideoPlaybackURLPolicy.isAllowed(URL(string: "http://vodkgeyttp9.vod.126.net/file.mp4")!),
           !VideoPlaybackURLPolicy.isAllowed(URL(string: "https://vod.126.net.evil.test/file.mp4")!)
@@ -262,16 +278,19 @@ private func verifyVideoValidation() async throws {
 
     let library = LiveVideoLibrary(transport: EAPITransport(cookie: "", musicU: ""))
     var attempts: [Int] = []
-    let fallbackSource = try await library.playbackSource(720, available: [720, 480]) { resolution, _ in
+    let fallbackSource = try await library.playbackSource(
+        1080,
+        available: [1080, 720, 480, 240]
+    ) { resolution, _ in
         attempts.append(resolution)
-        if resolution == 720 { throw VideoLibraryError.unavailable("unavailable") }
+        if resolution > 240 { throw VideoLibraryError.unavailable("unavailable") }
         return VideoPlaybackSource(
             url: URL(string: "https://vod.126.net/file.mp4")!,
             resolution: resolution,
             expiresAt: nil
         )
     }
-    guard attempts == [720, 480], fallbackSource.resolution == 480 else {
+    guard attempts == [1080, 720, 480, 240], fallbackSource.resolution == 240 else {
         throw VideoCheckError.failed
     }
 
@@ -495,6 +514,7 @@ private func verifyVideoCredentialFallback() async throws {
 }
 
 private func verifyVideoFileDownload() async throws {
+    VideoDownloadProtocol.reset()
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [VideoDownloadProtocol.self]
     let directory = FileManager.default.temporaryDirectory.appending(
@@ -502,29 +522,32 @@ private func verifyVideoFileDownload() async throws {
         directoryHint: .isDirectory
     )
     defer { try? FileManager.default.removeItem(at: directory) }
+    let cacheRoot = directory.appending(path: "cache", directoryHint: .isDirectory)
     let progress = VideoDownloadProgress()
     let savedURL = try await VideoFileDownload.download(
         URL(string: "https://vod.126.net/test.mp4")!,
         title: "Test / Video",
         resolution: 720,
         to: directory,
+        cacheIdentity: "video-test-id",
+        cacheRoot: cacheRoot,
         configuration: configuration
     ) { progress.record($0) }
     guard savedURL.pathExtension == "mp4",
-          savedURL.lastPathComponent.contains("Test  Video - 720P"),
+          savedURL.lastPathComponent == "【720P】Test  Video.mp4",
           try Data(contentsOf: savedURL) == VideoDownloadProtocol.payload,
           progress.completed
     else { throw VideoCheckError.failed }
 
-    let duplicateURL = try await VideoFileDownload.download(
-        URL(string: "https://vod.126.net/test.mp4")!,
+    let duplicateURL = try await VideoFileDownload.copyCachedFile(
+        identity: "video-test-id",
         title: "Test / Video",
         resolution: 720,
-        to: directory,
-        configuration: configuration
-    ) { _ in }
-    guard duplicateURL != savedURL,
-          duplicateURL.lastPathComponent.contains("(2)"),
+        cacheRoot: cacheRoot,
+        to: directory
+    )
+    guard duplicateURL == savedURL,
+          VideoDownloadProtocol.requestCount == 1,
           try Data(contentsOf: savedURL) == VideoDownloadProtocol.payload
     else { throw VideoCheckError.failed }
 
@@ -550,6 +573,79 @@ private func verifyVideoFileDownload() async throws {
     }
     let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
     guard files.allSatisfy({ !$0.lastPathComponent.contains("Invalid Video") && $0.pathExtension != "part" })
+    else { throw VideoCheckError.failed }
+}
+
+@MainActor
+private func verifyManagedVideoDownloadFallback() async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [VideoPlaybackCredentialProtocol.self]
+    let session = URLSession(configuration: configuration)
+    defer { session.invalidateAndCancel() }
+    let root = FileManager.default.temporaryDirectory.appending(
+        path: "TinyCloudMusicManagedVideoTests-\(UUID().uuidString)",
+        directoryHint: .isDirectory
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    VideoPlaybackCredentialProtocol.reset(cookie: [
+        .empty,
+        .empty,
+        .success(240, "fallback-240.mp4")
+    ])
+    let transport = EAPITransport(
+        session: session,
+        cookie: "QR_SESSION=qr-session; __csrf=test-csrf",
+        musicU: ""
+    )
+    let manager = MusicDownloadManager(
+        transport: transport,
+        session: session,
+        maximumConcurrentDownloads: 1,
+        resumeStore: MusicDownloadResumeStore(directory: root.appending(path: "resume")),
+        targetAllocator: MusicDownloadTargetAllocator(),
+        cacheRoot: root.appending(path: "cache")
+    )
+    guard manager.enqueue(
+        video: .mv(42),
+        title: "Fallback video",
+        creator: "Artist",
+        availableResolutions: [720, 480, 240],
+        to: root,
+        quality: .high
+    ) else { throw VideoCheckError.failed }
+
+    for _ in 0..<500 {
+        if case .completed? = manager.videoStates["mv-42"] { break }
+        if case .failed? = manager.videoStates["mv-42"] { throw VideoCheckError.failed }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    guard case let .completed(fileURL, nil)? = manager.videoStates["mv-42"],
+          manager.videoItems["mv-42"]?.quality == "240P",
+          fileURL.lastPathComponent == "【240P】Artist - Fallback video.mp4",
+          try Data(contentsOf: fileURL) == VideoDownloadProtocol.payload,
+          VideoPlaybackCredentialProtocol.attempts() == [
+              "cookie:/weapi/song/enhance/play/mv/url",
+              "cookie:/weapi/song/enhance/play/mv/url",
+              "cookie:/weapi/song/enhance/play/mv/url"
+          ]
+    else { throw VideoCheckError.failed }
+
+    VideoPlaybackCredentialProtocol.reset(cookie: [.success(720, "video-720.mp4")])
+    guard manager.enqueue(
+        video: .video("video-id"),
+        title: "Plain video",
+        creator: "Ignored creator",
+        availableResolutions: [720],
+        to: root,
+        quality: .high
+    ) else { throw VideoCheckError.failed }
+    for _ in 0..<500 {
+        if case .completed? = manager.videoStates["video-video-id"] { break }
+        if case .failed? = manager.videoStates["video-video-id"] { throw VideoCheckError.failed }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    guard case let .completed(videoURL, nil)? = manager.videoStates["video-video-id"],
+          videoURL.lastPathComponent == "【720P】Plain video.mp4"
     else { throw VideoCheckError.failed }
 }
 
@@ -585,12 +681,13 @@ private enum VideoCheck {
         try await verifyVideoValidation()
         try await verifyVideoCredentialFallback()
         try await verifyVideoFileDownload()
+        try await verifyManagedVideoDownloadFallback()
         try verifyVideoCommentPage()
         print("MV and video check passed")
     }
 }
 #elseif canImport(Testing)
-@Suite("MV and video")
+@Suite("MV and video", .serialized)
 struct VideoTests {
     @Test("MV and video fixtures retain distinct ID types")
     func fixtureDecoding() throws { try verifyVideoFixtures() }
@@ -603,6 +700,10 @@ struct VideoTests {
 
     @Test("Playback URLs download through the validated CDN path")
     func fileDownload() async throws { try await verifyVideoFileDownload() }
+
+    @Test("Managed video downloads share the queue and try every lower resolution")
+    @MainActor
+    func managedDownloadFallback() async throws { try await verifyManagedVideoDownloadFallback() }
 
     @Test("Read-only comments keep pagination metadata")
     func commentPage() throws { try verifyVideoCommentPage() }
@@ -739,6 +840,21 @@ private final class VideoPlaybackCredentialProtocol: URLProtocol, @unchecked Sen
 
     override func startLoading() {
         let path = request.url?.path ?? ""
+        if request.url?.host == "vod.126.net" {
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: [
+                    "Content-Length": String(VideoDownloadProtocol.payload.count),
+                    "Content-Type": "video/mp4"
+                ]
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: VideoDownloadProtocol.payload)
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
         let cookie = request.value(forHTTPHeaderField: "Cookie") ?? ""
         let profile = cookie.contains("os=Android") ? "vip" : "cookie"
         let stub = Self.state.record(profile: profile, path: path, cookieHeader: cookie)
@@ -787,14 +903,20 @@ private final class VideoPlaybackCredentialProtocol: URLProtocol, @unchecked Sen
 }
 
 private final class VideoDownloadProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var requests = 0
     static let payload = Data([0, 0, 0, 16])
         + Data("ftypisom".utf8)
         + Data(repeating: 0, count: 4)
+
+    static var requestCount: Int { lock.withLock { requests } }
+    static func reset() { lock.withLock { requests = 0 } }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        Self.lock.withLock { Self.requests += 1 }
         let payload = Self.payload(for: request.url?.lastPathComponent ?? "")
         let response = HTTPURLResponse(
             url: request.url!,

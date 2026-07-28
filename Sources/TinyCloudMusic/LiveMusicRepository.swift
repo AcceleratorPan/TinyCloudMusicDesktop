@@ -191,38 +191,27 @@ struct LiveMusicRepository: MusicRepository {
         }
     }
 
-    func recordPlaybackStart(for songID: Int64) async throws {
-        guard songID > 0 else { throw EAPIError.invalidPayload }
-        try await recordPlaybackLog([
-            "action": "startplay",
-            "json": [
-                "id": songID,
-                "type": "song",
-                "mainsite": "1",
-                "mainsiteWeb": "1",
-                "content": "id=0"
-            ]
-        ])
+    func recordPlaybackStart(for songID: Int64, sourceID: Int64, totalSeconds: Int) async throws {
+        try await uploadPlaybackReport(
+            songID: songID,
+            sourceID: sourceID,
+            totalSeconds: totalSeconds,
+            event: .start
+        )
     }
 
-    func recordPlayback(for songID: Int64, playedSeconds: Int) async throws {
-        guard songID > 0, playedSeconds > 0 else { throw EAPIError.invalidPayload }
-        try await recordPlaybackLog([
-            "action": "play",
-            "json": [
-                "download": 0,
-                "end": "playend",
-                "id": songID,
-                "sourceId": "0",
-                "time": playedSeconds,
-                "type": "song",
-                "wifi": 0,
-                "source": "list",
-                "mainsite": "1",
-                "mainsiteWeb": "1",
-                "content": "id=0"
-            ]
-        ])
+    func recordPlayback(
+        for songID: Int64,
+        sourceID: Int64,
+        playedSeconds: Int,
+        totalSeconds: Int
+    ) async throws {
+        try await uploadPlaybackReport(
+            songID: songID,
+            sourceID: sourceID,
+            totalSeconds: totalSeconds,
+            event: .play(seconds: playedSeconds)
+        )
     }
 
     func recordPodcastPlayback(
@@ -248,25 +237,27 @@ struct LiveMusicRepository: MusicRepository {
         )
     }
 
-    private func recordPlaybackLog(_ log: [String: Any]) async throws {
-        let logsJSON = String(
-            decoding: try JSONSerialization.data(withJSONObject: [log], options: [.sortedKeys]),
-            as: UTF8.self
+    private func uploadPlaybackReport(
+        songID: Int64,
+        sourceID: Int64,
+        totalSeconds: Int,
+        event: NCBLPlaybackEvent
+    ) async throws {
+        let credentials = transport.playbackCredentials()
+        let upload = try NCBLPlaybackReport.upload(
+            cookie: credentials.cookie,
+            deviceID: credentials.deviceID,
+            clientID: credentials.clientID,
+            songID: songID,
+            sourceID: sourceID,
+            totalSeconds: totalSeconds,
+            event: event
         )
-        _ = try decodedJSONObject(
-            try await transport.request(
-                EAPIEndpoint(
-                    "/eapi/feedback/weblog",
-                    signing: "/api/feedback/weblog",
-                    host: "https://clientlog.music.163.com"
-                ),
-                json: try compactJSON(["logs": logsJSON]),
-                invalidatesAccountCache: true,
-                macOSClient: true,
-                includesClientHeader: true,
-                retryable: false
-            )
+        try NCBLPlaybackReport.validateResponse(
+            try await transport.requestRaw(upload.request, restrictsRedirects: true),
+            fileName: upload.fileName
         )
+        await transport.invalidateAllCachedResponses()
     }
 
     private func playbackLevel(for songID: Int64, quality: AudioQuality) async throws -> String {

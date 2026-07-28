@@ -248,6 +248,43 @@ enum MusicSheetFiles {
         return isValidPDF(at: url, fileManager: fileManager) ? url : nil
     }
 
+    static func cachedPDF(
+        sheetID: Int64,
+        cacheRoot: URL,
+        fileManager: FileManager = .default
+    ) -> URL? {
+        guard sheetID > 0 else { return nil }
+        let hasSecurityScope = cacheRoot.startAccessingSecurityScopedResource()
+        defer { if hasSecurityScope { cacheRoot.stopAccessingSecurityScopedResource() } }
+        let url = cacheURL(sheetID: sheetID, root: cacheRoot)
+        return isValidPDF(at: url, fileManager: fileManager) ? url : nil
+    }
+
+    static func cachePDF(
+        at source: URL,
+        sheetID: Int64,
+        cacheRoot: URL,
+        fileManager: FileManager = .default
+    ) throws -> URL {
+        guard sheetID > 0, isValidPDF(at: source, fileManager: fileManager) else {
+            throw MusicSheetFileError.invalidPDF
+        }
+        let hasSecurityScope = cacheRoot.startAccessingSecurityScopedResource()
+        defer { if hasSecurityScope { cacheRoot.stopAccessingSecurityScopedResource() } }
+        let destination = cacheURL(sheetID: sheetID, root: cacheRoot)
+        if isValidPDF(at: destination, fileManager: fileManager) { return destination }
+        try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let part = destination.appendingPathExtension("\(UUID().uuidString).part")
+        defer { try? fileManager.removeItem(at: part) }
+        try fileManager.copyItem(at: source, to: part)
+        if fileManager.fileExists(atPath: destination.path) {
+            _ = try fileManager.replaceItemAt(destination, withItemAt: part)
+        } else {
+            try fileManager.moveItem(at: part, to: destination)
+        }
+        return destination
+    }
+
     static func savePDF(
         at source: URL,
         song: Song,
@@ -285,6 +322,12 @@ enum MusicSheetFiles {
             .joined()
             .split(whereSeparator: \Character.isWhitespace)
             .joined(separator: " ")
+    }
+
+    private static func cacheURL(sheetID: Int64, root: URL) -> URL {
+        root.appending(path: "DownloadCache", directoryHint: .isDirectory)
+            .appending(path: "Sheets", directoryHint: .isDirectory)
+            .appending(path: "\(sheetID).pdf", directoryHint: .notDirectory)
     }
 
     private static func isValidPDF(at url: URL, fileManager: FileManager) -> Bool {

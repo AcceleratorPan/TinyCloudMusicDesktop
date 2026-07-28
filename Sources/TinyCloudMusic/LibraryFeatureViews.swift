@@ -246,15 +246,6 @@ struct MusicLibraryView: View {
             }
         }
         .navigationTitle("我的音乐")
-        .toolbar {
-            ToolbarItem {
-                Button { onOpenRoute(.podcastSubscriptions) } label: {
-                    Image(systemName: "star.square")
-                }
-                .help("订阅的播客")
-                .accessibilityLabel("订阅的播客")
-            }
-        }
         .task(id: model.currentUserID) { await load() }
         .task(id: playlistRefreshID) { await refreshPlaylistsIfNeeded() }
         .task(id: player.playbackReportRevision) {
@@ -1593,11 +1584,11 @@ struct DownloadsView: View {
             .padding(.vertical, 12)
             Divider()
 
-            if manager.states.isEmpty {
+            if manager.states.isEmpty, manager.videoStates.isEmpty {
                 ContentUnavailableView(
                     "暂无下载任务",
                     systemImage: "arrow.down.circle",
-                    description: Text("从歌曲菜单开始下载后，这里会显示歌曲、歌手和实时进度。")
+                    description: Text("下载歌曲或视频后，这里会显示媒体信息和实时进度。")
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -1617,6 +1608,18 @@ struct DownloadsView: View {
                                 Divider().padding(.leading, 36)
                             }
                         }
+                        ForEach(orderedVideoIDs, id: \.self) { id in
+                            if let state = manager.videoStates[id], let item = manager.videoItems[id] {
+                                DownloadRow(
+                                    item: item,
+                                    state: state,
+                                    pause: { manager.pauseVideo(id: id) },
+                                    cancel: { manager.cancelVideo(id: id) },
+                                    retry: { manager.retryVideo(id: id) }
+                                )
+                                Divider().padding(.leading, 36)
+                            }
+                        }
                     }
                     .padding(.horizontal, 28)
                     .padding(.vertical, 8)
@@ -1632,21 +1635,28 @@ struct DownloadsView: View {
             + manager.states.keys.filter { !knownIDs.contains($0) }.sorted(by: >)
     }
 
+    private var orderedVideoIDs: [String] {
+        let knownIDs = Set(manager.videoItemOrder)
+        return manager.videoItemOrder.reversed().filter { manager.videoStates[$0] != nil }
+            + manager.videoStates.keys.filter { !knownIDs.contains($0) }.sorted(by: >)
+    }
+
     private var summaryText: String {
-        let completed = manager.states.values.filter(\.isCompletedDownload).count
-        let paused = manager.states.values.reduce(into: 0) { count, state in
+        let allStates = Array(manager.states.values) + manager.videoStates.values
+        let completed = allStates.filter(\.isCompletedDownload).count
+        let paused = allStates.reduce(into: 0) { count, state in
             if case .paused = state { count += 1 }
         }
-        let running = manager.states.values.reduce(into: 0) { count, state in
+        let running = allStates.reduce(into: 0) { count, state in
             if case .running = state { count += 1 }
         }
-        let queued = manager.states.values.filter { $0 == .queued }.count
+        let queued = allStates.filter { $0 == .queued }.count
         let active = running + queued
         var parts: [String] = []
-        if running > 0 { parts.append("\(running)/\(active) 首下载中") }
-        if queued > 0 { parts.append("\(queued) 首等待") }
-        if paused > 0 { parts.append("\(paused) 首已暂停") }
-        if completed > 0 { parts.append("\(completed) 首已完成") }
+        if running > 0 { parts.append("\(running)/\(active) 个下载中") }
+        if queued > 0 { parts.append("\(queued) 个等待") }
+        if paused > 0 { parts.append("\(paused) 个已暂停") }
+        if completed > 0 { parts.append("\(completed) 个已完成") }
         return parts.isEmpty ? "下载任务与文件状态" : parts.joined(separator: " · ")
     }
 
@@ -2186,13 +2196,56 @@ private struct CommentReplySheet: View {
 }
 
 private struct DownloadRow: View {
-    let item: MusicDownloadItem
+    let title: String
+    let subtitle: String
+    let metadata: String
     let state: MusicDownloadState
     let retryAttempt: Int
     let maximumRetryCount: Int
     let pause: () -> Void
     let cancel: () -> Void
     let retry: () -> Void
+
+    init(
+        item: MusicDownloadItem,
+        state: MusicDownloadState,
+        retryAttempt: Int,
+        maximumRetryCount: Int,
+        pause: @escaping () -> Void,
+        cancel: @escaping () -> Void,
+        retry: @escaping () -> Void
+    ) {
+        title = item.title
+        subtitle = item.artist.isEmpty ? "未知歌手" : item.artist
+        let size = item.expectedBytes.map {
+            ByteCountFormatter.string(fromByteCount: $0, countStyle: .file)
+        }
+        metadata = [item.quality, size].compactMap { $0 }.joined(separator: " · ")
+        self.state = state
+        self.retryAttempt = retryAttempt
+        self.maximumRetryCount = maximumRetryCount
+        self.pause = pause
+        self.cancel = cancel
+        self.retry = retry
+    }
+
+    init(
+        item: VideoDownloadItem,
+        state: MusicDownloadState,
+        pause: @escaping () -> Void,
+        cancel: @escaping () -> Void,
+        retry: @escaping () -> Void
+    ) {
+        title = item.title
+        subtitle = item.creator.isEmpty ? "视频" : item.creator
+        metadata = "视频 · \(item.quality)"
+        self.state = state
+        retryAttempt = 0
+        maximumRetryCount = 0
+        self.pause = pause
+        self.cancel = cancel
+        self.retry = retry
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -2202,14 +2255,14 @@ private struct DownloadRow: View {
                 .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(item.title)
+                Text(title)
                     .font(.body.weight(.medium))
                     .lineLimit(1)
-                Text(item.artist.isEmpty ? "未知歌手" : item.artist)
+                Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                Text(downloadMetadataText)
+                Text(metadata)
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -2222,15 +2275,6 @@ private struct DownloadRow: View {
         .padding(.vertical, 8)
         .frame(minHeight: 64)
         .accessibilityElement(children: .contain)
-    }
-
-    private var downloadMetadataText: String {
-        let size = item.expectedBytes.map {
-            ByteCountFormatter.string(fromByteCount: $0, countStyle: .file)
-        }
-        return [item.quality, size]
-            .compactMap { $0 }
-            .joined(separator: " · ")
     }
 
     private var symbol: String {
@@ -2325,7 +2369,7 @@ private struct DownloadRow: View {
                 }
                 .buttonStyle(.borderless)
                 .help("暂停下载")
-                .accessibilityLabel("暂停 \(item.title) 的下载")
+                .accessibilityLabel("暂停 \(title) 的下载")
                 .frame(width: 44, height: 44)
                 .contentShape(Rectangle())
 
@@ -2334,7 +2378,7 @@ private struct DownloadRow: View {
                 }
                 .buttonStyle(.borderless)
                 .help("取消下载")
-                .accessibilityLabel("取消 \(item.title) 的下载")
+                .accessibilityLabel("取消 \(title) 的下载")
                 .frame(width: 44, height: 44)
                 .contentShape(Rectangle())
             }
@@ -2345,7 +2389,7 @@ private struct DownloadRow: View {
                 }
                 .buttonStyle(.borderless)
                 .help("继续下载")
-                .accessibilityLabel("继续 \(item.title) 的下载")
+                .accessibilityLabel("继续 \(title) 的下载")
                 .frame(width: 44, height: 44)
                 .contentShape(Rectangle())
 
@@ -2354,7 +2398,7 @@ private struct DownloadRow: View {
                 }
                 .buttonStyle(.borderless)
                 .help("取消下载")
-                .accessibilityLabel("取消 \(item.title) 的下载")
+                .accessibilityLabel("取消 \(title) 的下载")
                 .frame(width: 44, height: 44)
                 .contentShape(Rectangle())
             }
@@ -2366,7 +2410,7 @@ private struct DownloadRow: View {
             }
             .buttonStyle(.borderless)
             .help("在 Finder 中显示")
-            .accessibilityLabel("在 Finder 中显示 \(item.title)")
+            .accessibilityLabel("在 Finder 中显示 \(title)")
             .frame(width: 44, height: 44)
             .contentShape(Rectangle())
         case .failed, .cancelled:
@@ -2375,7 +2419,7 @@ private struct DownloadRow: View {
             }
             .buttonStyle(.borderless)
             .help("重新下载")
-            .accessibilityLabel("重新下载 \(item.title)")
+            .accessibilityLabel("重新下载 \(title)")
             .frame(width: 44, height: 44)
             .contentShape(Rectangle())
         }

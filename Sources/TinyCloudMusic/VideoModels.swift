@@ -1,5 +1,47 @@
 import Foundation
 
+enum VideoPageResource: Hashable, Sendable {
+    case mv(Int64)
+    case video(String)
+
+    var identity: String {
+        switch self {
+        case let .mv(id): "mv-\(id)"
+        case let .video(id): "video-\(id)"
+        }
+    }
+
+    var commentResource: CommentResource {
+        switch self {
+        case let .mv(id): .mv(id)
+        case let .video(id): .video(id)
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .mv: "MV"
+        case .video: "视频"
+        }
+    }
+}
+
+struct VideoDownloadRequest: Equatable, Sendable {
+    let resource: VideoPageResource
+    let title: String
+    let creator: String
+    let destination: URL
+    let quality: VideoQuality
+    let availableResolutions: [Int]
+}
+
+struct VideoDownloadItem: Identifiable, Equatable, Sendable {
+    let id: String
+    let title: String
+    let creator: String
+    let quality: String
+}
+
 struct MVDetail: Identifiable, Equatable, Sendable {
     let id: Int64
     let title: String
@@ -68,6 +110,13 @@ enum VideoRecommendation: Identifiable, Equatable, Sendable {
     }
 
     var route: Route {
+        switch self {
+        case let .mv(value): .mv(value.id)
+        case let .video(value): .video(value.id)
+        }
+    }
+
+    var resource: VideoPageResource {
         switch self {
         case let .mv(value): .mv(value.id)
         case let .video(value): .video(value.id)
@@ -215,14 +264,46 @@ enum VideoPlaybackURLResolver {
 }
 
 enum VideoResolutionPolicy {
+    static let supported = [1080, 720, 480, 240]
+
+    static func preferred(_ quality: VideoQuality, available: [Int]) -> Int? {
+        let values = normalized(available)
+        switch quality {
+        case .lowest:
+            return values.last ?? quality.resolution
+        case .highest:
+            return values.first ?? quality.resolution
+        case .standard, .high:
+            return preferred(quality.resolution, available: values) ?? quality.resolution
+        }
+    }
+
+    static func downloadCandidates(for quality: VideoQuality, available: [Int]) -> [Int] {
+        let values = normalized(available)
+        switch quality {
+        case .lowest:
+            return [values.last ?? quality.resolution]
+        case .highest:
+            return values.isEmpty ? supported : values
+        case .standard, .high:
+            let lower = values.filter { $0 < quality.resolution }
+            return [quality.resolution] + (values.isEmpty
+                ? supported.filter { $0 < quality.resolution }
+                : lower)
+        }
+    }
+
     static func preferred(_ requested: Int, available: [Int]) -> Int? {
         let values = normalized(available)
         if values.contains(requested) { return requested }
         return values.first(where: { $0 < requested }) ?? values.last
     }
 
-    static func fallback(below resolution: Int, available: [Int]) -> Int? {
-        normalized(available).first { $0 < resolution }
+    static func playbackCandidates(startingAt resolution: Int, available: [Int]) -> [Int] {
+        let values = normalized(available)
+        guard !values.isEmpty else { return [resolution] }
+        let candidates = values.filter { $0 <= resolution }
+        return candidates.isEmpty ? [resolution] : candidates
     }
 
     static func normalized(_ values: [Int]) -> [Int] {
@@ -297,7 +378,7 @@ enum VideoDecoder {
                 ["resolution", "r"].lazy.map { value.int($0) }.first { $0 > 0 }
             }
         let resolutions = VideoResolutionPolicy.normalized(
-            resolutionCandidates.filter { [1080, 720, 480, 240].contains($0) }
+            resolutionCandidates.filter(VideoResolutionPolicy.supported.contains)
         )
         return MVDetail(
             id: summary.id,
@@ -308,8 +389,8 @@ enum VideoDecoder {
             playCount: value.int64("playCount"),
             coverURL: summary.coverURL,
             durationMilliseconds: summary.durationMilliseconds,
-            isSubscribed: value.bool("subed") || value.bool("subscribed"),
-            availableResolutions: resolutions.isEmpty ? [1080, 720, 480, 240] : resolutions
+            isSubscribed: subscriptionStatus(root, detail: value),
+            availableResolutions: resolutions.isEmpty ? VideoResolutionPolicy.supported : resolutions
         )
     }
 
@@ -325,7 +406,7 @@ enum VideoDecoder {
             playCount: value.int64("playTime"),
             coverURL: summary.coverURL,
             durationMilliseconds: summary.durationMilliseconds,
-            isSubscribed: value.bool("subscribed") || value.bool("subed"),
+            isSubscribed: subscriptionStatus(root, detail: value),
             availableResolutions: VideoResolutionPolicy.normalized(
                 value.array("resolutions").map { $0.int("resolution") }
             )
@@ -415,6 +496,12 @@ enum VideoDecoder {
             resolution: returnedResolution > 0 ? returnedResolution : requestedResolution,
             expiresAt: validity.map { now.addingTimeInterval(TimeInterval($0)) }
         )
+    }
+
+    private static func subscriptionStatus(_ root: [String: Any], detail: [String: Any]) -> Bool {
+        ["subed", "subscribed", "isSubscribed"].contains {
+            root.bool($0) || detail.bool($0)
+        }
     }
 
     private static func firstString(_ value: [String: Any], keys: [String]) -> String {

@@ -107,11 +107,13 @@ enum MusicDownloadFiles {
         in directory: URL,
         stem: String,
         audioExtension: String,
+        matchingAudio source: URL? = nil,
         fileManager: FileManager = .default
     ) -> MusicDownloadResult? {
         let audioURL = directory.appending(path: stem).appendingPathExtension(audioExtension)
         guard fileManager.fileExists(atPath: audioURL.path),
-              (try? validatedAudioFileSize(at: audioURL)) != nil
+              (try? validatedAudioFileSize(at: audioURL)) != nil,
+              source.map({ fileManager.contentsEqual(atPath: audioURL.path, andPath: $0.path) }) ?? true
         else { return nil }
         let lyricURL = directory.appending(path: stem).appendingPathExtension("lrc")
         return MusicDownloadResult(
@@ -133,6 +135,42 @@ enum MusicDownloadFiles {
             try? fileManager.removeItem(at: partURL)
             throw error
         }
+    }
+
+    static func stageCachedFile(
+        _ source: URL,
+        at partURL: URL,
+        fileManager: FileManager = .default
+    ) throws {
+        try? fileManager.removeItem(at: partURL)
+        do {
+            try fileManager.copyItem(at: source, to: partURL)
+            guard try fileSize(at: partURL) > 0 else { throw MusicDownloadError.emptyFile }
+        } catch {
+            try? fileManager.removeItem(at: partURL)
+            throw error
+        }
+    }
+
+    static func cachedLyrics(for request: MusicDownloadRequest, cacheRoot: URL) -> String? {
+        let root = lyricCacheURL(for: request, cacheRoot: cacheRoot)
+        let hasSecurityScope = cacheRoot.startAccessingSecurityScopedResource()
+        defer { if hasSecurityScope { cacheRoot.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: root),
+              !data.isEmpty,
+              let lyrics = String(data: data, encoding: .utf8),
+              !lyrics.isEmpty
+        else { return nil }
+        return lyrics
+    }
+
+    static func cacheLyrics(_ lyrics: String, for request: MusicDownloadRequest, cacheRoot: URL) throws {
+        guard !lyrics.isEmpty else { return }
+        let url = lyricCacheURL(for: request, cacheRoot: cacheRoot)
+        let hasSecurityScope = cacheRoot.startAccessingSecurityScopedResource()
+        defer { if hasSecurityScope { cacheRoot.stopAccessingSecurityScopedResource() } }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(lyrics.utf8).write(to: url, options: .atomic)
     }
 
     static func stageData(
@@ -188,6 +226,18 @@ enum MusicDownloadFiles {
 
     private static func fileSize(at url: URL) throws -> Int {
         try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+    }
+
+    private static func lyricCacheURL(for request: MusicDownloadRequest, cacheRoot: URL) -> URL {
+        let source = switch request.source {
+        case .catalog: "catalog"
+        case let .cloud(userID, _): "cloud-\(userID)"
+        }
+        return cacheRoot
+            .appending(path: "DownloadCache", directoryHint: .isDirectory)
+            .appending(path: "Lyrics", directoryHint: .isDirectory)
+            .appending(path: source, directoryHint: .isDirectory)
+            .appending(path: "\(request.songID).lrc", directoryHint: .notDirectory)
     }
 }
 

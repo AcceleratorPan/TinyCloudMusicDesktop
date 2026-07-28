@@ -48,6 +48,7 @@ final class PlayerController {
     private(set) var sourcePlaylistID: Int64?
     private(set) var playbackReportRevision = 0
     private(set) var lastPlaybackReportWasPodcast = false
+    private(set) var playbackReportErrorMessage: String?
 
     @ObservationIgnored private let repository: any MusicRepository
     @ObservationIgnored private var cache: TrackCache
@@ -78,9 +79,11 @@ final class PlayerController {
     @ObservationIgnored private var standbyTransitionDuration: TimeInterval?
     @ObservationIgnored private var standbyPlaybackAvailability: PlaybackAvailability?
     @ObservationIgnored private var qualityBeforeSwitch: String?
-    @ObservationIgnored private var reportedPlaybackGeneration = -1
     @ObservationIgnored private var reportedPodcastPlaybackGeneration = -1
     @ObservationIgnored private var timedPlaybackSongID: Int64?
+    @ObservationIgnored private var timedPlaybackSourceID: Int64?
+    @ObservationIgnored private var timedPlaybackTotalSeconds: Int?
+    @ObservationIgnored private var playbackStartReportTask: Task<Bool, Never>?
     @ObservationIgnored private var playbackTimingStartedAt: ContinuousClock.Instant?
     @ObservationIgnored private var listenedDuration: Duration = .zero
     @ObservationIgnored private var lastAudibleVolume = 0.78
@@ -1376,16 +1379,26 @@ final class PlayerController {
         switch status {
         case .playing:
             state = .playing(songID: songID)
-            startPlaybackTiming(for: songID)
+            let startedNewSession = startPlaybackTiming(for: songID)
             if currentSong?.podcastEpisodeID == nil,
-               reportedPlaybackGeneration != playbackGeneration {
-                reportedPlaybackGeneration = playbackGeneration
-                Task { @MainActor [weak self, repository] in
+               startedNewSession,
+               let sourceID = timedPlaybackSourceID,
+               let totalSeconds = timedPlaybackTotalSeconds {
+                playbackStartReportTask = Task { @MainActor [weak self, repository] in
                     do {
-                        try await repository.recordPlaybackStart(for: songID)
+                        try await repository.recordPlaybackStart(
+                            for: songID,
+                            sourceID: sourceID,
+                            totalSeconds: totalSeconds
+                        )
                         self?.lastPlaybackReportWasPodcast = false
+                        self?.playbackReportErrorMessage = nil
                         self?.playbackReportRevision += 1
-                    } catch {}
+                        return true
+                    } catch {
+                        self?.playbackReportErrorMessage = Self.playbackReportMessage(for: error)
+                        return false
+                    }
                 }
             }
         case .waitingToPlayAtSpecifiedRate:
@@ -1466,12 +1479,17 @@ final class PlayerController {
         state = .idle
     }
 
-    private func startPlaybackTiming(for songID: Int64) {
+    @discardableResult
+    private func startPlaybackTiming(for songID: Int64) -> Bool {
+        let startedNewSession = timedPlaybackSongID != songID
         if timedPlaybackSongID != songID {
             submitPlaybackIfNeeded()
             timedPlaybackSongID = songID
+            timedPlaybackSourceID = currentPlaybackSourceID
+            timedPlaybackTotalSeconds = max(1, Int(duration))
         }
         if playbackTimingStartedAt == nil { playbackTimingStartedAt = ContinuousClock.now }
+        return startedNewSession
     }
 
     private func stopPlaybackTiming() {
@@ -1483,11 +1501,17 @@ final class PlayerController {
     private func submitPlaybackIfNeeded() {
         stopPlaybackTiming()
         let songID = timedPlaybackSongID
+        let sourceID = timedPlaybackSourceID
+        let totalSeconds = timedPlaybackTotalSeconds
+        let startReportTask = playbackStartReportTask
         let seconds = Int(listenedDuration.components.seconds)
         let podcastEpisodeID = currentSong?.podcastEpisodeID
         let positionMilliseconds = Int(position * 1_000)
         let completed = duration > 0 && position >= duration - 1
         timedPlaybackSongID = nil
+        timedPlaybackSourceID = nil
+        timedPlaybackTotalSeconds = nil
+        playbackStartReportTask = nil
         listenedDuration = .zero
         guard let songID, seconds > 0 else { return }
         Task { @MainActor [weak self, repository] in
@@ -1499,13 +1523,38 @@ final class PlayerController {
                         completed: completed
                     )
                     self?.lastPlaybackReportWasPodcast = true
+                    self?.playbackReportErrorMessage = nil
                 } else {
-                    try await repository.recordPlayback(for: songID, playedSeconds: seconds)
+                    guard let sourceID, let totalSeconds else { return }
+                    let startSucceeded = await startReportTask?.value
+                    try await repository.recordPlayback(
+                        for: songID,
+                        sourceID: sourceID,
+                        playedSeconds: seconds,
+                        totalSeconds: totalSeconds
+                    )
                     self?.lastPlaybackReportWasPodcast = false
+                    if startSucceeded != false { self?.playbackReportErrorMessage = nil }
                 }
                 self?.playbackReportRevision += 1
-            } catch {}
+            } catch {
+                self?.playbackReportErrorMessage = Self.playbackReportMessage(for: error)
+            }
         }
+    }
+
+    private static func playbackReportMessage(for error: Error) -> String {
+        if let error = error as? URLError,
+           error.code == .timedOut || error.code == .cannotFindHost || error.code == .dnsLookupFailed {
+            return "无法同步播放记录：请在 Karing、DNS 或代理中放行 clientlog3.music.163.com"
+        }
+        return "播放记录同步失败：\(error.localizedDescription)"
+    }
+
+    private var currentPlaybackSourceID: Int64? {
+        if let sourcePlaylistID, sourcePlaylistID > 0 { return sourcePlaylistID }
+        guard let songID = currentSong?.id, songID > 0 else { return nil }
+        return songID
     }
 
     private func reportPodcastPlaybackIfNeeded(at seconds: TimeInterval) {
@@ -1522,8 +1571,11 @@ final class PlayerController {
                     completed: false
                 )
                 self?.lastPlaybackReportWasPodcast = true
+                self?.playbackReportErrorMessage = nil
                 self?.playbackReportRevision += 1
-            } catch {}
+            } catch {
+                self?.playbackReportErrorMessage = Self.playbackReportMessage(for: error)
+            }
         }
     }
 

@@ -65,6 +65,12 @@ private actor TrackCacheDownloadLimiter {
 final actor TrackCache {
     typealias Download = @Sendable (URLRequest) async throws -> (URL, URLResponse)
 
+    struct CachedFile: Sendable {
+        let url: URL
+        let fileExtension: String
+        let size: Int64
+    }
+
     private struct Key: Hashable {
         let songID: Int64
         let quality: String
@@ -80,6 +86,11 @@ final actor TrackCache {
         let url: URL
         let size: Int64
         let lastUsed: Date
+    }
+
+    private struct Metadata: Codable {
+        let fileExtension: String
+        let size: Int64
     }
 
     nonisolated let directory: URL
@@ -118,8 +129,18 @@ final actor TrackCache {
     }
 
     nonisolated func readyFile(for songID: Int64, quality: String = "standard") -> URL? {
+        readyCachedFile(for: songID, quality: quality)?.url
+    }
+
+    nonisolated func readyCachedFile(for songID: Int64, quality: String = "standard") -> CachedFile? {
         let url = fileURL(for: songID, quality: quality)
-        return Self.isValidAudioFile(url) ? url : nil
+        guard Self.isValidAudioFile(url),
+              let data = try? Data(contentsOf: Self.metadataURL(for: url)),
+              let metadata = try? PropertyListDecoder().decode(Metadata.self, from: data),
+              metadata.size > 0,
+              (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) == metadata.size
+        else { return nil }
+        return CachedFile(url: url, fileExtension: metadata.fileExtension, size: metadata.size)
     }
 
     func cache(songID: Int64, quality: String = "standard", from source: URL) async throws -> URL {
@@ -185,9 +206,40 @@ final actor TrackCache {
     nonisolated func finalize(
         _ downloadedFile: URL,
         for songID: Int64,
-        quality: String = "standard"
+        quality: String = "standard",
+        storedExtension: String? = nil
     ) throws -> URL {
-        try Self.finalize(downloadedFile, for: songID, quality: quality, directory: directory)
+        try Self.finalize(
+            downloadedFile,
+            for: songID,
+            quality: quality,
+            storedExtension: storedExtension,
+            directory: directory
+        )
+    }
+
+    func storeCopy(
+        of source: URL,
+        for songID: Int64,
+        quality: String,
+        fileExtension: String
+    ) throws -> CachedFile {
+        if let cached = readyCachedFile(for: songID, quality: quality) { return cached }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let staged = directory.appending(path: "\(UUID().uuidString).cache-part")
+        defer { try? FileManager.default.removeItem(at: staged) }
+        try FileManager.default.copyItem(at: source, to: staged)
+        _ = try Self.finalize(
+            staged,
+            for: songID,
+            quality: quality,
+            storedExtension: fileExtension,
+            directory: directory
+        )
+        guard let cached = readyCachedFile(for: songID, quality: quality) else {
+            throw TrackCacheError.emptyDownload
+        }
+        return cached
     }
 
     private static func download(
@@ -217,7 +269,13 @@ final actor TrackCache {
                 }
             }
             try Task.checkCancellation()
-            let result = try finalize(temporaryURL, for: songID, quality: quality, directory: directory)
+            let result = try finalize(
+                temporaryURL,
+                for: songID,
+                quality: quality,
+                storedExtension: nil,
+                directory: directory
+            )
             try Task.checkCancellation()
             await limiter.release()
             return result
@@ -231,6 +289,7 @@ final actor TrackCache {
         _ downloadedFile: URL,
         for songID: Int64,
         quality: String,
+        storedExtension: String?,
         directory: URL
     ) throws -> URL {
         let fileManager = FileManager.default
@@ -251,8 +310,21 @@ final actor TrackCache {
             throw TrackCacheError.emptyDownload
         }
 
+        let metadataURL = metadataURL(for: finalURL)
         try? fileManager.removeItem(at: finalURL)
-        try fileManager.moveItem(at: partURL, to: finalURL)
+        try? fileManager.removeItem(at: metadataURL)
+        do {
+            try fileManager.moveItem(at: partURL, to: finalURL)
+            let metadata = Metadata(
+                fileExtension: normalizedExtension(storedExtension ?? finalURL.pathExtension),
+                size: Int64(stagedValues.fileSize ?? 0)
+            )
+            try PropertyListEncoder().encode(metadata).write(to: metadataURL, options: .atomic)
+        } catch {
+            try? fileManager.removeItem(at: finalURL)
+            try? fileManager.removeItem(at: metadataURL)
+            throw error
+        }
         return finalURL
     }
 
@@ -319,6 +391,7 @@ final actor TrackCache {
         for file in files.sorted(by: { $0.lastUsed < $1.lastUsed })
         where total > byteLimit && !protectedPaths.contains(file.url.standardizedFileURL.path) {
             guard (try? FileManager.default.removeItem(at: file.url)) != nil else { continue }
+            try? FileManager.default.removeItem(at: Self.metadataURL(for: file.url))
             total -= file.size
         }
     }
@@ -365,5 +438,14 @@ final actor TrackCache {
         case "lossless", "hires", "jyeffect", "dolby", "sky", "jymaster": "flac"
         default: "mp3"
         }
+    }
+
+    private nonisolated static func metadataURL(for url: URL) -> URL {
+        url.appendingPathExtension("metadata.plist")
+    }
+
+    private nonisolated static func normalizedExtension(_ value: String) -> String {
+        let value = value.lowercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
+        return value.isEmpty ? "mp3" : String(value.prefix(10))
     }
 }

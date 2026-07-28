@@ -38,6 +38,89 @@ enum EAPICheck {
         )
         let decodedEncryptedResponse = try EAPICodec.responseData(encryptedResponse)
         precondition(decodedEncryptedResponse == Data(#"{"code":200,"data":{"value":"encrypted"}}"#.utf8))
+        let ncblBody = Data("1700000000\u{1}_plv\u{1}{\"id\":\"1\"}".utf8)
+        let zstandardFrame = NCBLPlaybackReport.zstandardFrame(ncblBody)
+        precondition(
+            zstandardFrame == hexData(
+                "28b52ffd201ad1000031373030303030303030015f706c76017b226964223a2231227d"
+            )
+        )
+        for size in [0, 256, 128 * 1_024 + 1] {
+            let input = Data(repeating: 0x5a, count: size)
+            try verifyZstandardInterop(
+                NCBLPlaybackReport.zstandardFrame(input),
+                expectedByte: 0x5a,
+                expectedCount: size
+            )
+        }
+        let ncblPayload = try NCBLPlaybackReport.encryptedPayload(
+            meta: Data(#"{"os":"pc"}"#.utf8),
+            body: ncblBody,
+            keyA: hexData("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"),
+            uuid: hexData("00112233445566778899aabbccddeeff"),
+            baseSequence: 0x12345678
+        )
+        precondition(
+            ncblPayload == hexData(
+                "4e43424c03000000550000112233445566778899aabbccddeeffdda20437ce173c34273cb03bffb85db8f3ce53bc2f1334a752303d26890094af78563412785634122900000043430b007549f8dc25e4fea71f7441230078563412c8506c01fee16ea36607ffbdd22e20bfe97bd690631c9442c707e4e11ef43367dcec14"
+            )
+        )
+        let plv = try playbackRecord(
+            try NCBLPlaybackReport.plaintextRecord(
+                cookie: "MUSIC_U=test; appver=3.1.35; versioncode=205293",
+                songID: 17,
+                sourceID: 23,
+                totalSeconds: 300,
+                event: .start,
+                timestampSeconds: 1_700_000_000,
+                eventMilliseconds: 1_700_000_000_000
+            )
+        )
+        precondition(
+            plv.action == "_plv"
+                && plv.json.string("id") == "17"
+                && plv.json.string("sourceId") == "23"
+                && plv.json.int("resource_time") == 300
+                && plv.json.int("app_mode") == 2
+        )
+        let pld = try playbackRecord(
+            try NCBLPlaybackReport.plaintextRecord(
+                cookie: "MUSIC_U=test; appver=3.1.35; versioncode=205293",
+                songID: 17,
+                sourceID: 23,
+                totalSeconds: 300,
+                event: .play(seconds: 42),
+                timestampSeconds: 1_700_000_000,
+                eventMilliseconds: 1_700_000_000_000
+            )
+        )
+        precondition(
+            pld.action == "_pld"
+                && pld.json.int("time") == 42
+                && pld.json.int("realtime") == 42
+                && pld.json.string("end") == "interrupt"
+                && pld.json.int("app_mode") == 1
+        )
+        try NCBLPlaybackReport.validateResponse(
+            Data(#"{"code":200,"data":{"successfiles":["op_test"]},"message":""}"#.utf8),
+            fileName: "op_test"
+        )
+        do {
+            try NCBLPlaybackReport.validateResponse(
+                Data(#"{"code":200,"data":{"successfiles":[]},"message":""}"#.utf8),
+                fileName: "op_test"
+            )
+            preconditionFailure("NCBL responses must confirm the uploaded file")
+        } catch EAPIError.service(200, _) {
+        }
+        do {
+            try NCBLPlaybackReport.validateResponse(
+                Data(#"{"code":201,"data":{"successfiles":["op_test"]}}"#.utf8),
+                fileName: "op_test"
+            )
+            preconditionFailure("NCBL responses must use the exact success code")
+        } catch EAPIError.service(201, _) {
+        }
         let fallbackCookie = EAPICookieHeader.value(
             cookie: "MUSIC_A=session; __csrf=csrf",
             musicU: "",
@@ -115,10 +198,33 @@ enum EAPICheck {
         )
         let defaultCredentials = EAPITransport().credentials()
         precondition(defaultCredentials.cookie.isEmpty && defaultCredentials.musicU.isEmpty)
-        let storedCredentials = try SessionCredentials(cookie: "stored=value", musicU: "stored-token")
-        let injectedCredentials = EAPITransport(loadStoredCredentials: { storedCredentials }).credentials()
-        precondition(injectedCredentials.cookie == "stored=value")
-        precondition(injectedCredentials.musicU == "stored-token")
+        let storedCredentials = try SessionCredentials(
+            cookie: "MUSIC_U=stored-token",
+            musicU: "stored-vip-token",
+            deviceID: "stored-device"
+        )
+        let storedTransport = EAPITransport(loadStoredCredentials: { storedCredentials })
+        let injectedCredentials = storedTransport.credentials()
+        precondition(injectedCredentials.cookie == "MUSIC_U=stored-token")
+        precondition(injectedCredentials.musicU == "stored-vip-token")
+        let playbackCredentials = storedTransport.playbackCredentials()
+        precondition(playbackCredentials.deviceID == "stored-device")
+        precondition(playbackCredentials.clientID == storedTransport.playbackCredentials().clientID)
+        let playbackUpload = try NCBLPlaybackReport.upload(
+            cookie: playbackCredentials.cookie,
+            deviceID: playbackCredentials.deviceID,
+            clientID: playbackCredentials.clientID,
+            songID: 17,
+            sourceID: 23,
+            totalSeconds: 300,
+            event: .start
+        )
+        let playbackCookie = playbackUpload.request.value(forHTTPHeaderField: "Cookie") ?? ""
+        precondition(NeteaseCookieHeader.value(named: "deviceId", in: playbackCookie) == "stored-device")
+        precondition(
+            NeteaseCookieHeader.value(named: "WNMCID", in: playbackCookie)
+                == playbackCredentials.clientID
+        )
         let explicitCredentials = EAPITransport(
             cookie: "",
             musicU: nil,
@@ -144,5 +250,44 @@ enum EAPICheck {
         Data(stride(from: 0, to: value.count, by: 2).map { offset in
             UInt8(value.dropFirst(offset).prefix(2), radix: 16)!
         })
+    }
+
+    private static func playbackRecord(_ data: Data) throws -> (action: String, json: [String: Any]) {
+        let fields = String(decoding: data, as: UTF8.self)
+            .split(separator: "\u{1}", maxSplits: 2, omittingEmptySubsequences: false)
+        guard fields.count == 3,
+              let json = try JSONSerialization.jsonObject(with: Data(fields[2].utf8)) as? [String: Any]
+        else { throw EAPIError.invalidPayload }
+        return (String(fields[1]), json)
+    }
+
+    private static func verifyZstandardInterop(
+        _ frame: Data,
+        expectedByte: UInt8,
+        expectedCount: Int
+    ) throws {
+        let process = Process()
+        let input = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = [
+            "node", "-e",
+            """
+            const fs = require('node:fs'), zlib = require('node:zlib')
+            if (typeof zlib.zstdDecompressSync !== 'function') process.exit(2)
+            const decoded = zlib.zstdDecompressSync(fs.readFileSync(0))
+            const byte = Number(process.argv[1]), count = Number(process.argv[2])
+            process.exit(decoded.length === count && decoded.every(value => value === byte) ? 0 : 1)
+            """,
+            String(expectedByte), String(expectedCount)
+        ]
+        process.standardInput = input
+        try process.run()
+        input.fileHandleForWriting.write(frame)
+        try input.fileHandleForWriting.close()
+        process.waitUntilExit()
+        precondition(
+            process.terminationStatus == 0,
+            "Node zstdDecompressSync must decode the Swift Zstandard frame"
+        )
     }
 }

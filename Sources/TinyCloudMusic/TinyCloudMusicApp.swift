@@ -32,10 +32,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         installMainMenu()
 
         let environment = ProcessInfo.processInfo.environment
+        func credentialOverride(_ name: String) -> String? {
+            guard let value = environment[name],
+                  !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { return nil }
+            return value
+        }
         let credentialStore = CredentialStore(service: CredentialStore.productionService)
         let transport = EAPITransport(
-            cookie: environment["TINYCLOUDMUSIC_COOKIE"],
-            musicU: environment["TINYCLOUDMUSIC_MUSIC_U"],
+            cookie: credentialOverride("TINYCLOUDMUSIC_COOKIE"),
+            musicU: credentialOverride("TINYCLOUDMUSIC_MUSIC_U"),
             loadStoredCredentials: { try? credentialStore.load() }
         )
         let repository = LiveMusicRepository(transport: transport)

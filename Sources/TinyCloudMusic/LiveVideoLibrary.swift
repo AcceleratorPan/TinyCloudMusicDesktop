@@ -199,15 +199,10 @@ struct LiveVideoLibrary: Sendable {
         available: [Int],
         load: (Int, VIPRequesterCredential) async throws -> VideoPlaybackSource
     ) async throws -> VideoPlaybackSource {
-        let available = available.isEmpty ? [preferredResolution] : available
-        guard let resolution = VideoResolutionPolicy.preferred(preferredResolution, available: available) else {
-            throw VideoLibraryError.unavailable("服务未返回可用清晰度")
-        }
-
-        var resolutions = [resolution]
-        if let fallback = VideoResolutionPolicy.fallback(below: resolution, available: available) {
-            resolutions.append(fallback)
-        }
+        let resolutions = VideoResolutionPolicy.playbackCandidates(
+            startingAt: preferredResolution,
+            available: available
+        )
         let credentials = transport.credentials()
         let hasVIPRequester = !credentials.musicU.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let cookie = credentials.cookie.trimmingCharacters(in: .whitespacesAndNewlines)

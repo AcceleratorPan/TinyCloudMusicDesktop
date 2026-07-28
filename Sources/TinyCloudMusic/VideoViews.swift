@@ -2,32 +2,6 @@ import AppKit
 import AVKit
 import SwiftUI
 
-enum VideoPageResource: Hashable, Sendable {
-    case mv(Int64)
-    case video(String)
-
-    var identity: String {
-        switch self {
-        case let .mv(id): "mv-\(id)"
-        case let .video(id): "video-\(id)"
-        }
-    }
-
-    var commentResource: CommentResource {
-        switch self {
-        case let .mv(id): .mv(id)
-        case let .video(id): .video(id)
-        }
-    }
-
-    var displayName: String {
-        switch self {
-        case .mv: "MV"
-        case .video: "视频"
-        }
-    }
-}
-
 private enum VideoPageDetail: Equatable {
     case mv(MVDetail)
     case video(VideoDetail)
@@ -244,8 +218,11 @@ private enum VideoHomeSection: String, CaseIterable {
 struct VideoRecommendationsView: View {
     let library: LiveVideoLibrary
     let currentUserID: Int64?
+    let subscriptionOverrides: [VideoPageResource: Bool]
+    let subscriptionRevision: Int
     let onOpenRoute: (Route) -> Void
     let onLogin: () -> Void
+    let onSubscriptionsLoaded: ([VideoPageResource]) -> Void
 
     @State private var selectedSection = VideoHomeSection.recommendations
     @State private var recommendations: [VideoRecommendation] = []
@@ -348,7 +325,8 @@ struct VideoRecommendationsView: View {
     private var items: [VideoRecommendation] {
         switch selectedSection {
         case .recommendations: recommendations
-        case .subscriptions: subscriptionPage?.items ?? []
+        case .subscriptions:
+            (subscriptionPage?.items ?? []).filter { subscriptionOverrides[$0.resource] != false }
         }
     }
 
@@ -357,7 +335,8 @@ struct VideoRecommendationsView: View {
     }
 
     private var loadIdentity: String {
-        "\(selectedSection.rawValue):\(currentUserID.map(String.init) ?? "guest")"
+        let revision = selectedSection == .subscriptions ? subscriptionRevision : 0
+        return "\(selectedSection.rawValue):\(currentUserID.map(String.init) ?? "guest"):\(revision)"
     }
 
     private var loadingLabel: String {
@@ -410,6 +389,7 @@ struct VideoRecommendationsView: View {
                     let loaded = try await library.subscriptions()
                     try Task.checkCancellation()
                     guard generation == requestGeneration else { return }
+                    onSubscriptionsLoaded(loaded.items.map(\.resource))
                     subscriptionPage = loaded
                 }
             } catch is CancellationError {
@@ -445,6 +425,7 @@ struct VideoRecommendationsView: View {
                   selectedSection == .subscriptions,
                   subscriptionPage?.nextOffset == current.nextOffset
             else { return }
+            onSubscriptionsLoaded(next.items.map(\.resource))
             subscriptionPage = current.appending(next)
         } catch is CancellationError {
         } catch {
@@ -475,23 +456,26 @@ struct VideoDetailView: View {
     let knowledgeLibrary: LiveMusicKnowledgeLibrary?
     @Bindable var songPlayer: PlayerController
     let currentUserID: Int64?
+    @Bindable var downloadManager: MusicDownloadManager
     let downloadDirectory: URL
+    let playbackQuality: VideoQuality
+    let downloadQuality: VideoQuality
+    let subscriptionOverride: Bool?
     let onOpenUser: (Int64) -> Void
     let onOpenRelated: (Route) -> Void
     let onLogin: () -> Void
-    let onDownloadCompleted: (URL) -> Void
+    let onDownloadQueued: () -> Void
+    let onSubscriptionChanged: (VideoPageResource, Bool) -> Void
 
     @State private var detail: VideoPageDetail?
     @State private var related: [VideoRecommendation] = []
     @State private var detailError: String?
     @State private var relatedError: String?
     @State private var playbackError: String?
-    @State private var downloadError: String?
     @State private var subscriptionError: String?
     @State private var selectedResolution = 720
+    @State private var unavailableResolutions: Set<Int> = []
     @State private var isPreparingPlayback = false
-    @State private var isDownloading = false
-    @State private var downloadProgress: Double?
     @State private var isUpdatingSubscription = false
     @State private var videoPlayer: AVPlayer?
     @State private var selectedSection = VideoDetailSection.knowledge
@@ -499,7 +483,6 @@ struct VideoDetailView: View {
     @State private var detailTask: Task<Void, Never>?
     @State private var relatedTask: Task<Void, Never>?
     @State private var playbackTask: Task<Void, Never>?
-    @State private var downloadTask: Task<Void, Never>?
     @State private var subscriptionTask: Task<Void, Never>?
     @State private var playerStatusObservation: NSKeyValueObservation?
     @State private var playerFailureObserver: NSObjectProtocol?
@@ -521,8 +504,8 @@ struct VideoDetailView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 24) {
                         mediaArea(detail)
-                        controls(detail)
                         metadata(detail)
+                        controls
                         switch selectedSection {
                         case .knowledge:
                             knowledgeSection(detail)
@@ -548,7 +531,7 @@ struct VideoDetailView: View {
         .onDisappear(perform: stopAndCancel)
     }
 
-    private func controls(_ detail: VideoPageDetail) -> some View {
+    private var controls: some View {
         HStack(spacing: 10) {
             Picker("视频内容", selection: $selectedSection) {
                 ForEach(visibleSections, id: \.self) { section in
@@ -558,57 +541,6 @@ struct VideoDetailView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .frame(width: 360)
-
-            Spacer()
-
-            if !detail.availableResolutions.isEmpty {
-                Picker("清晰度", selection: $selectedResolution) {
-                    ForEach(detail.availableResolutions, id: \.self) { value in
-                        Text("\(value)P").tag(value)
-                    }
-                }
-                .pickerStyle(.menu)
-                .fixedSize()
-                .frame(minHeight: 44)
-                .disabled(isPreparingPlayback || isDownloading)
-                .onChange(of: selectedResolution) { previousResolution, _ in
-                    guard videoPlayer != nil, !isPreparingPlayback else { return }
-                    startPlayback(revertingTo: previousResolution)
-                }
-            }
-
-            Button(action: startDownload) {
-                if isDownloading {
-                    ProgressView()
-                        .controlSize(.small)
-                        .frame(width: 18, height: 18)
-                } else {
-                    Image(systemName: "arrow.down.circle")
-                        .frame(width: 18, height: 18)
-                }
-            }
-            .buttonStyle(.bordered)
-            .frame(minWidth: 44, minHeight: 44)
-            .disabled(isDownloading || isPreparingPlayback)
-            .help(isDownloading ? "正在下载" : "下载视频")
-            .accessibilityLabel(isDownloading ? "正在下载视频" : "下载视频")
-            .accessibilityValue(downloadProgress.map { "\(Int($0 * 100))%" } ?? "")
-
-            Button(action: toggleSubscription) {
-                Group {
-                    if isUpdatingSubscription {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: detail.isSubscribed ? "star.fill" : "star")
-                    }
-                }
-                .frame(width: 18, height: 18)
-            }
-            .buttonStyle(.bordered)
-            .frame(minWidth: 44, minHeight: 44)
-            .disabled(isUpdatingSubscription)
-            .help(detail.isSubscribed ? "取消收藏" : "收藏")
-            .accessibilityLabel(detail.isSubscribed ? "取消收藏" : "收藏")
         }
     }
 
@@ -671,9 +603,71 @@ struct VideoDetailView: View {
             Label(resource.displayName, systemImage: "play.rectangle")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-            Text(detail.title)
-                .font(.title2.weight(.semibold))
-                .textSelection(.enabled)
+            HStack(spacing: 10) {
+                Text(detail.title)
+                    .font(.title2.weight(.semibold))
+                    .textSelection(.enabled)
+                Spacer(minLength: 6)
+                if !selectableResolutions.isEmpty {
+                    Picker("清晰度", selection: $selectedResolution) {
+                        ForEach(selectableResolutions, id: \.self) { value in
+                            Text("\(value)P").tag(value)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .fixedSize()
+                    .frame(minHeight: 44)
+                    .disabled(isPreparingPlayback)
+                    .onChange(of: selectedResolution) { previousResolution, _ in
+                        guard videoPlayer != nil, !isPreparingPlayback else { return }
+                        startPlayback(revertingTo: previousResolution)
+                    }
+                }
+                Button(action: toggleDownload) {
+                    Group {
+                        switch videoDownloadState {
+                        case let .running(progress):
+                            if let progress {
+                                ProgressView(value: progress).frame(width: 18)
+                            } else {
+                                ProgressView().controlSize(.small)
+                            }
+                        case .queued:
+                            ProgressView().controlSize(.small)
+                        case .paused:
+                            Image(systemName: "play.circle")
+                        case .completed:
+                            Image(systemName: "checkmark.circle.fill")
+                        case .failed:
+                            Image(systemName: "exclamationmark.circle")
+                        case .cancelled, .none:
+                            Image(systemName: "arrow.down.circle")
+                        }
+                    }
+                    .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.bordered)
+                .frame(minWidth: 44, minHeight: 44)
+                .help(videoDownloadHelp)
+                .accessibilityLabel(videoDownloadHelp)
+                .accessibilityValue(videoDownloadProgress.map { "\(Int($0 * 100))%" } ?? "")
+
+                Button(action: toggleSubscription) {
+                    Group {
+                        if isUpdatingSubscription {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: detail.isSubscribed ? "star.fill" : "star")
+                        }
+                    }
+                    .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.bordered)
+                .frame(minWidth: 44, minHeight: 44)
+                .disabled(isUpdatingSubscription)
+                .help(detail.isSubscribed ? "取消收藏" : "收藏")
+                .accessibilityLabel(detail.isSubscribed ? "取消收藏" : "收藏")
+            }
             HStack(spacing: 8) {
                 if !detail.creator.isEmpty {
                     Label(detail.creator, systemImage: "person")
@@ -687,8 +681,8 @@ struct VideoDetailView: View {
                     .font(.caption)
                     .foregroundStyle(.red)
             }
-            if let downloadError {
-                Label(downloadError, systemImage: "exclamationmark.triangle")
+            if case let .failed(message)? = videoDownloadState {
+                Label(message, systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.red)
             }
@@ -741,7 +735,6 @@ struct VideoDetailView: View {
         detailTask?.cancel()
         relatedTask?.cancel()
         playbackTask?.cancel()
-        downloadTask?.cancel()
         subscriptionTask?.cancel()
         clearPlaybackObservers()
         videoPlayer?.pause()
@@ -752,26 +745,21 @@ struct VideoDetailView: View {
         detailError = nil
         relatedError = nil
         playbackError = nil
-        downloadError = nil
         subscriptionError = nil
+        unavailableResolutions = []
         isPreparingPlayback = false
-        isDownloading = false
-        downloadProgress = nil
         isUpdatingSubscription = false
         selectedSection = .knowledge
         detailTask = Task { @MainActor in
             do {
-                let loaded: VideoPageDetail = switch resource {
-                case let .mv(id): .mv(try await library.mvDetail(id: id))
-                case let .video(id): .video(try await library.videoDetail(id: id))
-                }
+                let loaded = try await loadDetail()
                 try Task.checkCancellation()
                 guard generation == requestGeneration else { return }
                 detail = loaded
                 selectedResolution = VideoResolutionPolicy.preferred(
-                    720,
+                    playbackQuality,
                     available: loaded.availableResolutions
-                ) ?? 720
+                ) ?? playbackQuality.resolution
             } catch is CancellationError {
             } catch {
                 guard generation == requestGeneration else { return }
@@ -813,6 +801,7 @@ struct VideoDetailView: View {
     private func startPlayback(revertingTo previousResolution: Int? = nil) {
         guard let detail, !isPreparingPlayback else { return }
         let requestGeneration = generation
+        let requestedResolution = selectedResolution
         let previousPlayer = videoPlayer
         playbackTask?.cancel()
         playbackError = nil
@@ -837,6 +826,9 @@ struct VideoDetailView: View {
                 previousPlayer?.pause()
                 previousPlayer?.replaceCurrentItem(with: nil)
                 videoPlayer = player
+                if source.resolution != requestedResolution {
+                    unavailableResolutions.insert(requestedResolution)
+                }
                 selectedResolution = source.resolution
                 installPlaybackObservers(for: player, generation: requestGeneration)
                 if shouldPlay { player.play() }
@@ -926,41 +918,27 @@ struct VideoDetailView: View {
     }
 
     @MainActor
-    private func startDownload() {
-        guard let detail, !isDownloading else { return }
-        let requestGeneration = generation
-        downloadTask?.cancel()
-        downloadError = nil
-        downloadProgress = nil
-        isDownloading = true
-        downloadTask = Task { @MainActor in
-            do {
-                let source = try await playbackSource(for: detail)
-                try Task.checkCancellation()
-                guard generation == requestGeneration else { return }
-                let savedURL = try await VideoFileDownload.download(
-                    source.url,
-                    title: detail.title,
-                    resolution: source.resolution,
-                    to: downloadDirectory
-                ) { progress in
-                    Task { @MainActor in
-                        guard generation == requestGeneration else { return }
-                        downloadProgress = progress
-                    }
-                }
-                try Task.checkCancellation()
-                guard generation == requestGeneration else { return }
-                onDownloadCompleted(savedURL)
-            } catch is CancellationError {
-            } catch {
-                guard generation == requestGeneration else { return }
-                downloadError = error.localizedDescription
+    private func toggleDownload() {
+        let id = resource.identity
+        switch videoDownloadState {
+        case .queued, .running:
+            downloadManager.pauseVideo(id: id)
+        case .paused:
+            downloadManager.retryVideo(id: id)
+        case .completed:
+            break
+        case .failed, .cancelled, .none:
+            guard let detail else { return }
+            if downloadManager.enqueue(
+                video: resource,
+                title: detail.title,
+                creator: detail.creator,
+                availableResolutions: detail.availableResolutions,
+                to: downloadDirectory,
+                quality: downloadQuality
+            ) {
+                onDownloadQueued()
             }
-            guard generation == requestGeneration else { return }
-            isDownloading = false
-            downloadProgress = nil
-            downloadTask = nil
         }
     }
 
@@ -984,6 +962,7 @@ struct VideoDetailView: View {
                 try Task.checkCancellation()
                 guard generation == requestGeneration else { return }
                 self.detail = detail.settingSubscribed(desired)
+                onSubscriptionChanged(resource, desired)
             } catch is CancellationError {
             } catch {
                 guard generation == requestGeneration else { return }
@@ -1004,10 +983,11 @@ struct VideoDetailView: View {
     }
 
     private func loadDetail() async throws -> VideoPageDetail {
-        switch resource {
+        let loaded: VideoPageDetail = switch resource {
         case let .mv(id): .mv(try await library.mvDetail(id: id))
         case let .video(id): .video(try await library.videoDetail(id: id))
         }
+        return subscriptionOverride.map { loaded.settingSubscribed($0) } ?? loaded
     }
 
     @MainActor
@@ -1016,12 +996,37 @@ struct VideoDetailView: View {
         detailTask?.cancel()
         relatedTask?.cancel()
         playbackTask?.cancel()
-        downloadTask?.cancel()
         subscriptionTask?.cancel()
         clearPlaybackObservers()
         videoPlayer?.pause()
         videoPlayer?.replaceCurrentItem(with: nil)
         videoPlayer = nil
+    }
+
+    private var selectableResolutions: [Int] {
+        detail?.availableResolutions.filter { !unavailableResolutions.contains($0) } ?? []
+    }
+
+    private var videoDownloadState: MusicDownloadState? {
+        downloadManager.videoStates[resource.identity]
+    }
+
+    private var videoDownloadProgress: Double? {
+        switch videoDownloadState {
+        case let .running(progress), let .paused(progress): progress
+        default: nil
+        }
+    }
+
+    private var videoDownloadHelp: String {
+        switch videoDownloadState {
+        case .queued: "暂停等待中的视频下载"
+        case .running: "暂停视频下载"
+        case .paused: "继续视频下载"
+        case .completed: "视频已下载"
+        case let .failed(message): "视频下载失败：\(message)"
+        case .cancelled, .none: "下载视频"
+        }
     }
 }
 

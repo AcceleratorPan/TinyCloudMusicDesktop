@@ -50,8 +50,13 @@ private actor MutablePlaylistRepository: MusicRepository {
         throw AppError.invalidRoute
     }
     func songQualityDetails(for songID: Int64) async throws -> [SongQualityDetail] { [] }
-    func recordPlaybackStart(for songID: Int64) async throws {}
-    func recordPlayback(for songID: Int64, playedSeconds: Int) async throws {}
+    func recordPlaybackStart(for songID: Int64, sourceID: Int64, totalSeconds: Int) async throws {}
+    func recordPlayback(
+        for songID: Int64,
+        sourceID: Int64,
+        playedSeconds: Int,
+        totalSeconds: Int
+    ) async throws {}
 }
 
 @MainActor
@@ -341,6 +346,24 @@ struct CoreTests {
         #expect(model.searchState.query.isEmpty)
     }
 
+    @Test("Video playback and download qualities persist independently")
+    @MainActor
+    func videoQualitySettings() {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let model = AppModel(repository: FixtureMusicRepository(), defaults: defaults)
+        #expect(model.settings.videoPlaybackQuality == .high)
+        #expect(model.settings.videoDownloadQuality == .high)
+        #expect(model.downloadFolderURL.lastPathComponent == "歌曲")
+        #expect(model.videoDownloadFolderURL.lastPathComponent == "视频")
+        #expect(model.downloadFolderURL != model.videoDownloadFolderURL)
+
+        model.setVideoPlaybackQuality(.lowest)
+        model.setVideoDownloadQuality(.highest)
+        let restored = AppModel(repository: FixtureMusicRepository(), defaults: defaults)
+        #expect(restored.settings.videoPlaybackQuality == .lowest)
+        #expect(restored.settings.videoDownloadQuality == .highest)
+    }
+
     @Test("Playlist mutation keeps stale detail visible and revalidates it")
     @MainActor
     func playlistMutationRevalidation() async throws {
@@ -422,6 +445,28 @@ struct CoreTests {
             containsSong: true
         )
         #expect(!model.likedSongIDs.contains(2))
+    }
+
+    @Test("Video subscription mutations update detail state and list revision")
+    @MainActor
+    func videoSubscriptionMutationUpdatesSharedState() {
+        let model = AppModel(
+            repository: FixtureMusicRepository(),
+            defaults: UserDefaults(suiteName: UUID().uuidString)!
+        )
+        let mv = VideoPageResource.mv(42)
+        let video = VideoPageResource.video("video-42")
+
+        model.recordVideoSubscriptions([mv, video])
+        #expect(model.videoSubscriptionOverrides[mv] == true)
+        #expect(model.videoSubscriptionOverrides[video] == true)
+
+        model.videoSubscriptionDidChange(video, subscribed: false)
+        #expect(model.videoSubscriptionOverrides[video] == false)
+        #expect(model.videoSubscriptionRevision == 1)
+
+        model.recordVideoSubscriptions([video])
+        #expect(model.videoSubscriptionOverrides[video] == false)
     }
 
     @Test("Playlist summaries expire by TTL and reject stale refreshes")

@@ -732,7 +732,12 @@ private struct MusicSheetPreviewView: View {
     private func downloadSheet() {
         guard !isDownloading, case let .loaded(preview) = phase else { return }
         let destination = model.sheetFolderURL
-        if MusicSheetFiles.existingPDF(song: song, sheet: sheet, in: destination) != nil {
+        if let existing = MusicSheetFiles.existingPDF(song: song, sheet: sheet, in: destination) {
+            _ = try? MusicSheetFiles.cachePDF(
+                at: existing,
+                sheetID: sheet.id,
+                cacheRoot: model.cacheFolderURL
+            )
             downloadCompleted = true
             model.showToast("琴谱已存在，已跳过下载")
             return
@@ -749,22 +754,34 @@ private struct MusicSheetPreviewView: View {
             }
             do {
                 let source: URL
-                switch preview {
-                case let .images(images):
-                    source = try await MusicSheetPDFLoader.makePDF(from: images)
-                    temporaryFile = source
-                case let .pdf(url):
-                    if let pdfFile {
-                        source = pdfFile
-                    } else {
-                        source = try await MusicSheetPDFLoader.download(url)
+                if let cached = MusicSheetFiles.cachedPDF(
+                    sheetID: sheet.id,
+                    cacheRoot: model.cacheFolderURL
+                ) {
+                    source = cached
+                } else {
+                    switch preview {
+                    case let .images(images):
+                        source = try await MusicSheetPDFLoader.makePDF(from: images)
                         temporaryFile = source
+                    case let .pdf(url):
+                        if let pdfFile {
+                            source = pdfFile
+                        } else {
+                            source = try await MusicSheetPDFLoader.download(url)
+                            temporaryFile = source
+                        }
+                    case .unsupported:
+                        return
                     }
-                case .unsupported:
-                    return
                 }
-                let result = try MusicSheetFiles.savePDF(
+                let cached = try MusicSheetFiles.cachePDF(
                     at: source,
+                    sheetID: sheet.id,
+                    cacheRoot: model.cacheFolderURL
+                )
+                let result = try MusicSheetFiles.savePDF(
+                    at: cached,
                     song: song,
                     sheet: sheet,
                     to: destination
@@ -814,12 +831,31 @@ private struct MusicSheetPreviewView: View {
         zoom = 1
         phase = .loading
         do {
+            if let cached = MusicSheetFiles.cachedPDF(
+                sheetID: sheet.id,
+                cacheRoot: model.cacheFolderURL
+            ) ?? MusicSheetFiles.existingPDF(song: song, sheet: sheet, in: model.sheetFolderURL) {
+                let file = try MusicSheetFiles.cachePDF(
+                    at: cached,
+                    sheetID: sheet.id,
+                    cacheRoot: model.cacheFolderURL
+                )
+                pdfFile = file
+                phase = .loaded(.pdf(file))
+                return
+            }
             let preview = try await library.sheetPreview(id: sheet.id)
             try Task.checkCancellation()
             phase = .loaded(preview)
             if case let .pdf(url) = preview {
                 do {
-                    let file = try await MusicSheetPDFLoader.download(url)
+                    let temporary = try await MusicSheetPDFLoader.download(url)
+                    defer { MusicSheetTemporaryFiles.remove(temporary) }
+                    let file = try MusicSheetFiles.cachePDF(
+                        at: temporary,
+                        sheetID: sheet.id,
+                        cacheRoot: model.cacheFolderURL
+                    )
                     try Task.checkCancellation()
                     pdfFile = file
                 } catch is CancellationError {

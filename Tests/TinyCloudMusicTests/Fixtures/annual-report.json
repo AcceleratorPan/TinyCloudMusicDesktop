@@ -80,14 +80,14 @@
       "newSingerDetailDto": {
         "artistId": 401,
         "artistName": "New Artist",
-        "artistPicUrl": "//p1.music.126.net/example/new-artist.jpg",
+        "imageUrl": "//p1.music.126.net/example/new-artist.jpg",
         "songCount": 5
       },
       "top5SingerDetails": [
         {
           "singerId": "402",
           "singerName": "Frequent Artist",
-          "singerPicUrl": "https://p1.music.126.net/example/frequent-artist.jpg"
+          "singerCoverUrl": "http://p1.music.126.net/example/frequent-artist.jpg"
         }
       ]
     },

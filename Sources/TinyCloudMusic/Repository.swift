@@ -73,8 +73,13 @@ protocol MusicRepository: Sendable {
     func playbackSource(for songID: Int64, level: String) async throws -> PlaybackSource
     func songQualityDetails(for songID: Int64) async throws -> [SongQualityDetail]
     func heartModeSongs(seedSongID: Int64, playlistID: Int64?, startSongID: Int64) async throws -> [Song]
-    func recordPlaybackStart(for songID: Int64) async throws
-    func recordPlayback(for songID: Int64, playedSeconds: Int) async throws
+    func recordPlaybackStart(for songID: Int64, sourceID: Int64, totalSeconds: Int) async throws
+    func recordPlayback(
+        for songID: Int64,
+        sourceID: Int64,
+        playedSeconds: Int,
+        totalSeconds: Int
+    ) async throws
     func recordPodcastPlayback(for episodeID: Int64, positionMilliseconds: Int, completed: Bool) async throws
 }
 
@@ -253,9 +258,14 @@ struct FixtureMusicRepository: MusicRepository {
         throw AppError.unavailable("演示数据不包含音质信息")
     }
 
-    func recordPlaybackStart(for songID: Int64) async throws {}
+    func recordPlaybackStart(for songID: Int64, sourceID: Int64, totalSeconds: Int) async throws {}
 
-    func recordPlayback(for songID: Int64, playedSeconds: Int) async throws {}
+    func recordPlayback(
+        for songID: Int64,
+        sourceID: Int64,
+        playedSeconds: Int,
+        totalSeconds: Int
+    ) async throws {}
 }
 
 private enum Fixture {

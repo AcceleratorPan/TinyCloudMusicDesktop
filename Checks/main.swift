@@ -168,13 +168,21 @@ let settings = AppSettings(
     quality: .lossless,
     downloadConcurrency: 3,
     playbackQuality: .best,
+    videoPlaybackQuality: .lowest,
+    videoDownloadQuality: .highest,
     crossfadeDuration: 3,
     homeSectionIDs: ["home"],
     downloadBookmark: nil,
+    videoDownloadBookmark: nil,
     imageBookmark: nil,
+    sheetBookmark: nil,
     cacheBookmark: nil
 )
 expect(settings.quality == .lossless && settings.playbackQuality == .best, "Playback and download qualities must be independent")
+expect(
+    settings.videoPlaybackQuality == .lowest && settings.videoDownloadQuality == .highest,
+    "Video playback and download qualities must be independent"
+)
 expect(settings.downloadConcurrency == 3, "Download concurrency must persist in app settings")
 expect(settings.crossfadeDuration == 3, "Crossfade duration must persist in app settings")
 expect(settings.imageBookmark == settings.downloadBookmark, "Images must follow the song folder by default")

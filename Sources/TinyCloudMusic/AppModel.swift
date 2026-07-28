@@ -82,6 +82,8 @@ final class AppModel {
     var interactionMessage: String?
     var likedSongIDs: Set<Int64> = []
     var playlistSubscriptionOverrides: [Int64: Bool] = [:]
+    var videoSubscriptionOverrides: [VideoPageResource: Bool] = [:]
+    private(set) var videoSubscriptionRevision = 0
     var albumSubscriptionOverrides: [Int64: Bool] = [:]
     var artistFollowOverrides: [Int64: Bool] = [:]
     var userFollowOverrides: [Int64: Bool] = [:]
@@ -165,14 +167,22 @@ final class AppModel {
             quality: AudioQuality(rawValue: defaults.string(forKey: "quality") ?? "") ?? .standard,
             downloadConcurrency: min(max(storedDownloadConcurrency, 1), 5),
             playbackQuality: AudioQuality(rawValue: defaults.string(forKey: "playbackQuality") ?? "") ?? .standard,
+            videoPlaybackQuality: VideoQuality(
+                rawValue: defaults.string(forKey: "videoPlaybackQuality") ?? ""
+            ) ?? .high,
+            videoDownloadQuality: VideoQuality(
+                rawValue: defaults.string(forKey: "videoDownloadQuality") ?? ""
+            ) ?? .high,
             crossfadeDuration: min(max(storedCrossfadeDuration, 0), 12),
             homeSectionIDs: storedSections.isEmpty ? defaultSections : storedSections,
             downloadBookmark: defaults.data(forKey: "downloadBookmark"),
+            videoDownloadBookmark: defaults.data(forKey: "videoDownloadBookmark"),
             imageBookmark: defaults.data(forKey: "imageBookmark"),
             sheetBookmark: defaults.data(forKey: "sheetBookmark"),
             cacheBookmark: defaults.data(forKey: "cacheBookmark")
         )
         downloads?.setMaximumConcurrentDownloads(settings.downloadConcurrency)
+        downloads?.configure(cacheRoot: cacheFolderURL)
         rebuildHomeSlots()
     }
 
@@ -672,6 +682,18 @@ final class AppModel {
         showToast("播放音质已保存")
     }
 
+    func setVideoPlaybackQuality(_ quality: VideoQuality) {
+        settings.videoPlaybackQuality = quality
+        defaults.set(quality.rawValue, forKey: "videoPlaybackQuality")
+        showToast("视频播放清晰度已保存")
+    }
+
+    func setVideoDownloadQuality(_ quality: VideoQuality) {
+        settings.videoDownloadQuality = quality
+        defaults.set(quality.rawValue, forKey: "videoDownloadQuality")
+        showToast("视频下载清晰度已保存")
+    }
+
     func setCrossfadeDuration(_ seconds: TimeInterval) {
         let seconds = min(max(seconds, 0), 12)
         settings.crossfadeDuration = seconds
@@ -704,9 +726,21 @@ final class AppModel {
             settings.downloadBookmark = bookmark
             defaults.set(bookmark, forKey: "downloadBookmark")
             settingsMessage = nil
-            showToast("下载位置已保存")
+            showToast("音频下载位置已保存")
         } catch {
-            settingsMessage = "无法保存下载目录权限"
+            settingsMessage = "无法保存音频下载目录权限"
+        }
+    }
+
+    func setVideoDownloadFolder(_ url: URL) {
+        do {
+            let bookmark = try folderBookmark(for: url)
+            settings.videoDownloadBookmark = bookmark
+            defaults.set(bookmark, forKey: "videoDownloadBookmark")
+            settingsMessage = nil
+            showToast("视频下载位置已保存")
+        } catch {
+            settingsMessage = "无法保存视频下载目录权限"
         }
     }
 
@@ -715,6 +749,7 @@ final class AppModel {
             let bookmark = try folderBookmark(for: url)
             settings.cacheBookmark = bookmark
             defaults.set(bookmark, forKey: "cacheBookmark")
+            downloads?.configure(cacheRoot: cacheFolderURL)
             settingsMessage = nil
             showToast("缓存位置已保存")
         } catch {
@@ -866,6 +901,18 @@ final class AppModel {
         }
     }
 
+    func recordVideoSubscriptions(_ resources: [VideoPageResource]) {
+        for resource in resources where videoSubscriptionOverrides[resource] == nil {
+            videoSubscriptionOverrides[resource] = true
+        }
+    }
+
+    func videoSubscriptionDidChange(_ resource: VideoPageResource, subscribed: Bool) {
+        videoSubscriptionOverrides[resource] = subscribed
+        videoSubscriptionRevision &+= 1
+        showToast(subscribed ? "\(resource.displayName)已收藏" : "已取消收藏\(resource.displayName)")
+    }
+
     func setAlbumSubscribed(_ id: Int64, subscribed: Bool) {
         guard let library else { return }
         Task { @MainActor [weak self] in
@@ -910,6 +957,10 @@ final class AppModel {
 
     var downloadPath: String {
         downloadFolderURL.path(percentEncoded: false)
+    }
+
+    var videoDownloadPath: String {
+        videoDownloadFolderURL.path(percentEncoded: false)
     }
 
     var imagePath: String {
@@ -1036,6 +1087,8 @@ final class AppModel {
 
         likedSongIDs = []
         playlistSubscriptionOverrides.removeAll()
+        videoSubscriptionOverrides.removeAll()
+        videoSubscriptionRevision = 0
         albumSubscriptionOverrides.removeAll()
         artistFollowOverrides.removeAll()
         userFollowOverrides.removeAll()
@@ -1068,6 +1121,11 @@ final class AppModel {
     var downloadFolderURL: URL {
         customDownloadFolderURL ?? defaultDownloadRoot
             .appending(path: "歌曲", directoryHint: .isDirectory)
+    }
+
+    var videoDownloadFolderURL: URL {
+        resolveFolder(settings.videoDownloadBookmark) ?? defaultDownloadRoot
+            .appending(path: "视频", directoryHint: .isDirectory)
     }
 
     var imageFolderURL: URL {

@@ -577,6 +577,466 @@ enum XEAPICodec {
     }
 }
 
+enum NCBLPlaybackEvent: Sendable {
+    case start
+    case play(seconds: Int)
+
+    fileprivate var action: String {
+        switch self {
+        case .start: "_plv"
+        case .play: "_pld"
+        }
+    }
+}
+
+struct NCBLPlaybackUpload: Sendable {
+    let request: URLRequest
+    let fileName: String
+}
+
+enum NCBLPlaybackReport {
+    private static let rsaPublicKeyDER = Data([
+        0x30, 0x28, 0x02, 0x21, 0x00,
+        0xfd, 0x90, 0xbd, 0x46, 0x6f, 0xf9, 0xbc, 0x8a,
+        0x3f, 0xec, 0x2f, 0xbc, 0xf2, 0x63, 0xb9, 0x0d,
+        0x5c, 0x56, 0x48, 0x79, 0xfa, 0x5d, 0x7a, 0xab,
+        0x89, 0xb3, 0x1c, 0x1d, 0x5c, 0xb4, 0x13, 0x9d,
+        0x02, 0x03, 0x01, 0x00, 0x01
+    ])
+    private static let frameSize = 0x8000
+    private static let windowsSystemVersion = "Microsoft-Windows-10-Professional-build-19045-64bit"
+
+    static func upload(
+        cookie: String,
+        deviceID: String,
+        clientID: String,
+        songID: Int64,
+        sourceID: Int64,
+        totalSeconds: Int,
+        event: NCBLPlaybackEvent,
+        now: Date = Date()
+    ) throws -> NCBLPlaybackUpload {
+        guard songID > 0, sourceID > 0, totalSeconds > 0 else { throw EAPIError.invalidPayload }
+        if case let .play(seconds) = event, seconds <= 0 { throw EAPIError.invalidPayload }
+
+        let context = try Context(
+            cookie: cookie,
+            deviceID: deviceID,
+            clientID: clientID,
+            now: now
+        )
+        let record = try plaintextRecord(
+            context: context,
+            songID: songID,
+            sourceID: sourceID,
+            totalSeconds: totalSeconds,
+            event: event,
+            timestampSeconds: Int64(now.timeIntervalSince1970),
+            eventMilliseconds: Int64(now.timeIntervalSince1970 * 1_000)
+        )
+        let payload = try encryptedPayload(meta: context.metaJSON, body: record)
+        let boundary = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let fileName = "op_\(Int.random(in: 10_000...99_999))_0_\(UInt32.random(in: 1...UInt32.max))"
+        let prefix = "--\(boundary)\r\n"
+            + "Content-Disposition: form-data; name=\"file\"; filename=\"\(fileName)\"\r\n"
+            + "Content-Type: multipart/form-data\r\n\r\n"
+        var body = Data(prefix.utf8)
+        body.append(payload)
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+
+        var request = URLRequest(
+            url: URL(string: "https://clientlog3.music.163.com/api/clientlog/encrypt/upload?multiupload=true")!,
+            timeoutInterval: 15
+        )
+        request.httpMethod = "POST"
+        request.httpBody = body
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.setValue("https://music.163.com/di", forHTTPHeaderField: "Referer")
+        request.setValue(
+            "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/\(context.version)",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("gzip,deflate", forHTTPHeaderField: "Accept-Encoding")
+        request.setValue("zh-CN,zh;q=0.8", forHTTPHeaderField: "Accept-Language")
+        request.setValue(context.cookieHeader, forHTTPHeaderField: "Cookie")
+        return NCBLPlaybackUpload(request: request, fileName: fileName)
+    }
+
+    static func validateResponse(_ data: Data, fileName: String) throws {
+        let root = try decodedJSONObject(data)
+        guard root.int("code") == 200,
+              (root.object("data")["successfiles"] as? [String])?.contains(fileName) == true
+        else {
+            let message = root.string("message")
+            throw EAPIError.service(
+                code: root.int("code"),
+                message: message.isEmpty ? "播放记录未被服务器接收" : message
+            )
+        }
+    }
+
+    static func plaintextRecord(
+        cookie: String,
+        songID: Int64,
+        sourceID: Int64,
+        totalSeconds: Int,
+        event: NCBLPlaybackEvent,
+        timestampSeconds: Int64,
+        eventMilliseconds: Int64
+    ) throws -> Data {
+        try plaintextRecord(
+            context: Context(cookie: cookie, now: Date(timeIntervalSince1970: TimeInterval(timestampSeconds))),
+            songID: songID,
+            sourceID: sourceID,
+            totalSeconds: totalSeconds,
+            event: event,
+            timestampSeconds: timestampSeconds,
+            eventMilliseconds: eventMilliseconds
+        )
+    }
+
+    static func encryptedPayload(
+        meta: Data,
+        body: Data,
+        keyA suppliedKey: Data? = nil,
+        uuid suppliedUUID: Data? = nil,
+        baseSequence suppliedBaseSequence: UInt32? = nil
+    ) throws -> Data {
+        var keyA = try suppliedKey ?? randomData(count: 32)
+        guard keyA.count == 32 else { throw EAPIError.invalidPayload }
+        if keyA[0] >= 0xa3 { keyA[0] = 0xa2 }
+        let keyB = try rsaWrap(keyA)
+
+        var uuid = try suppliedUUID ?? randomData(count: 16)
+        guard uuid.count == 16 else { throw EAPIError.invalidPayload }
+        if suppliedUUID == nil {
+            uuid[6] = (uuid[6] & 0x0f) | 0x40
+            uuid[8] = (uuid[8] & 0x3f) | 0x80
+        }
+        let nonce = Data(uuid.prefix(12))
+        let counter = readUInt32LE(uuid, offset: 12) >> 2
+        let baseSequence = try suppliedBaseSequence ?? UInt32(randomUInt16())
+        let metaCipher = try chacha20(key: keyB, counter: counter, nonce: nonce, input: meta)
+        guard metaCipher.count <= Int(UInt16.max),
+              74 + metaCipher.count <= Int(UInt16.max)
+        else { throw EAPIError.invalidPayload }
+
+        var metaBlock = Data()
+        metaBlock.appendLittleEndian(UInt16(0x4343))
+        metaBlock.appendLittleEndian(UInt16(metaCipher.count))
+        metaBlock.append(metaCipher)
+
+        let compressed = zstandardFrame(body)
+        var trailing = Data()
+        var sequence = baseSequence
+        var offset = 0
+        repeat {
+            let end = min(offset + frameSize, compressed.count)
+            let frame = Data(compressed[offset..<end])
+            let cipher = try chacha20(key: keyA, counter: counter, nonce: nonce, input: frame)
+            guard cipher.count <= Int(UInt16.max) else { throw EAPIError.invalidPayload }
+            trailing.appendLittleEndian(UInt16(cipher.count))
+            trailing.appendLittleEndian(sequence)
+            trailing.append(cipher)
+            sequence &+= 1
+            offset = end
+        } while offset < compressed.count
+        guard trailing.count <= Int(UInt32.max) else { throw EAPIError.invalidPayload }
+
+        var header = Data("NCBL".utf8)
+        header.appendLittleEndian(UInt32(3))
+        header.appendLittleEndian(UInt16(70 + metaBlock.count))
+        header.append(uuid)
+        header.append(keyB)
+        header.appendLittleEndian(baseSequence)
+        header.appendLittleEndian(sequence &- 1)
+        header.appendLittleEndian(UInt32(trailing.count))
+        guard header.count == 70 else { throw EAPIError.invalidPayload }
+        return header + metaBlock + trailing
+    }
+
+    static func zstandardFrame(_ input: Data) -> Data {
+        // ponytail: playback records are tiny; raw Zstandard blocks avoid shipping a codec.
+        var output = Data([0x28, 0xb5, 0x2f, 0xfd])
+        let contentSize = UInt64(input.count)
+        switch contentSize {
+        case ..<256:
+            output.append(0x20)
+            output.append(UInt8(contentSize))
+        case ..<65_792:
+            output.append(0x60)
+            output.appendLittleEndian(UInt16(contentSize - 256))
+        case ...UInt64(UInt32.max):
+            output.append(0xa0)
+            output.appendLittleEndian(UInt32(contentSize))
+        default:
+            output.append(0xe0)
+            output.appendLittleEndian(contentSize)
+        }
+
+        let maximumBlockSize = 128 * 1_024
+        var offset = 0
+        repeat {
+            let count = min(maximumBlockSize, input.count - offset)
+            let isLast = offset + count == input.count
+            let blockHeader = (UInt32(count) << 3) | (isLast ? 1 : 0)
+            output.append(UInt8(truncatingIfNeeded: blockHeader))
+            output.append(UInt8(truncatingIfNeeded: blockHeader >> 8))
+            output.append(UInt8(truncatingIfNeeded: blockHeader >> 16))
+            if count > 0 {
+                let start = input.index(input.startIndex, offsetBy: offset)
+                output.append(contentsOf: input[start..<input.index(start, offsetBy: count)])
+            }
+            offset += count
+        } while offset < input.count
+        return output
+    }
+
+    private static func plaintextRecord(
+        context: Context,
+        songID: Int64,
+        sourceID: Int64,
+        totalSeconds: Int,
+        event: NCBLPlaybackEvent,
+        timestampSeconds: Int64,
+        eventMilliseconds: Int64
+    ) throws -> Data {
+        let source = String(sourceID)
+        let common: [String: Any] = [
+            "mode": "circulation", "download": 0, "alg": "", "status": "front",
+            "id": String(songID), "type": "song", "is_listentogether": 0,
+            "source": "list", "is_heart": 0, "resource_ratio": "",
+            "resource_time": totalSeconds, "bitrate": 320, "bitrate_level": "exhigh",
+            "vipType": context.vipType, "file": 4, "rightSource": 0,
+            "sourceId": source, "sourcetype": "track", "libra_abt": "",
+            "channel": context.channel, "curStartChannel": ""
+        ]
+        var json = common
+        switch event {
+        case .start:
+            json["musiceffect_id"] = ""
+            json["app_mode"] = 2
+            json["fee"] = 1
+            json["_addrefer"] = "[F:63][\(eventMilliseconds)#933#\(context.version)#\(context.versionCode)#c9156c3][e][2][23][cell_pc_songlist_song:2|page_pc_songlist_songflow|page_mine_like_music][\(songID):song:x:x|:::|\(source):list::]"
+            json["_multirefers"] = [
+                "[F:26][s][18][_ai]", "[F:26][s][12][_ai]",
+                "[F:63][\(eventMilliseconds)#933#\(context.version)#\(context.versionCode)#c9156c3][e][2][8][cell_pc_main_tab_entrance:6|page_pc_main_tab][我喜欢的音乐:spm::|:::]",
+                "[F:26][s][5][_ai]", "[F:26][s][0][_ai]"
+            ]
+        case let .play(seconds):
+            let played = min(seconds, totalSeconds)
+            json["time"] = played
+            json["realtime"] = played
+            json["musiceffect_id"] = "1001"
+            json["app_mode"] = 1
+            json["lyriceffect"] = "default"
+            json["displayMode"] = "classic"
+            json["fee"] = 8
+            json["end"] = "interrupt"
+            json["_addrefer"] = "[F:63][\(eventMilliseconds)#616#\(context.version)#\(context.versionCode)#c9156c3][e][2][92][btn_pc_cover_play|cell_pc_songlist_song:6|page_pc_songlist_songflow|page_mine_like_music][:::|\(songID):song:x:x|:::|\(source):list::]"
+            json["_multirefers"] = [
+                "[F:26][s][87][_ai]", "[F:26][s][81][_ai]", "[F:26][s][75][_ai]",
+                "[F:26][s][69][_ai]", "[F:26][s][63][_ai]"
+            ]
+        }
+        let jsonData = try compactJSON(json)
+        guard let jsonString = String(data: jsonData, encoding: .utf8) else {
+            throw EAPIError.invalidPayload
+        }
+        return Data("\(timestampSeconds)\u{1}\(event.action)\u{1}\(jsonString)".utf8)
+    }
+
+    private static func rsaWrap(_ keyA: Data) throws -> Data {
+        let attributes: [CFString: Any] = [
+            kSecAttrKeyType: kSecAttrKeyTypeRSA,
+            kSecAttrKeyClass: kSecAttrKeyClassPublic,
+            kSecAttrKeySizeInBits: 256
+        ]
+        var error: Unmanaged<CFError>?
+        guard let key = SecKeyCreateWithData(
+            rsaPublicKeyDER as CFData,
+            attributes as CFDictionary,
+            &error
+        ), SecKeyIsAlgorithmSupported(key, .encrypt, .rsaEncryptionRaw),
+              let wrapped = SecKeyCreateEncryptedData(
+                  key,
+                  .rsaEncryptionRaw,
+                  keyA as CFData,
+                  &error
+              ) as Data?, wrapped.count == 32
+        else { throw EAPIError.invalidPayload }
+        return wrapped
+    }
+
+    private static func chacha20(
+        key: Data,
+        counter: UInt32,
+        nonce: Data,
+        input: Data
+    ) throws -> Data {
+        guard key.count == 32, nonce.count == 12 else { throw EAPIError.invalidPayload }
+        let key = [UInt8](key)
+        let nonce = [UInt8](nonce)
+        let input = [UInt8](input)
+        var output = input
+        for offset in stride(from: 0, to: input.count, by: 64) {
+            var state: [UInt32] = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574]
+            for index in 0..<8 { state.append(readUInt32LE(key, offset: index * 4)) }
+            state.append(counter &+ UInt32(offset / 64))
+            for index in 0..<3 { state.append(readUInt32LE(nonce, offset: index * 4)) }
+            var work = state
+            for _ in 0..<10 {
+                quarterRound(&work, 0, 4, 8, 12)
+                quarterRound(&work, 1, 5, 9, 13)
+                quarterRound(&work, 2, 6, 10, 14)
+                quarterRound(&work, 3, 7, 11, 15)
+                quarterRound(&work, 0, 5, 10, 15)
+                quarterRound(&work, 1, 6, 11, 12)
+                quarterRound(&work, 2, 7, 8, 13)
+                quarterRound(&work, 3, 4, 9, 14)
+            }
+            var stream = [UInt8]()
+            stream.reserveCapacity(64)
+            for index in 0..<16 {
+                let word = work[index] &+ state[index]
+                stream += [
+                    UInt8(truncatingIfNeeded: word), UInt8(truncatingIfNeeded: word >> 8),
+                    UInt8(truncatingIfNeeded: word >> 16), UInt8(truncatingIfNeeded: word >> 24)
+                ]
+            }
+            for index in offset..<min(offset + 64, input.count) {
+                output[index] ^= stream[index - offset]
+            }
+        }
+        return Data(output)
+    }
+
+    private static func quarterRound(
+        _ state: inout [UInt32],
+        _ a: Int,
+        _ b: Int,
+        _ c: Int,
+        _ d: Int
+    ) {
+        state[a] &+= state[b]
+        state[d] = (state[d] ^ state[a]).rotatedLeft(16)
+        state[c] &+= state[d]
+        state[b] = (state[b] ^ state[c]).rotatedLeft(12)
+        state[a] &+= state[b]
+        state[d] = (state[d] ^ state[a]).rotatedLeft(8)
+        state[c] &+= state[d]
+        state[b] = (state[b] ^ state[c]).rotatedLeft(7)
+    }
+
+    private static func randomData(count: Int) throws -> Data {
+        var data = Data(count: count)
+        let status = data.withUnsafeMutableBytes {
+            SecRandomCopyBytes(kSecRandomDefault, count, $0.baseAddress!)
+        }
+        guard status == errSecSuccess else { throw EAPIError.invalidPayload }
+        return data
+    }
+
+    private static func randomUInt16() throws -> UInt16 {
+        readUInt16LE(try randomData(count: 2), offset: 0)
+    }
+
+    private static func randomHex(bytes: Int) throws -> String {
+        try randomData(count: bytes).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func readUInt16LE(_ data: Data, offset: Int) -> UInt16 {
+        let bytes = [UInt8](data)
+        return UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
+    }
+
+    private static func readUInt32LE(_ data: Data, offset: Int) -> UInt32 {
+        readUInt32LE([UInt8](data), offset: offset)
+    }
+
+    private static func readUInt32LE(_ bytes: [UInt8], offset: Int) -> UInt32 {
+        UInt32(bytes[offset])
+            | (UInt32(bytes[offset + 1]) << 8)
+            | (UInt32(bytes[offset + 2]) << 16)
+            | (UInt32(bytes[offset + 3]) << 24)
+    }
+
+    private struct Context {
+        let version: String
+        let versionCode: String
+        let channel: String
+        let vipType: String
+        let metaJSON: Data
+        let cookieHeader: String
+
+        init(
+            cookie: String,
+            deviceID suppliedDeviceID: String = "",
+            clientID suppliedClientID: String = "",
+            now: Date
+        ) throws {
+            func value(_ name: String, fallback: String = "") -> String {
+                let result = NeteaseCookieHeader.value(named: name, in: cookie)
+                return result.isEmpty ? fallback : result
+            }
+
+            let token = value("MUSIC_U")
+            guard !token.isEmpty else {
+                throw EAPIError.service(code: 401, message: "播放记录上报缺少登录凭据")
+            }
+            let version = value("appver", fallback: "3.1.35")
+            let versionCode = value("versioncode", fallback: "205293")
+            let nsm = value("WEVNSM", fallback: "1.0.0")
+            let cid = try value("WNMCID").isEmpty
+                ? (suppliedClientID.isEmpty
+                    ? "\(NCBLPlaybackReport.randomHex(bytes: 3)).\(Int64(now.timeIntervalSince1970 * 1_000)).01.0"
+                    : suppliedClientID)
+                : value("WNMCID")
+            let channel = value("channel", fallback: "netease")
+            let sessionID = value("JSESSIONID-WYYY")
+            let nmtid = value("NMTID")
+            let csrf = value("__csrf")
+            let nnid = value("_ntes_nnid", fallback: ",")
+            let nuid = value("_ntes_nuid")
+            let clientSign = value("clientSign")
+            let deviceID = value(
+                "deviceId",
+                fallback: value("sDeviceId", fallback: suppliedDeviceID)
+            )
+            let model = value("mode", fallback: value("mobilename"))
+            let systemVersion = value("osver", fallback: NCBLPlaybackReport.windowsSystemVersion)
+            let appVersion = "\(version).\(versionCode)"
+            let fields = [
+                ("JSESSIONID-WYYY", sessionID), ("MUSIC_U", token), ("NMTID", nmtid),
+                ("WEVNSM", nsm), ("WNMCID", cid), ("__csrf", csrf),
+                ("__remember_me", "true"), ("_iuqxldmzr_", "33"), ("_ntes_nnid", nnid),
+                ("_ntes_nuid", nuid), ("appver", appVersion), ("channel", channel),
+                ("clientSign", clientSign), ("deviceId", deviceID), ("mode", model),
+                ("ntes_kaola_ad", "1"), ("os", "pc"), ("osver", systemVersion)
+            ]
+            self.version = version
+            self.versionCode = versionCode
+            self.channel = channel
+            vipType = value("vipType")
+            cookieHeader = fields.map { "\($0.0)=\($0.1)" }.joined(separator: "; ")
+            metaJSON = try compactJSON(Dictionary(uniqueKeysWithValues: fields.filter { $0.0 != "__remember_me" }))
+        }
+    }
+}
+
+private extension UInt32 {
+    func rotatedLeft(_ count: UInt32) -> UInt32 {
+        (self << count) | (self >> (32 - count))
+    }
+}
+
+private extension Data {
+    mutating func appendLittleEndian<T: FixedWidthInteger>(_ value: T) {
+        var value = value.littleEndian
+        Swift.withUnsafeBytes(of: &value) { append(contentsOf: $0) }
+    }
+}
+
 enum VIPRequesterCredential: Equatable, Sendable {
     case independentMusicU
     case storedCookie
@@ -591,6 +1051,7 @@ struct EAPITransport: Sendable {
     private let loadStoredCredentials: @Sendable () -> SessionCredentials?
     private let weapiSecretKeyOverride: String?
     private let responseCache: EAPIResponseCache
+    private let playbackClientID: String
 
     init(
         session: URLSession? = nil,
@@ -610,7 +1071,6 @@ struct EAPITransport: Sendable {
             configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
             configuration.timeoutIntervalForRequest = 15
             configuration.timeoutIntervalForResource = 60
-            configuration.waitsForConnectivity = true
             self.session = URLSession(configuration: configuration)
 
             let authenticationConfiguration = URLSessionConfiguration.ephemeral
@@ -625,6 +1085,7 @@ struct EAPITransport: Sendable {
         self.loadStoredCredentials = loadStoredCredentials
         weapiSecretKeyOverride = weapiSecretKey
         self.responseCache = responseCache
+        playbackClientID = "\(UUID().uuidString.prefix(6).lowercased()).\(Int64(Date().timeIntervalSince1970 * 1_000)).01.0"
     }
 
     func registerAnonymous() async throws -> NeteaseAuthenticationContext {
@@ -977,8 +1438,9 @@ struct EAPITransport: Sendable {
         return data
     }
 
-    func requestRaw(_ request: URLRequest) async throws -> Data {
-        let (data, response) = try await session.data(for: request)
+    func requestRaw(_ request: URLRequest, restrictsRedirects: Bool = false) async throws -> Data {
+        let delegate = restrictsRedirects ? SensitiveHeaderRedirectDelegate(originalURL: request.url!) : nil
+        let (data, response) = try await session.data(for: request, delegate: delegate)
         guard let http = response as? HTTPURLResponse else { throw EAPIError.invalidResponse }
         guard (200..<300).contains(http.statusCode) else { throw EAPIError.http(http.statusCode) }
         return data
@@ -1009,6 +1471,11 @@ struct EAPITransport: Sendable {
     func credentials() -> (cookie: String, musicU: String) {
         let credentials = resolvedCredentials()
         return (credentials.cookie, credentials.musicU)
+    }
+
+    func playbackCredentials() -> (cookie: String, deviceID: String, clientID: String) {
+        let credentials = resolvedCredentials()
+        return (credentials.cookie, credentials.deviceID, playbackClientID)
     }
 
     func withVIPRequesterFallback<Value>(

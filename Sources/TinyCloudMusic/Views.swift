@@ -195,6 +195,17 @@ struct RootView: View {
         .onChange(of: model.settings.crossfadeDuration) { _, duration in
             player.setCrossfadeDuration(duration)
         }
+        .onChange(of: player.playbackReportErrorMessage) { _, message in
+            guard let message else { return }
+            NSAccessibility.post(
+                element: NSApplication.shared,
+                notification: .announcementRequested,
+                userInfo: [
+                    .announcement: message,
+                    .priority: NSAccessibilityPriorityLevel.high.rawValue
+                ]
+            )
+        }
         .overlay(alignment: .top) {
             InteractionToast(message: model.interactionMessage)
                 .padding(.top, 12)
@@ -264,8 +275,11 @@ private struct PrimaryContentView: View {
                 VideoRecommendationsView(
                     library: library,
                     currentUserID: model.currentUserID,
+                    subscriptionOverrides: model.videoSubscriptionOverrides,
+                    subscriptionRevision: model.videoSubscriptionRevision,
                     onOpenRoute: model.open,
-                    onLogin: { model.selectSidebar(.session) }
+                    onLogin: { model.selectSidebar(.session) },
+                    onSubscriptionsLoaded: model.recordVideoSubscriptions
                 )
             } else {
                 ContentUnavailableView("视频不可用", systemImage: "play.rectangle")
@@ -382,35 +396,45 @@ private struct RouteDestinationView: View {
                 )
             }
         case let .mv(id):
-            if let library = model.videoLibrary {
+            if let library = model.videoLibrary, let downloads = model.downloads {
                 VideoDetailView(
                     resource: .mv(id),
                     library: library,
                     knowledgeLibrary: model.knowledgeLibrary,
                     songPlayer: player,
                     currentUserID: model.currentUserID,
-                    downloadDirectory: model.downloadFolderURL,
+                    downloadManager: downloads,
+                    downloadDirectory: model.videoDownloadFolderURL,
+                    playbackQuality: model.settings.videoPlaybackQuality,
+                    downloadQuality: model.settings.videoDownloadQuality,
+                    subscriptionOverride: model.videoSubscriptionOverrides[.mv(id)],
                     onOpenUser: { model.open(.user($0)) },
                     onOpenRelated: { model.replaceCurrentRoute(with: $0) },
                     onLogin: { model.selectSidebar(.session) },
-                    onDownloadCompleted: { model.showToast("视频已下载：\($0.lastPathComponent)") }
+                    onDownloadQueued: { model.showToast("视频已加入下载队列") },
+                    onSubscriptionChanged: model.videoSubscriptionDidChange
                 )
             } else {
                 ContentUnavailableView("MV 不可用", systemImage: "play.rectangle")
             }
         case let .video(id):
-            if let library = model.videoLibrary {
+            if let library = model.videoLibrary, let downloads = model.downloads {
                 VideoDetailView(
                     resource: .video(id),
                     library: library,
                     knowledgeLibrary: model.knowledgeLibrary,
                     songPlayer: player,
                     currentUserID: model.currentUserID,
-                    downloadDirectory: model.downloadFolderURL,
+                    downloadManager: downloads,
+                    downloadDirectory: model.videoDownloadFolderURL,
+                    playbackQuality: model.settings.videoPlaybackQuality,
+                    downloadQuality: model.settings.videoDownloadQuality,
+                    subscriptionOverride: model.videoSubscriptionOverrides[.video(id)],
                     onOpenUser: { model.open(.user($0)) },
                     onOpenRelated: { model.replaceCurrentRoute(with: $0) },
                     onLogin: { model.selectSidebar(.session) },
-                    onDownloadCompleted: { model.showToast("视频已下载：\($0.lastPathComponent)") }
+                    onDownloadQueued: { model.showToast("视频已加入下载队列") },
+                    onSubscriptionChanged: model.videoSubscriptionDidChange
                 )
             } else {
                 ContentUnavailableView("视频不可用", systemImage: "play.rectangle")
@@ -2628,6 +2652,7 @@ struct LoadMoreTrigger: View {
 struct SettingsView: View {
     @Bindable var model: AppModel
     @State private var choosingDownloadFolder = false
+    @State private var choosingVideoDownloadFolder = false
     @State private var choosingImageFolder = false
     @State private var choosingSheetFolder = false
     @State private var choosingCacheFolder = false
@@ -2656,11 +2681,17 @@ struct SettingsView: View {
                 Picker("默认播放音质", selection: playbackQualityBinding) {
                     ForEach(AudioQuality.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }
+                Picker("视频播放清晰度", selection: videoPlaybackQualityBinding) {
+                    ForEach(VideoQuality.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
             }
 
             Section("下载") {
                 Picker("下载音质", selection: downloadQualityBinding) {
                     ForEach(AudioQuality.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                Picker("视频下载清晰度", selection: videoDownloadQualityBinding) {
+                    ForEach(VideoQuality.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }
                 LabeledContent("同时下载") {
                     Picker("同时下载", selection: downloadConcurrencyBinding) {
@@ -2694,9 +2725,14 @@ struct SettingsView: View {
             }
 
             Section("存储") {
-                LabeledContent("媒体下载位置") {
+                LabeledContent("音频下载位置") {
                     folderControls(path: model.downloadPath, url: model.downloadFolderURL) {
                         choosingDownloadFolder = true
+                    }
+                }
+                LabeledContent("视频下载位置") {
+                    folderControls(path: model.videoDownloadPath, url: model.videoDownloadFolderURL) {
+                        choosingVideoDownloadFolder = true
                     }
                 }
                 LabeledContent("图片保存位置") {
@@ -2790,6 +2826,13 @@ struct SettingsView: View {
             handleFolderSelection(result, apply: model.setDownloadFolder)
         }
         .fileImporter(
+            isPresented: $choosingVideoDownloadFolder,
+            allowedContentTypes: [.folder],
+            allowsMultipleSelection: false
+        ) { result in
+            handleFolderSelection(result, apply: model.setVideoDownloadFolder)
+        }
+        .fileImporter(
             isPresented: $choosingImageFolder,
             allowedContentTypes: [.folder],
             allowsMultipleSelection: false
@@ -2814,7 +2857,7 @@ struct SettingsView: View {
             Button("清除", role: .destructive, action: clearCache)
             Button("取消", role: .cancel) {}
         } message: {
-            Text("将删除缓存的音频和封面图片，不会删除已下载的歌曲。")
+            Text("将删除缓存的音频、视频和封面图片，不会删除已下载的媒体文件。")
         }
         .alert("设置", isPresented: messagePresented) {
             Button("好") { model.settingsMessage = nil }
@@ -2840,6 +2883,20 @@ struct SettingsView: View {
 
     private var playbackQualityBinding: Binding<AudioQuality> {
         Binding(get: { model.settings.playbackQuality }, set: { model.setPlaybackQuality($0) })
+    }
+
+    private var videoPlaybackQualityBinding: Binding<VideoQuality> {
+        Binding(
+            get: { model.settings.videoPlaybackQuality },
+            set: { model.setVideoPlaybackQuality($0) }
+        )
+    }
+
+    private var videoDownloadQualityBinding: Binding<VideoQuality> {
+        Binding(
+            get: { model.settings.videoDownloadQuality },
+            set: { model.setVideoDownloadQuality($0) }
+        )
     }
 
     private var crossfadeDurationBinding: Binding<TimeInterval> {
@@ -2908,10 +2965,12 @@ struct SettingsView: View {
 
     private func clearCache() {
         ArtworkPipeline.shared.pipeline.cache.removeAll()
-        let streamCache = model.cacheFolderURL.appending(path: "StreamCache", directoryHint: .isDirectory)
+        let caches = ["StreamCache", "DownloadCache"].map {
+            model.cacheFolderURL.appending(path: $0, directoryHint: .isDirectory)
+        }
         do {
-            if FileManager.default.fileExists(atPath: streamCache.path) {
-                try FileManager.default.removeItem(at: streamCache)
+            for cache in caches where FileManager.default.fileExists(atPath: cache.path) {
+                try FileManager.default.removeItem(at: cache)
             }
             model.showToast("缓存已清除")
         } catch {
@@ -3042,6 +3101,15 @@ private struct PlayerBar: View {
                     .lineLimit(2)
                     .help(message)
                     .id("playback-error")
+            } else if let message = player.playbackReportErrorMessage {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.subheadline)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .help(message)
+                    .accessibilityLabel(message)
+                    .id("playback-report-error")
             } else if let line = player.currentLyric ?? player.lyrics.first {
                 VStack(spacing: 2) {
                     Text(line.text)

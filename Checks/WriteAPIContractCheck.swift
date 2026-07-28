@@ -123,14 +123,6 @@ enum WriteAPIContractCheck {
             cookie: "MUSIC_A=guest-token",
             deviceID: String(repeating: "A", count: 52)
         )
-        let macOSCookieMatches: (String) -> Bool = {
-            $0.contains("MUSIC_U=test")
-                && $0.contains("os=osx")
-                && $0.contains("appver=3.1.10.5100")
-                && !$0.contains("os=pc")
-                && !$0.contains("appver=old")
-                && !$0.contains("reporting-vip-token")
-        }
         var count = 0
 
         try verifyCoverProcessing()
@@ -802,45 +794,32 @@ enum WriteAPIContractCheck {
         precondition(RequestCaptureProtocol.requestCount() == 1, "First-listen reads must use detail caching")
         count += 1
 
-        try await verify(
-            "/eapi/feedback/weblog",
-            signing: "/api/feedback/weblog",
-            host: "clientlog.music.163.com",
-            cookieMatches: macOSCookieMatches,
-            call: { try await repository.recordPlaybackStart(for: 17) }
-        ) { payload in
-            guard let log = playbackLog(in: payload) else { return false }
-            let json = log.object("json")
-            let header = payload.object("header")
-            return log.string("action") == "startplay"
-                && json.int64("id") == 17
-                && json.string("type") == "song"
-                && header.string("MUSIC_U") == "test"
-                && !header.values.contains { String(describing: $0).contains("reporting-vip-token") }
-                && header.string("os") == "osx"
-                && header.string("appver") == "3.1.10.5100"
+        try await verifyNCBLPlaybackUpload {
+            try await repository.recordPlaybackStart(
+                for: 17,
+                sourceID: 23,
+                totalSeconds: 300
+            )
         }
         count += 1
 
-        try await verify(
-            "/eapi/feedback/weblog",
-            signing: "/api/feedback/weblog",
-            host: "clientlog.music.163.com",
-            cookieMatches: macOSCookieMatches,
-            call: { try await repository.recordPlayback(for: 17, playedSeconds: 42) }
-        ) { payload in
-            guard let log = playbackLog(in: payload) else { return false }
-            let json = log.object("json")
-            let header = payload.object("header")
-            return log.string("action") == "play"
-                && json.int64("id") == 17
-                && json.int("time") == 42
-                && json.string("end") == "playend"
-                && header.string("MUSIC_U") == "test"
-                && !header.values.contains { String(describing: $0).contains("reporting-vip-token") }
-                && header.string("os") == "osx"
-                && header.string("appver") == "3.1.10.5100"
+        try await verifyNCBLPlaybackUpload {
+            try await repository.recordPlayback(
+                for: 17,
+                sourceID: 23,
+                playedSeconds: 42,
+                totalSeconds: 300
+            )
         }
+        count += 1
+
+        RequestCaptureProtocol.reset()
+        do {
+            try await repository.recordPlaybackStart(for: 17, sourceID: 0, totalSeconds: 300)
+            preconditionFailure("Invalid playback sources must fail before networking")
+        } catch EAPIError.invalidPayload {
+        }
+        precondition(RequestCaptureProtocol.requestCount() == 0)
         count += 1
 
         try await verify(
@@ -1610,6 +1589,38 @@ enum WriteAPIContractCheck {
         else { preconditionFailure("Authentication contract mismatch for \(physicalPath)") }
     }
 
+    private static func verifyNCBLPlaybackUpload(call: () async throws -> Void) async throws {
+        RequestCaptureProtocol.reset()
+        do {
+            try await call()
+            preconditionFailure("Expected the local HTTP 400 response")
+        } catch EAPIError.http(400) {
+        }
+        guard let request = RequestCaptureProtocol.request(),
+              request.url?.host == "clientlog3.music.163.com",
+              request.url?.path == "/api/clientlog/encrypt/upload",
+              request.url?.query == "multiupload=true",
+              request.httpMethod == "POST",
+              RequestCaptureProtocol.requestCount() == 1,
+              request.value(forHTTPHeaderField: "Content-Type")?.hasPrefix(
+                  "multipart/form-data; boundary="
+              ) == true,
+              request.value(forHTTPHeaderField: "Referer") == "https://music.163.com/di",
+              request.value(forHTTPHeaderField: "User-Agent")?.contains(
+                  "NeteaseMusicDesktop/old"
+              ) == true,
+              request.value(forHTTPHeaderField: "Accept-Encoding") == "gzip,deflate",
+              request.value(forHTTPHeaderField: "Accept-Language") == "zh-CN,zh;q=0.8",
+              let cookie = request.value(forHTTPHeaderField: "Cookie"),
+              NeteaseCookieHeader.value(named: "MUSIC_U", in: cookie) == "test",
+              NeteaseCookieHeader.value(named: "os", in: cookie) == "pc",
+              NeteaseCookieHeader.value(named: "appver", in: cookie) == "old.205293",
+              !cookie.contains("reporting-vip-token"),
+              let body = request.httpBody,
+              body.range(of: Data("\r\n\r\nNCBL".utf8)) != nil
+        else { preconditionFailure("NCBL playback request contract mismatch") }
+    }
+
     private static func authenticationContextMatches(
         header: [String: Any],
         cookie: String,
@@ -1676,14 +1687,6 @@ enum WriteAPIContractCheck {
         NeteaseCookieHeader.value(named: "MUSIC_U", in: cookie) == "video-vip-token"
             && !cookie.contains("video-qr-cookie")
             && !cookie.contains("video-csrf")
-    }
-
-    private static func playbackLog(in payload: [String: Any]) -> [String: Any]? {
-        guard let text = payload["logs"] as? String,
-              let data = text.data(using: .utf8),
-              let logs = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
-        else { return nil }
-        return logs.first
     }
 
     private static func decode(body: Data) throws -> (path: String, payload: [String: Any])? {

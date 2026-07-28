@@ -30,6 +30,9 @@ enum PersonalFMQueueCheck {
             crossfadeDuration: 0
         )
         heartPlayer.play(songs[0], in: Array(songs.prefix(2)), playlistID: 301)
+        try await waitUntil { heartPlayer.playbackReportRevision >= 1 }
+        let heartPlaybackStarts = await heartRepository.playbackStarts()
+        precondition(heartPlaybackStarts == ["\(songs[0].id):301"])
         heartPlayer.toggleHeartMode()
         try await waitUntil { !heartPlayer.isLoadingHeartMode }
         precondition(heartPlayer.isHeartModeEnabled)
@@ -76,7 +79,35 @@ enum PersonalFMQueueCheck {
         precondition(requests.contains("\(crossfadeSongs[1].id):quality:lossless"))
         precondition(!requests.contains("\(crossfadeSongs[1].id):level:jymaster"))
         let playbackStarts = await localRepository.playbackStarts()
-        precondition(playbackStarts == crossfadeSongs.map(\.id))
+        precondition(playbackStarts == crossfadeSongs.map { "\($0.id):\($0.id)" })
+
+        let failedStartRepository = LocalPlaybackRepository(
+            sourceURL: soundURL,
+            playbackStartFails: true
+        )
+        let failedStartPlayer = PlayerController(
+            repository: failedStartRepository,
+            cacheRoot: FileManager.default.temporaryDirectory,
+            crossfadeDuration: 0
+        )
+        failedStartPlayer.play(songs[0], in: [songs[0]])
+        try await waitUntil { failedStartPlayer.playbackReportRevision >= 1 }
+        let failedStartEvents = await failedStartRepository.playbackEvents()
+        precondition(failedStartEvents == ["pld"])
+        precondition(failedStartPlayer.playbackReportErrorMessage?.contains("clientlog3.music.163.com") == true)
+
+        let repeatRepository = LocalPlaybackRepository(sourceURL: soundURL, playbackStartDelay: .seconds(2))
+        let repeatPlayer = PlayerController(
+            repository: repeatRepository,
+            cacheRoot: FileManager.default.temporaryDirectory,
+            crossfadeDuration: 0
+        )
+        repeatPlayer.cycleRepeatMode()
+        repeatPlayer.cycleRepeatMode()
+        repeatPlayer.play(songs[0], in: [songs[0]])
+        try await waitUntil { repeatPlayer.playbackReportRevision >= 3 }
+        let repeatEvents = await repeatRepository.playbackEvents()
+        precondition(Array(repeatEvents.prefix(3)) == ["plv", "pld", "plv"])
         print("Player queue and crossfade checks passed")
     }
 }
@@ -94,13 +125,23 @@ private actor LocalPlaybackRepository: MusicRepository {
     let sourceURL: URL
     nonisolated let homeDescriptors: [HomeSectionDescriptor] = []
     private let heartModeRecommendations: [Song]
+    private let playbackStartDelay: Duration
+    private let playbackStartFails: Bool
     private var sourceRequests: [String] = []
     private var recordedHeartModeRequests: [HeartModeRequest] = []
-    private var recordedPlaybackStarts: [Int64] = []
+    private var recordedPlaybackStarts: [String] = []
+    private var recordedPlaybackEvents: [String] = []
 
-    init(sourceURL: URL, heartModeRecommendations: [Song] = []) {
+    init(
+        sourceURL: URL,
+        heartModeRecommendations: [Song] = [],
+        playbackStartDelay: Duration = .zero,
+        playbackStartFails: Bool = false
+    ) {
         self.sourceURL = sourceURL
         self.heartModeRecommendations = heartModeRecommendations
+        self.playbackStartDelay = playbackStartDelay
+        self.playbackStartFails = playbackStartFails
     }
 
     func playbackSource(for songID: Int64, quality: AudioQuality) async throws -> PlaybackSource {
@@ -125,13 +166,26 @@ private actor LocalPlaybackRepository: MusicRepository {
     }
 
     func heartModeRequests() -> [HeartModeRequest] { recordedHeartModeRequests }
-    func playbackStarts() -> [Int64] { recordedPlaybackStarts }
+    func playbackStarts() -> [String] { recordedPlaybackStarts }
+    func playbackEvents() -> [String] { recordedPlaybackEvents }
 
     func songs(ids: [Int64]) async throws -> [Song] { [] }
     func lyrics(for songID: Int64) async throws -> SongLyrics { SongLyrics(lineLyrics: "") }
     func songQualityDetails(for songID: Int64) async throws -> [SongQualityDetail] { [] }
-    func recordPlaybackStart(for songID: Int64) async throws { recordedPlaybackStarts.append(songID) }
-    func recordPlayback(for songID: Int64, playedSeconds: Int) async throws {}
+    func recordPlaybackStart(for songID: Int64, sourceID: Int64, totalSeconds: Int) async throws {
+        if playbackStartFails { throw URLError(.timedOut) }
+        try await Task.sleep(for: playbackStartDelay)
+        recordedPlaybackStarts.append("\(songID):\(sourceID)")
+        recordedPlaybackEvents.append("plv")
+    }
+    func recordPlayback(
+        for songID: Int64,
+        sourceID: Int64,
+        playedSeconds: Int,
+        totalSeconds: Int
+    ) async throws {
+        recordedPlaybackEvents.append("pld")
+    }
     func homeSection(id: String) async throws -> HomeSection { throw AppError.invalidRoute }
     func search(query: String, scope: SearchScope, offset: Int, limit: Int) async throws -> SearchPage {
         throw AppError.invalidRoute

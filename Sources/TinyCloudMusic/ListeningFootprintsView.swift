@@ -18,6 +18,7 @@ struct ListeningFootprintsView: View {
     @State private var annualReportGeneration = 0
     @State private var annualReportReload = 0
     @State private var consumedAnnualReportReload = 0
+    @ScaledMetric(relativeTo: .largeTitle) private var annualKeywordFontSize = 56.0
 
     var body: some View {
         Group {
@@ -359,8 +360,14 @@ struct ListeningFootprintsView: View {
                 annualMoodList(section.items)
             } else if section.id == "genres" {
                 annualGenrePreference(section)
+            } else if section.id == "singer-comparison" {
+                annualSingerTimeline(section.details)
             } else if section.id.hasPrefix("keyword-") {
                 annualKeyword(section)
+            } else if [
+                "listening-times", "late-listening", "loop-song", "crowd-memory", "listen-together"
+            ].contains(section.id) {
+                annualEditorialSummary(section)
             } else {
                 if !section.metrics.isEmpty { annualMetrics(section.metrics) }
                 if !section.details.isEmpty { annualDetails(section.details) }
@@ -454,40 +461,30 @@ struct ListeningFootprintsView: View {
                 .accessibilityElement(children: .combine)
             }
             if !shares.isEmpty {
-                if shares.count <= 5 {
-                    AnnualGenrePieChart(shares: shares, colors: annualGenreColors)
-                        .frame(width: 190, height: 190)
-                        .frame(maxWidth: .infinity)
-                    VStack(alignment: .leading, spacing: 9) {
-                        ForEach(Array(shares.enumerated()), id: \.element.id) { index, share in
-                            HStack(spacing: 9) {
-                                RoundedRectangle(cornerRadius: 2)
-                                    .fill(annualGenreColors[index % annualGenreColors.count])
-                                    .frame(width: 14, height: 14)
-                                Text(share.name)
-                                    .foregroundStyle(.primary)
-                                Spacer(minLength: 12)
-                                Text("\(share.percent)%")
-                                    .font(.callout.weight(.semibold).monospacedDigit())
-                            }
-                            .accessibilityElement(children: .combine)
-                        }
-                    }
-                } else {
-                    VStack(alignment: .leading, spacing: 12) {
-                        ForEach(Array(shares.enumerated()), id: \.element.id) { index, share in
-                            VStack(alignment: .leading, spacing: 5) {
-                                HStack {
-                                    Text(share.name)
-                                    Spacer(minLength: 12)
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(Array(shares.enumerated()), id: \.element.id) { index, share in
+                        HStack(spacing: 12) {
+                            Text(share.name)
+                                .frame(width: 110, alignment: .leading)
+                                .lineLimit(2)
+                            GeometryReader { proxy in
+                                let maximumWidth = max(1, proxy.size.width - 52)
+                                HStack(spacing: 8) {
+                                    RoundedRectangle(cornerRadius: 3)
+                                        .fill(annualGenreColors[index % annualGenreColors.count])
+                                        .frame(
+                                            width: max(4, maximumWidth * CGFloat(share.percent) / 100),
+                                            height: 18
+                                        )
                                     Text("\(share.percent)%")
                                         .font(.callout.weight(.semibold).monospacedDigit())
+                                        .lineLimit(1)
+                                    Spacer(minLength: 0)
                                 }
-                                ProgressView(value: Double(share.percent), total: 100)
-                                    .tint(annualGenreColors[index % annualGenreColors.count])
                             }
-                            .accessibilityElement(children: .combine)
+                            .frame(height: 22)
                         }
+                        .accessibilityElement(children: .combine)
                     }
                 }
             }
@@ -598,10 +595,12 @@ struct ListeningFootprintsView: View {
         showsChevron: Bool
     ) -> some View {
         HStack(spacing: 12) {
-            Text("\(month)")
-                .font(.callout.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 26, alignment: .trailing)
+            Text("\(month)月")
+                .font(.title3.weight(.bold).monospacedDigit())
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .frame(width: 52, alignment: .trailing)
             ArtworkView(artwork: Artwork(symbol: "music.mic", accent: .blue, remoteURL: imageURL))
                 .frame(width: 46, height: 46)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -626,27 +625,44 @@ struct ListeningFootprintsView: View {
     }
 
     private func annualMoodList(_ items: [AnnualReportItem]) -> some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 190, maximum: 320), spacing: 10)], spacing: 10) {
-            ForEach(items) { item in
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                 if case let .mood(month, name, genre) = item {
-                    HStack(spacing: 12) {
-                        Text("\(month) 月")
-                            .font(.callout.weight(.bold).monospacedDigit())
-                            .foregroundStyle(.white)
-                            .frame(width: 48, height: 36)
-                            .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 6))
+                    let accent = annualMoodColors[index % annualMoodColors.count]
+                    HStack(alignment: .center, spacing: 16) {
+                        VStack(spacing: 0) {
+                            Text("\(month)")
+                                .font(.system(.title2, design: .serif, weight: .bold).monospacedDigit())
+                            Text("月")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(width: 48)
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(name).font(.headline).foregroundStyle(.primary)
-                            if let genre { Text(genre).font(.caption).foregroundStyle(.secondary) }
+                            Text(name)
+                                .font(.title3.weight(.semibold))
+                                .foregroundStyle(.primary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if let genre {
+                                Text(genre)
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                         Spacer(minLength: 4)
                     }
-                    .frame(maxWidth: .infinity, minHeight: 62, alignment: .leading)
-                    .padding(.horizontal, 12)
-                    .background(Color.accentColor.opacity(0.13), in: RoundedRectangle(cornerRadius: 7))
+                    .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(accent.opacity(0.11), in: RoundedRectangle(cornerRadius: 7))
                     .overlay {
                         RoundedRectangle(cornerRadius: 7)
-                            .stroke(Color.accentColor.opacity(0.28), lineWidth: 1)
+                            .stroke(accent.opacity(0.32), lineWidth: 1)
+                    }
+                    .overlay(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(accent)
+                            .frame(width: 4)
                     }
                     .accessibilityElement(children: .combine)
                 }
@@ -655,22 +671,115 @@ struct ListeningFootprintsView: View {
     }
 
     private func annualKeyword(_ section: AnnualReportSection) -> some View {
-        HStack(alignment: .lastTextBaseline, spacing: 16) {
-            Text(section.subtitle ?? "")
-                .font(.system(size: 48, weight: .bold))
+        let accent = annualEditorialAccent(section.id)
+        return VStack(spacing: 20) {
+            HStack(spacing: 10) {
+                Rectangle().fill(accent.opacity(0.45)).frame(height: 1)
+                Image(systemName: "sparkles")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(accent)
+                    .accessibilityHidden(true)
+                Rectangle().fill(accent.opacity(0.45)).frame(height: 1)
+            }
+            Text("「\(section.subtitle ?? "")」")
+                .font(.system(size: annualKeywordFontSize, weight: .semibold, design: .serif))
                 .lineLimit(2)
-                .minimumScaleFactor(0.65)
+                .minimumScaleFactor(0.6)
+                .multilineTextAlignment(.center)
                 .layoutPriority(1)
-            Spacer(minLength: 8)
-            if let count = annualNumber("出现次数", in: section.metrics) {
-                Text("出现 \(count.formatted()) 次")
-                    .font(.headline.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                .frame(maxWidth: .infinity, minHeight: 84)
+            HStack {
+                Spacer(minLength: 8)
+                if let count = annualNumber("出现次数", in: section.metrics) {
+                    Text("出现 \(count.formatted()) 次")
+                        .font(.callout.weight(.medium).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 72, alignment: .bottomLeading)
+        .padding(24)
+        .background(accent.opacity(0.075), in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(accent.opacity(0.38), lineWidth: 1)
+        }
         .accessibilityElement(children: .combine)
+    }
+
+    private func annualEditorialSummary(_ section: AnnualReportSection) -> some View {
+        let accent = annualEditorialAccent(section.id)
+        return VStack(alignment: .leading, spacing: 20) {
+            ForEach(section.metrics) { metric in
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(metric.label)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(annualMetricText(metric.value))
+                        .font(.title2.weight(.semibold).monospacedDigit())
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 16)
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(accent.opacity(0.72))
+                        .frame(width: 2)
+                }
+                .accessibilityElement(children: .combine)
+            }
+            if !section.details.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(section.details.enumerated()), id: \.offset) { index, detail in
+                        HStack(alignment: .top, spacing: 12) {
+                            Circle()
+                                .fill(accent)
+                                .frame(width: 7, height: 7)
+                                .padding(.top, 7)
+                                .accessibilityHidden(true)
+                            Text(detail)
+                                .font(.body)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(.vertical, 10)
+                        .accessibilityElement(children: .combine)
+                        if index < section.details.count - 1 {
+                            Divider().padding(.leading, 19)
+                        }
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func annualSingerTimeline(_ details: [String]) -> some View {
+        let accent = annualEditorialAccent("singer-comparison")
+        return VStack(alignment: .leading, spacing: 18) {
+            ForEach(Array(details.enumerated()), id: \.offset) { _, detail in
+                HStack(alignment: .top, spacing: 14) {
+                    Circle()
+                        .fill(accent)
+                        .frame(width: 10, height: 10)
+                        .padding(.top, 6)
+                    Text(detail)
+                        .font(.system(.title3, design: .serif, weight: .semibold).monospacedDigit())
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .accessibilityElement(children: .combine)
+            }
+        }
+        .padding(.leading, 4)
+        .background(alignment: .leading) {
+            if details.count > 1 {
+                Rectangle()
+                    .fill(accent.opacity(0.3))
+                    .frame(width: 1)
+                    .padding(.leading, 4.5)
+                    .padding(.vertical, 11)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
@@ -679,7 +788,12 @@ struct ListeningFootprintsView: View {
             let songs = section.tracks.map(\.song)
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(Array(section.tracks.enumerated()), id: \.element.id) { index, track in
-                    annualTrackRow(track, number: index + 1, songs: songs)
+                    annualTrackRow(
+                        track,
+                        number: index + 1,
+                        songs: songs,
+                        season: annualSeasonMarker(sectionID: section.id, trackID: track.id)
+                    )
                 }
             }
         }
@@ -726,12 +840,24 @@ struct ListeningFootprintsView: View {
         }
     }
 
-    private func annualTrackRow(_ track: AnnualReportTrack, number: Int, songs: [Song]) -> some View {
+    private func annualTrackRow(
+        _ track: AnnualReportTrack,
+        number: Int,
+        songs: [Song],
+        season: (name: String, color: Color)?
+    ) -> some View {
         HStack(spacing: 12) {
-            Text("\(number)")
-                .font(.callout.monospacedDigit())
-                .foregroundStyle(number <= 3 ? Color.accentColor : Color.secondary)
-                .frame(width: 26, alignment: .trailing)
+            if let season {
+                Text(season.name)
+                    .font(.title3.weight(.bold))
+                    .foregroundStyle(season.color)
+                    .frame(width: 32, alignment: .trailing)
+            } else {
+                Text("\(number)")
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(number <= 3 ? Color.accentColor : Color.secondary)
+                    .frame(width: 26, alignment: .trailing)
+            }
             ArtworkView(artwork: track.song.album.artwork)
                 .frame(width: 46, height: 46)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -774,6 +900,20 @@ struct ListeningFootprintsView: View {
         .onTapGesture(count: 2) { player.play(track.song, in: songs) }
         .contextMenu {
             SongContextMenu(song: track.song, songs: songs, model: model, player: player)
+        }
+    }
+
+    private func annualSeasonMarker(
+        sectionID: String,
+        trackID: String
+    ) -> (name: String, color: Color)? {
+        guard sectionID == "seasons" else { return nil }
+        return switch trackID {
+        case "season-0": ("春", .green)
+        case "season-1": ("夏", .orange)
+        case "season-2": ("秋", .brown)
+        case "season-3": ("冬", .cyan)
+        default: nil
         }
     }
 
@@ -1188,6 +1328,25 @@ struct ListeningFootprintsView: View {
         ]
     }
 
+    private var annualMoodColors: [Color] {
+        [.pink, .orange, .teal, .indigo, .purple, .cyan]
+    }
+
+    private func annualEditorialAccent(_ id: String) -> Color {
+        switch id {
+        case "listening-times": .orange
+        case "late-listening": .indigo
+        case "loop-song": .pink
+        case "crowd-memory": .teal
+        case "listen-together": .blue
+        case "singer-comparison": .purple
+        case "keyword-firstKeyWord": Color(red: 0.58, green: 0.10, blue: 0.25)
+        case "keyword-secondKeyWord": Color(red: 0.00, green: 0.46, blue: 0.43)
+        case "keyword-loveKeyword": Color(red: 0.72, green: 0.48, blue: 0.08)
+        default: Color.accentColor
+        }
+    }
+
     private func annualSectionSymbol(_ id: String) -> String {
         if id.hasPrefix("keyword-") { return "text.quote" }
         return switch id {
@@ -1257,38 +1416,6 @@ private struct AnnualGenreShare: Identifiable {
     let name: String
     let percent: Int64
     var id: String { name }
-}
-
-private struct AnnualGenrePieChart: View {
-    let shares: [AnnualGenreShare]
-    let colors: [Color]
-
-    var body: some View {
-        Canvas { context, size in
-            let total = max(1, shares.reduce(Int64(0)) { $0 + $1.percent })
-            let center = CGPoint(x: size.width / 2, y: size.height / 2)
-            let radius = min(size.width, size.height) / 2
-            var start = -Double.pi / 2
-            for (index, share) in shares.enumerated() {
-                let end = start + Double(share.percent) / Double(total) * 2 * Double.pi
-                var path = Path()
-                path.move(to: center)
-                path.addArc(
-                    center: center,
-                    radius: radius,
-                    startAngle: Angle(radians: start),
-                    endAngle: Angle(radians: end),
-                    clockwise: false
-                )
-                path.closeSubpath()
-                context.fill(path, with: .color(colors[index % colors.count]))
-                start = end
-            }
-        }
-        .overlay { Circle().stroke(.background, lineWidth: 2) }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(shares.map { "\($0.name) \($0.percent)%" }.joined(separator: "，"))
-    }
 }
 
 private enum FootprintPeriod: String, CaseIterable {

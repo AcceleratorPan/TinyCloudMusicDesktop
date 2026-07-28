@@ -243,7 +243,7 @@ struct SearchRepositoryTests {
         #expect(mvPage.items.first?.route == .mv(42))
         #expect(mvPage.hasMore)
 
-        SearchRepositoryProtocol.reset(response: #"{"code":200,"result":{"videos":[{"vid":"00042-video","id":99,"title":"Video","creator":[{"userName":"Creator"}],"coverUrl":"https://img.test/video.jpg","durationms":34000}],"videoCount":1}}"#)
+        SearchRepositoryProtocol.reset(response: #"{"code":200,"result":{"videos":[{"vid":"22780368","type":0,"title":"MV in video results","creator":[{"userName":"MV Artist"}]},{"vid":"00042-video","type":1,"title":"Video","creator":[{"userName":"Creator"}],"coverUrl":"https://img.test/video.jpg","durationms":34000},{"vid":"ignored","type":99,"title":"Unknown"},{"vid":"missing-type","title":"Ambiguous"}],"videoCount":4}}"#)
         let videoPage = try await repository.search(query: "Video Query", scope: .videos, offset: 0, limit: 20)
         let videoRequest = SearchRepositoryProtocol.capturedRequest()
         #expect(videoRequest.url?.path == "/eapi/cloudsearch/pc")
@@ -252,13 +252,20 @@ struct SearchRepositoryTests {
             json: compactJSON(["s": "Video Query", "type": 1014, "limit": 20, "offset": 0, "total": true])
         )
         #expect(videoRequest.body == expectedVideoBody)
-        guard case let .video(video) = try #require(videoPage.items.first) else {
+        #expect(videoPage.items.count == 2)
+        guard case let .mv(mvFromVideoSearch) = videoPage.items[0] else {
+            Issue.record("Expected a typed MV")
+            return
+        }
+        #expect(mvFromVideoSearch.id == 22_780_368)
+        #expect(videoPage.items[0].route == .mv(22_780_368))
+        guard case let .video(video) = videoPage.items[1] else {
             Issue.record("Expected a video")
             return
         }
         #expect(video.id == "00042-video")
-        #expect(videoPage.items.first?.numericID == nil)
-        #expect(videoPage.items.first?.route == .video("00042-video"))
+        #expect(videoPage.items[1].numericID == nil)
+        #expect(videoPage.items[1].route == .video("00042-video"))
         #expect(!videoPage.hasMore)
     }
 }
