@@ -890,11 +890,31 @@ final class MusicDownloadManager {
         requiresExactLevel: Bool,
         transport: EAPITransport
     ) async throws -> (url: URL, type: String, level: String, expectedBytes: Int64?) {
+        try await transport.withVIPRequesterFallback(
+            fallbackOn: { $0 is MusicDownloadError }
+        ) { credential in
+            try await audioSource(
+                songID: songID,
+                level: level,
+                requiresExactLevel: requiresExactLevel,
+                transport: transport,
+                credential: credential
+            )
+        }
+    }
+
+    private nonisolated static func audioSource(
+        songID: Int64,
+        level: String,
+        requiresExactLevel: Bool,
+        transport: EAPITransport,
+        credential: VIPRequesterCredential
+    ) async throws -> (url: URL, type: String, level: String, expectedBytes: Int64?) {
         let data = try await apiRequest(
             EAPIEndpoint("/eapi/song/enhance/player/url/v1"),
             payload: audioSourcePayload(songID: songID, level: level),
             transport: transport,
-            vip: true,
+            vipCredential: credential,
             iPhoneClient: true
         )
         let root = try decodedJSONObject(data)
@@ -1063,14 +1083,15 @@ final class MusicDownloadManager {
         _ endpoint: EAPIEndpoint,
         payload: [String: Any],
         transport: EAPITransport,
-        vip: Bool = false,
+        vipCredential: VIPRequesterCredential? = nil,
         iPhoneClient: Bool = false,
         cache: EAPIReadCache? = nil
     ) async throws -> Data {
         try await transport.request(
             endpoint,
             json: compactJSON(payload),
-            vip: vip,
+            vip: vipCredential != nil,
+            useStoredCookieForVIP: vipCredential == .storedCookie,
             cache: cache,
             iPhoneClient: iPhoneClient
         )

@@ -62,6 +62,38 @@ struct EAPIHTTPResponse: @unchecked Sendable {
     let cookies: [HTTPCookie]
 }
 
+enum SensitiveHeaderRedirectPolicy {
+    static func allows(originalURL: URL, redirectedURL: URL) -> Bool {
+        redirectedURL.scheme?.lowercased() == "https"
+            && redirectedURL.user == nil
+            && redirectedURL.password == nil
+            && (redirectedURL.port == nil || redirectedURL.port == 443)
+            && redirectedURL.host?.lowercased() == originalURL.host?.lowercased()
+    }
+}
+
+private final class SensitiveHeaderRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let originalURL: URL
+
+    init(originalURL: URL) { self.originalURL = originalURL }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let url = request.url,
+              SensitiveHeaderRedirectPolicy.allows(originalURL: originalURL, redirectedURL: url)
+        else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
+    }
+}
+
 struct NeteaseAuthenticationContext: Sendable {
     let cookie: String
     let deviceID: String
@@ -99,6 +131,16 @@ enum SessionCredentialIssue: String, Sendable {
             ?? (object["code"] as? String).flatMap(Int.init)
         guard let code, (300..<400).contains(code) || code == 401 || code == 403 else { return nil }
         return vip && !musicU.isEmpty ? .musicU : .cookie
+    }
+
+    static func isAuthenticationFailure(_ error: Error) -> Bool {
+        guard let error = error as? EAPIError else { return false }
+        let code: Int
+        switch error {
+        case let .http(value), let .service(value, _): code = value
+        default: return false
+        }
+        return (300..<400).contains(code) || code == 401 || code == 403
     }
 }
 
@@ -535,6 +577,11 @@ enum XEAPICodec {
     }
 }
 
+enum VIPRequesterCredential: Equatable, Sendable {
+    case independentMusicU
+    case storedCookie
+}
+
 struct EAPITransport: Sendable {
     private let session: URLSession
     private let authenticationSession: URLSession
@@ -670,25 +717,31 @@ struct EAPITransport: Sendable {
         _ endpoint: EAPIEndpoint,
         json: Data,
         vip: Bool = false,
+        useStoredCookieForVIP: Bool = false,
         cache: EAPIReadCache? = nil,
         invalidatesAccountCache: Bool = false,
         macOSClient: Bool = false,
         iPhoneClient: Bool = false,
         includesClientHeader: Bool = false,
-        retryable: Bool = true
+        retryable: Bool = true,
+        additionalHeaders: [String: String] = [:]
     ) async throws -> Data {
         let credentials = resolvedCredentials()
         let cookie = credentials.cookie
-        let musicU = credentials.musicU
+        let musicU = vip && useStoredCookieForVIP ? "" : credentials.musicU
         let clientHeaderFields = includesClientHeader
-            ? Self.eapiClientHeaderFields(cookie: cookie, deviceID: credentials.deviceID)
+            ? Self.eapiClientHeaderFields(
+                cookie: cookie,
+                deviceID: credentials.deviceID,
+                macOSClient: macOSClient
+            )
             : nil
         let requestJSON = try clientHeaderFields.map {
             try Self.addingEAPIClientHeader(to: json, fields: $0)
         } ?? json
         let clientCookie = try clientHeaderFields.map(XEAPICodec.encodedCookie)
         let body = try EAPICodec.requestBody(path: endpoint.logicalPath, json: requestJSON)
-        let account = Self.accountFingerprint(cookie: cookie, musicU: musicU)
+        let account = Self.accountFingerprint(cookie: cookie, musicU: credentials.musicU)
         let policy: EAPIRequestCachePolicy = invalidatesAccountCache
             ? .invalidateAccount
             : cache?.policy ?? .none
@@ -704,7 +757,8 @@ struct EAPITransport: Sendable {
                 macOSClient: macOSClient,
                 iPhoneClient: iPhoneClient,
                 cookieHeaderOverride: clientCookie,
-                retryable: retryable && !invalidatesAccountCache
+                retryable: retryable && !invalidatesAccountCache,
+                additionalHeaders: additionalHeaders
             )
         case let .read(ttl, staleIfError):
             let key = EAPIResponseCache.Key(
@@ -713,6 +767,7 @@ struct EAPITransport: Sendable {
                     endpoint: endpoint,
                     json: json,
                     vip: vip,
+                    useStoredCookieForVIP: useStoredCookieForVIP,
                     macOSClient: macOSClient,
                     iPhoneClient: iPhoneClient,
                     includesClientHeader: includesClientHeader
@@ -733,7 +788,8 @@ struct EAPITransport: Sendable {
                     macOSClient: macOSClient,
                     iPhoneClient: iPhoneClient,
                     cookieHeaderOverride: clientCookie,
-                    retryable: retryable
+                    retryable: retryable,
+                    additionalHeaders: additionalHeaders
                 )
             }
         case .invalidateAccount:
@@ -746,7 +802,8 @@ struct EAPITransport: Sendable {
                 macOSClient: macOSClient,
                 iPhoneClient: iPhoneClient,
                 cookieHeaderOverride: clientCookie,
-                retryable: false
+                retryable: false,
+                additionalHeaders: additionalHeaders
             )
             if EAPIResponseCache.isSuccessfulResponse(data) {
                 await responseCache.invalidate(account: account)
@@ -843,11 +900,24 @@ struct EAPITransport: Sendable {
         path: String,
         payload: [String: Any],
         cache: EAPIReadCache? = nil,
-        invalidatesAccountCache: Bool = true
+        invalidatesAccountCache: Bool = true,
+        vip: Bool = false,
+        useStoredCookieForVIP: Bool = false,
+        additionalHeaders: [String: String] = [:],
+        restrictsRedirects: Bool = false
     ) async throws -> Data {
         let (cookie, musicU) = credentials()
+        let requesterMusicU = useStoredCookieForVIP ? "" : musicU
+        let timestamp = Date().timeIntervalSince1970
+        let requestCookie = vip ? EAPICookieHeader.value(
+            cookie: cookie,
+            musicU: requesterMusicU,
+            vip: true,
+            buildVersion: Int(timestamp),
+            requestID: "\(Int(timestamp * 1_000))_\(String(format: "%04d", Int.random(in: 0..<10_000)))"
+        ) : cookie
         var payload = payload
-        payload["csrf_token"] = WEAPICodec.csrfToken(in: cookie)
+        payload["csrf_token"] = WEAPICodec.csrfToken(in: requestCookie)
         payload["e_r"] = false
         let json = try compactJSON(payload)
         let body = if let weapiSecretKeyOverride {
@@ -867,8 +937,10 @@ struct EAPITransport: Sendable {
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             forHTTPHeaderField: "User-Agent"
         )
-        if !cookie.isEmpty { request.setValue(cookie, forHTTPHeaderField: "Cookie") }
+        if !requestCookie.isEmpty { request.setValue(requestCookie, forHTTPHeaderField: "Cookie") }
+        for (name, value) in additionalHeaders { request.setValue(value, forHTTPHeaderField: name) }
         let preparedRequest = request
+        let shouldRestrictRedirects = restrictsRedirects || vip || !additionalHeaders.isEmpty
 
         if let cache, case let .read(ttl, staleIfError) = cache.policy {
             let key = EAPIResponseCache.Key(
@@ -876,18 +948,29 @@ struct EAPITransport: Sendable {
                 request: Self.requestFingerprint(
                     endpoint: EAPIEndpoint(path, signing: path, responseEncoding: .json),
                     json: json,
-                    vip: false,
+                    vip: vip,
+                    useStoredCookieForVIP: useStoredCookieForVIP,
                     macOSClient: true,
                     iPhoneClient: false
                 ),
                 group: cache
             )
             return try await responseCache.value(for: key, ttl: ttl, staleIfError: staleIfError) {
-                try await performWEAPIRequest(preparedRequest, musicU: musicU)
+                try await performWEAPIRequest(
+                    preparedRequest,
+                    musicU: requesterMusicU,
+                    vip: vip,
+                    restrictsRedirects: shouldRestrictRedirects
+                )
             }
         }
 
-        let data = try await performWEAPIRequest(preparedRequest, musicU: musicU)
+        let data = try await performWEAPIRequest(
+            preparedRequest,
+            musicU: requesterMusicU,
+            vip: vip,
+            restrictsRedirects: shouldRestrictRedirects
+        )
         if invalidatesAccountCache, EAPIResponseCache.isSuccessfulResponse(data) {
             await responseCache.invalidate(account: Self.accountFingerprint(cookie: cookie, musicU: musicU))
         }
@@ -901,15 +984,23 @@ struct EAPITransport: Sendable {
         return data
     }
 
-    private func performWEAPIRequest(_ request: URLRequest, musicU: String) async throws -> Data {
-        let (responseData, response) = try await session.data(for: request)
+    private func performWEAPIRequest(
+        _ request: URLRequest,
+        musicU: String,
+        vip: Bool,
+        restrictsRedirects: Bool = false
+    ) async throws -> Data {
+        let delegate = restrictsRedirects ? SensitiveHeaderRedirectDelegate(originalURL: request.url!) : nil
+        let (responseData, response) = try await session.data(for: request, delegate: delegate)
         guard let http = response as? HTTPURLResponse else { throw EAPIError.invalidResponse }
         guard (200..<300).contains(http.statusCode) else {
-            if http.statusCode == 401 || http.statusCode == 403 { reportCredentialIssue(.cookie) }
+            if http.statusCode == 401 || http.statusCode == 403 {
+                reportCredentialIssue(vip && !musicU.isEmpty ? .musicU : .cookie)
+            }
             throw EAPIError.http(http.statusCode)
         }
         let data = try EAPICodec.responseData(responseData)
-        if let issue = SessionCredentialIssue.detect(in: data, vip: false, musicU: musicU) {
+        if let issue = SessionCredentialIssue.detect(in: data, vip: vip, musicU: musicU) {
             reportCredentialIssue(issue)
         }
         return data
@@ -918,6 +1009,30 @@ struct EAPITransport: Sendable {
     func credentials() -> (cookie: String, musicU: String) {
         let credentials = resolvedCredentials()
         return (credentials.cookie, credentials.musicU)
+    }
+
+    func withVIPRequesterFallback<Value>(
+        fallbackOn: (Error) -> Bool = { _ in false },
+        operation: (VIPRequesterCredential) async throws -> Value
+    ) async throws -> Value {
+        let credentials = credentials()
+        guard !credentials.musicU.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return try await operation(.storedCookie)
+        }
+
+        do {
+            return try await operation(.independentMusicU)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            try Task.checkCancellation()
+            let cookie = credentials.cookie.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cookie.isEmpty,
+                  !NeteaseCookieHeader.isGuest(cookie),
+                  SessionCredentialIssue.isAuthenticationFailure(error) || fallbackOn(error)
+            else { throw error }
+            return try await operation(.storedCookie)
+        }
     }
 
     private func resolvedCredentials() -> (cookie: String, musicU: String, deviceID: String) {
@@ -940,7 +1055,8 @@ struct EAPITransport: Sendable {
         macOSClient: Bool,
         iPhoneClient: Bool,
         cookieHeaderOverride: String?,
-        retryable: Bool
+        retryable: Bool,
+        additionalHeaders: [String: String] = [:]
     ) async throws -> Data {
         try await performHTTPRequest(
             endpoint,
@@ -954,7 +1070,8 @@ struct EAPITransport: Sendable {
             session: session,
             cookieStorage: nil,
             cookieHeaderOverride: cookieHeaderOverride,
-            userAgentOverride: nil
+            userAgentOverride: nil,
+            additionalHeaders: additionalHeaders
         ).data
     }
 
@@ -970,7 +1087,8 @@ struct EAPITransport: Sendable {
         session: URLSession,
         cookieStorage: HTTPCookieStorage?,
         cookieHeaderOverride: String?,
-        userAgentOverride: String?
+        userAgentOverride: String?,
+        additionalHeaders: [String: String] = [:]
     ) async throws -> EAPIHTTPResponse {
         var lastError: Error = EAPIError.invalidResponse
         let attemptCount = retryable ? 3 : 1
@@ -1010,9 +1128,13 @@ struct EAPITransport: Sendable {
                     iPhoneClient: iPhoneClient
                 )
             if !sessionCookie.isEmpty { request.setValue(sessionCookie, forHTTPHeaderField: "Cookie") }
+            for (name, value) in additionalHeaders { request.setValue(value, forHTTPHeaderField: name) }
 
             do {
-                let (responseData, response) = try await session.data(for: request)
+                let delegate = vip || !additionalHeaders.isEmpty
+                    ? SensitiveHeaderRedirectDelegate(originalURL: request.url!)
+                    : nil
+                let (responseData, response) = try await session.data(for: request, delegate: delegate)
                 guard let http = response as? HTTPURLResponse else { throw EAPIError.invalidResponse }
                 let decodedData = try? EAPICodec.responseData(
                     responseData,
@@ -1099,14 +1221,16 @@ struct EAPITransport: Sendable {
 
     private static func eapiClientHeaderFields(
         cookie: String,
-        deviceID: String? = nil
+        deviceID: String? = nil,
+        macOSClient: Bool = false
     ) -> [(String, String)] {
         let timestamp = Int64(Date().timeIntervalSince1970 * 1_000)
         let cookieValue: (String, String) -> String = { name, fallback in
+            if macOSClient, ["os", "osver", "appver", "channel"].contains(name) { return fallback }
             let value = NeteaseCookieHeader.value(named: name, in: cookie)
             return value.isEmpty ? fallback : value
         }
-        let profile = authenticationProfile(cookie: cookie)
+        let profile = authenticationProfile(cookie: macOSClient ? "os=osx" : cookie)
         let fields = [
             ("osver", cookieValue("osver", profile.osVersion)),
             ("deviceId", deviceID ?? cookieValue("deviceId", "")),
@@ -1145,6 +1269,7 @@ struct EAPITransport: Sendable {
         endpoint: EAPIEndpoint,
         json: Data,
         vip: Bool,
+        useStoredCookieForVIP: Bool = false,
         macOSClient: Bool,
         iPhoneClient: Bool,
         includesClientHeader: Bool = false
@@ -1154,6 +1279,7 @@ struct EAPITransport: Sendable {
         source.append(contentsOf: endpoint.logicalPath.utf8)
         source.append(0)
         source.append(vip ? 1 : 0)
+        source.append(vip && useStoredCookieForVIP ? 1 : 0)
         source.append(macOSClient ? 1 : 0)
         source.append(iPhoneClient ? 1 : 0)
         source.append(includesClientHeader ? 1 : 0)
@@ -1436,7 +1562,8 @@ enum EAPICookieHeader {
         let usesIPhoneClient = iPhoneClient || (vip && musicU.isEmpty)
         var overriddenKeys = Set(["os", "osver", "appver", "channel"])
         if usesIPhoneClient, !musicU.isEmpty { overriddenKeys.insert("music_u") }
-        var parts = cookie.split(separator: ";").map {
+        let sourceCookie = vip && !musicU.isEmpty ? "" : cookie
+        var parts = sourceCookie.split(separator: ";").map {
             String($0).trimmingCharacters(in: .whitespacesAndNewlines)
         }.filter {
             !(macOSClient || usesIPhoneClient)

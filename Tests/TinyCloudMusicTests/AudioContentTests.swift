@@ -108,6 +108,13 @@ private func verifyBroadcastStreamPolicy() throws {
           !BroadcastStreamURLPolicy.isPlayableResponse(statusCode: 200, mimeType: "text/html")
     else { throw AudioContentCheckError.failed }
 
+    let qingtingHLS = URL(string: "https://ls-open.qingting.fm/live/1161/64k.m3u8")!
+    guard BroadcastStreamURLPolicy.preferredPlaybackURL(qingtingHLS).absoluteString
+        == "https://lhttp.qtfm.cn/live/1161/64k.mp3",
+        BroadcastStreamURLPolicy.preferredPlaybackURL(URL(string: "https://m7.music.126.net/live.m3u8")!)
+            .absoluteString == "https://m7.music.126.net/live.m3u8"
+    else { throw AudioContentCheckError.failed }
+
     guard try BroadcastStreamURLPolicy.validate("http://lhttp-hw.qtfm.cn/live.aac").absoluteString
         == "https://lhttp-hw.qtfm.cn/live.aac"
     else { throw AudioContentCheckError.failed }

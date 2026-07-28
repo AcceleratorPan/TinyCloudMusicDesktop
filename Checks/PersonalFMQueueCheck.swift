@@ -55,6 +55,7 @@ enum PersonalFMQueueCheck {
         let crossfadeSongs = Array(songs.prefix(2))
         crossfadePlayer.play(crossfadeSongs[0], in: crossfadeSongs)
         try await waitUntil { crossfadePlayer.isPlaying && crossfadePlayer.currentSongID == crossfadeSongs[0].id }
+        try await waitUntil { crossfadePlayer.playbackReportRevision >= 1 }
         crossfadePlayer.selectPlaybackQuality(SongQualityDetail(
             id: "jymaster",
             bitrate: 1_900_000,
@@ -70,9 +71,12 @@ enum PersonalFMQueueCheck {
         crossfadePlayer.next()
         precondition(crossfadePlayer.selectedPlaybackLevel == nil)
         try await waitUntil { crossfadePlayer.isPlaying && crossfadePlayer.currentSongID == crossfadeSongs[1].id }
+        try await waitUntil { crossfadePlayer.playbackReportRevision >= 2 }
         let requests = await localRepository.requests()
         precondition(requests.contains("\(crossfadeSongs[1].id):quality:lossless"))
         precondition(!requests.contains("\(crossfadeSongs[1].id):level:jymaster"))
+        let playbackStarts = await localRepository.playbackStarts()
+        precondition(playbackStarts == crossfadeSongs.map(\.id))
         print("Player queue and crossfade checks passed")
     }
 }
@@ -92,6 +96,7 @@ private actor LocalPlaybackRepository: MusicRepository {
     private let heartModeRecommendations: [Song]
     private var sourceRequests: [String] = []
     private var recordedHeartModeRequests: [HeartModeRequest] = []
+    private var recordedPlaybackStarts: [Int64] = []
 
     init(sourceURL: URL, heartModeRecommendations: [Song] = []) {
         self.sourceURL = sourceURL
@@ -120,11 +125,12 @@ private actor LocalPlaybackRepository: MusicRepository {
     }
 
     func heartModeRequests() -> [HeartModeRequest] { recordedHeartModeRequests }
+    func playbackStarts() -> [Int64] { recordedPlaybackStarts }
 
     func songs(ids: [Int64]) async throws -> [Song] { [] }
     func lyrics(for songID: Int64) async throws -> SongLyrics { SongLyrics(lineLyrics: "") }
     func songQualityDetails(for songID: Int64) async throws -> [SongQualityDetail] { [] }
-    func recordPlaybackStart(for songID: Int64) async throws {}
+    func recordPlaybackStart(for songID: Int64) async throws { recordedPlaybackStarts.append(songID) }
     func recordPlayback(for songID: Int64, playedSeconds: Int) async throws {}
     func homeSection(id: String) async throws -> HomeSection { throw AppError.invalidRoute }
     func search(query: String, scope: SearchScope, offset: Int, limit: Int) async throws -> SearchPage {

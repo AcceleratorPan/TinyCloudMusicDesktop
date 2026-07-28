@@ -12,6 +12,10 @@ struct Artwork: Hashable, Sendable {
 
 enum ArtworkURLPolicy {
     static func secureURL(for url: URL) -> URL {
+        if url.scheme == nil, url.absoluteString.hasPrefix("//"),
+           let secureURL = URL(string: "https:\(url.absoluteString)") {
+            return secureURL
+        }
         guard url.scheme?.lowercased() == "http",
               isNeteaseHost(url.host)
         else { return url }
@@ -218,6 +222,8 @@ enum SearchScope: String, CaseIterable, Codable, Hashable, Sendable {
     case albums = "专辑"
     case playlists = "歌单"
     case users = "用户"
+    case mvs = "MV"
+    case videos = "视频"
 
     var symbol: String {
         switch self {
@@ -226,6 +232,8 @@ enum SearchScope: String, CaseIterable, Codable, Hashable, Sendable {
         case .albums: "square.stack"
         case .playlists: "music.note.list"
         case .users: "person.2"
+        case .mvs: "music.note.tv"
+        case .videos: "play.rectangle"
         }
     }
 }
@@ -235,6 +243,22 @@ struct SearchState: Hashable, Sendable {
     var scope: SearchScope = .songs
     var offset = 0
     var selectedID: Int64?
+}
+
+struct MVSummary: Identifiable, Hashable, Sendable {
+    let id: Int64
+    let title: String
+    let artistName: String
+    let coverURL: URL?
+    let durationMilliseconds: Int64
+}
+
+struct VideoSummary: Identifiable, Hashable, Sendable {
+    let id: String
+    let title: String
+    let creatorName: String
+    let coverURL: URL?
+    let durationMilliseconds: Int64
 }
 
 enum Route: Hashable, Sendable {
@@ -253,7 +277,7 @@ enum Route: Hashable, Sendable {
     case video(String)
     case podcast(Int64)
     case podcastEpisode(Int64)
-    case broadcast(String)
+    case broadcast(String, URL?)
     case podcastSubscriptions
     case musicStyles
     case musicStyle(Int64, String)
@@ -265,6 +289,8 @@ enum SearchItem: Identifiable, Hashable, Sendable {
     case album(Album)
     case playlist(Playlist)
     case user(UserProfile)
+    case mv(MVSummary)
+    case video(VideoSummary)
 
     var id: String {
         switch self {
@@ -273,16 +299,20 @@ enum SearchItem: Identifiable, Hashable, Sendable {
         case let .album(value): "album-\(value.id)"
         case let .playlist(value): "playlist-\(value.id)"
         case let .user(value): "user-\(value.id)"
+        case let .mv(value): "mv-\(value.id)"
+        case let .video(value): "video-\(value.id)"
         }
     }
 
-    var numericID: Int64 {
+    var numericID: Int64? {
         switch self {
         case let .song(value): value.id
         case let .artist(value): value.id
         case let .album(value): value.id
         case let .playlist(value): value.id
         case let .user(value): value.id
+        case let .mv(value): value.id
+        case .video: nil
         }
     }
 
@@ -293,6 +323,8 @@ enum SearchItem: Identifiable, Hashable, Sendable {
         case let .album(value): value.name
         case let .playlist(value): value.name
         case let .user(value): value.nickname
+        case let .mv(value): value.title
+        case let .video(value): value.title
         }
     }
 
@@ -303,6 +335,8 @@ enum SearchItem: Identifiable, Hashable, Sendable {
         case let .album(value): value.artist.name
         case let .playlist(value): "by \(value.creator)"
         case let .user(value): value.signature
+        case let .mv(value): value.artistName
+        case let .video(value): value.creatorName
         }
     }
 
@@ -313,6 +347,8 @@ enum SearchItem: Identifiable, Hashable, Sendable {
         case let .album(value): value.artwork
         case let .playlist(value): value.artwork
         case let .user(value): value.artwork
+        case let .mv(value): Artwork(symbol: "music.note.tv", accent: .red, remoteURL: value.coverURL)
+        case let .video(value): Artwork(symbol: "play.rectangle", accent: .cyan, remoteURL: value.coverURL)
         }
     }
 
@@ -323,6 +359,8 @@ enum SearchItem: Identifiable, Hashable, Sendable {
         case let .album(value): .album(value.id)
         case let .playlist(value): .playlist(value.id)
         case let .user(value): .user(value.id)
+        case let .mv(value): .mv(value.id)
+        case let .video(value): .video(value.id)
         }
     }
 }

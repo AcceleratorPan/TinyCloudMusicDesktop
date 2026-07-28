@@ -14,6 +14,10 @@ struct Podcast: Identifiable, Equatable, Sendable {
     let isSubscribed: Bool
     let description: String
     let episodeCount: Int
+    let coverImageID: Int64
+    let categoryID: Int64
+    let secondCategoryID: Int64
+    let isPrivate: Bool
 
     init(
         id: Int64,
@@ -23,7 +27,11 @@ struct Podcast: Identifiable, Equatable, Sendable {
         categoryName: String,
         isSubscribed: Bool,
         description: String = "",
-        episodeCount: Int = 0
+        episodeCount: Int = 0,
+        coverImageID: Int64 = 0,
+        categoryID: Int64 = 0,
+        secondCategoryID: Int64 = 0,
+        isPrivate: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -33,6 +41,10 @@ struct Podcast: Identifiable, Equatable, Sendable {
         self.isSubscribed = isSubscribed
         self.description = description
         self.episodeCount = episodeCount
+        self.coverImageID = coverImageID
+        self.categoryID = categoryID
+        self.secondCategoryID = secondCategoryID
+        self.isPrivate = isPrivate
     }
 
     func settingSubscribed(_ subscribed: Bool) -> Self {
@@ -44,7 +56,11 @@ struct Podcast: Identifiable, Equatable, Sendable {
             categoryName: categoryName,
             isSubscribed: subscribed,
             description: description,
-            episodeCount: episodeCount
+            episodeCount: episodeCount,
+            coverImageID: coverImageID,
+            categoryID: categoryID,
+            secondCategoryID: secondCategoryID,
+            isPrivate: isPrivate
         )
     }
 }
@@ -223,7 +239,7 @@ enum AudioContentError: LocalizedError, Equatable, Sendable {
 
 enum BroadcastStreamURLPolicy {
     static func playableURL(_ value: String) async throws -> URL {
-        let url = try validate(value)
+        let url = preferredPlaybackURL(try validate(value))
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10)
         request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
         do {
@@ -246,6 +262,16 @@ enum BroadcastStreamURLPolicy {
 
     static func isPlayableResponse(statusCode: Int, mimeType: String?) -> Bool {
         (200..<300).contains(statusCode) && mimeType?.lowercased() != "text/html"
+    }
+
+    static func preferredPlaybackURL(_ url: URL) -> URL {
+        guard url.host?.lowercased() == "ls-open.qingting.fm",
+              url.pathExtension.lowercased() == "m3u8",
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        else { return url }
+        components.host = "lhttp.qtfm.cn"
+        components.path = String(components.path.dropLast(4)) + "mp3"
+        return components.url ?? url
     }
 
     static func validate(_ value: String) throws -> URL {
@@ -298,13 +324,16 @@ enum AudioContentDecoder {
 
     static func podcasts(_ root: [String: Any]) -> [Podcast] {
         let data = root.object("data")
-        return firstArray(in: [root, data], keys: ["djRadios", "radios", "podcasts", "list"])
+        return firstArray(in: [root, data], keys: ["djRadios", "radios", "podcasts", "voiceLists", "voicelists", "list"])
             .compactMap(decodePodcast)
     }
 
     static func podcast(_ root: [String: Any]) -> Podcast? {
         let data = root.object("data")
-        for value in [root.object("djRadio"), root.object("radio"), data.object("djRadio"), data.object("radio"), data] {
+        for value in [
+            root.object("djRadio"), root.object("radio"), root.object("voiceList"),
+            data.object("djRadio"), data.object("radio"), data.object("voiceList"), data
+        ] {
             if let result = decodePodcast(value) { return result }
         }
         return nil
@@ -332,7 +361,7 @@ enum AudioContentDecoder {
 
     static func podcastPage(_ root: [String: Any], offset: Int, limit: Int) -> PodcastPage {
         let data = root.object("data")
-        let values = firstArray(in: [root, data], keys: ["djRadios", "radios", "podcasts", "list"])
+        let values = firstArray(in: [root, data], keys: ["djRadios", "radios", "podcasts", "voiceLists", "voicelists", "list"])
         let decoded = values.compactMap(decodePodcast)
         let explicitMore = firstBool(in: [root, data], keys: ["more", "hasMore"])
         return PodcastPage(
@@ -420,7 +449,13 @@ enum AudioContentDecoder {
     }
 
     private static func decodePodcast(_ source: [String: Any]) -> Podcast? {
-        let value = source.object("djRadio").isEmpty ? source : source.object("djRadio")
+        let value = if !source.object("djRadio").isEmpty {
+            source.object("djRadio")
+        } else if !source.object("voiceList").isEmpty {
+            source.object("voiceList")
+        } else {
+            source
+        }
         let id = firstInt64(value, keys: ["id", "radioId", "djRadioId"])
         guard id > 0 else { return nil }
         let host = [value.object("dj"), value.object("creator"), value.object("host")]
@@ -433,7 +468,11 @@ enum AudioContentDecoder {
             categoryName: firstString(value, keys: ["category", "categoryName", "secondCategory"]),
             isSubscribed: bool(value, keys: ["subed", "subscribed", "isSubscribed"]),
             description: firstString(value, keys: ["desc", "description"]),
-            episodeCount: firstInt(value, keys: ["programCount", "episodeCount", "count"])
+            episodeCount: firstInt(value, keys: ["programCount", "episodeCount", "count"]),
+            coverImageID: firstInt64(value, keys: ["picId", "coverImgId", "coverImageId"]),
+            categoryID: firstInt64(value, keys: ["categoryId", "categoryID", "cateId"]),
+            secondCategoryID: firstInt64(value, keys: ["secondCategoryId", "secondCategoryID", "secondCateId"]),
+            isPrivate: bool(value, keys: ["privacy", "private", "isPrivate"])
         )
     }
 

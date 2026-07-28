@@ -3,158 +3,268 @@
 ## 任务定位
 
 - 优先级：P2
-- 交付目标：增加 MV/视频的推荐入口、详情、原生播放、收藏、评论读取和相关推荐，形成从发现到播放的完整只读主流程。
-- 参考模块：`video_timeline_recommend.js`、`mv_detail.js`、`mv_url.js`、`mv_sub.js`、`comment_mv.js`、`video_detail.js`、`video_url.js`、`video_sub.js`、`comment_video.js`、`related_allvideo.js`
-- 前置依赖：现有 WEAPI、登录会话、图片管线；本任务与 P2-02 会共同触及导航和媒体播放，二者不应并行修改共享文件。
+- 状态：已实现，等待按本文完成生产会话手工验收。
+- 交付目标：提供混合 MV/视频发现与搜索、详情、原生播放、百科/简介、只读评论、相关推荐、收藏列表和播放 URL 下载。
+- 参考模块：`personalized_mv.js`、`video_timeline_recommend.js`、`mv_detail.js`、`mv_url.js`、`mv_sub.js`、`mv_sublist.js`、`comment_mv.js`、`video_detail.js`、`video_url.js`、`video_sub.js`、`comment_video.js`、`related_allvideo.js`、`ugc_mv_get.js`、`cloudsearch.js`。
 
-## 当前状态
+## 已实现范围
 
-- 最近播放已能解码视频摘要，但摘要没有可打开的 Route，也没有详情页。
-- `EAPITransport.requestWEAPI` 已实现固定路径请求、Cookie/CSRF、缓存和错误归一化，不需要新增协议层。
-- `PlayerController` 只管理歌曲音频；App 没有视频播放器。
-- 评论模型和表情资源已存在，但 `CommentsView` 绑定歌曲 ID/写操作，实际评论 row 也是 `private`，不能由新视频页面直接复用。
-- 没有 MV/视频收藏状态、推荐模型或播放 URL 解析。
+1. “MV 与视频”首页并发加载个性化 MV 和视频 timeline 的三页数据，合并后按类型化 ID 去重。
+2. MV 使用正整数 ID，视频保留原始字符串 ID；推荐、最近播放和相关推荐均生成对应 Route。
+3. 详情页使用原生 `AVPlayerView` 播放，避开 macOS 15 上 `_AVKit_SwiftUI.VideoPlayer` 的运行时元数据崩溃，并保留系统播放、暂停、拖动、音量和全屏控制；播放器 item 加载或播放中断时会释放失败 item、显示原因并恢复播放按钮供重试。播放器区域内的滚轮事件转交外层详情滚动页，不再改变播放进度。
+4. 播放器下方固定显示“百科/评论”切换控件；相关推荐加载中、失败或非空时作为第三个 Tab 出现，成功空结果时隐藏；其右侧依次为清晰度、下载和收藏操作。MV 详情缺少可识别档位时仍显示标准请求档位，不再把菜单直接隐藏。
+5. MV 百科读取已确认的 UGC MV 接口，并以详情简介兜底；普通视频只展示详情接口已有的简介、发布时间和播放次数，不声明不存在的独立视频百科接口。
+6. 相关推荐移入顶部 Tab：加载中显示进度，失败可重试，成功非空显示列表，成功空结果直接隐藏 Tab；推荐项可连续替换当前详情 Route。
+7. 下载复用播放 URL 获取和安全校验链路，只接受带 `ftyp` 容器头的 MP4，不调用网易云音乐专用下载接口。
+8. 最近播放按 `threadId/isMV/type/resourceType` 及明确的 `vid/videoId/uuid/mvId` 字段判型；内层真实 ID 优先于外层 `resourceId`，只有仅含通用 `id` 的歧义类型保持不可点击。
+9. “MV 与视频”首页提供“推荐/我的收藏”顶部切换；收藏页读取账号的混合 MV/视频收藏列表，按原始响应条数分页并保留字符串视频 ID，未登录时显示登录操作。
+10. 搜索页新增“MV”和“视频”范围，分别使用 cloudsearch 类型 `1004`、`1014`；结果复用现有行组件并进入对应详情，普通视频 ID 始终保持字符串。
 
-## 交付范围
+## App 前端入口
 
-1. 提供一个 MV/视频推荐入口，并让最近播放中的视频摘要可进入详情。
-2. 分别加载 MV 和视频详情，保留两类 ID：MV 为正整数，视频 ID 为非空字符串。
-3. 按服务端返回的可用清晰度获取临时播放 URL，使用 AVKit 原生控件播放。
-4. 登录用户可收藏/取消收藏 MV 或视频；成功后更新详情状态并失效 `.library` 缓存。
-5. 支持评论列表分页和评论总数，只读复用现有评论行与表情渲染。
-6. 详情页加载相关推荐，推荐项可继续打开对应的 MV/视频详情。
+| 入口 | 操作 | 到达内容 |
+| --- | --- | --- |
+| 左侧边栏 | 点击“MV 与视频” | 默认进入混合 MV/视频推荐列表 |
+| MV 与视频页顶部 | 切换“推荐/我的收藏” | 查看推荐，或查看账号已收藏的混合 MV/视频；未登录时可前往登录 |
+| 左侧边栏 | 点击“搜索”，选择“MV”或“视频” | 调用对应搜索类型并显示可进入详情的结果 |
+| 左侧边栏 | 点击“最近播放”，再切换到“视频” | 账号最近播放的 MV/视频摘要；单击或双击明确类型的条目均可进入详情 |
+| 推荐列表 | 点击带“MV”标识的条目 | MV 详情 |
+| 推荐列表 | 点击带“视频”标识的条目 | 视频详情 |
+| 详情页播放器下方 | 切换到“相关推荐”Tab 并点击条目 | 替换为对应 MV/视频详情；成功空结果时不显示该 Tab |
+| 详情页播放器下方 | 切换“百科/评论” | MV 百科或视频简介、只读评论 |
+| 详情页播放器下方 | 使用清晰度菜单、下载、星形按钮 | 切换播放流、下载、收藏/取消收藏 |
+| 设置 > 存储 | 设置“媒体下载位置” | 歌曲、MV 和视频复用此目录；默认是 `~/Downloads/TinyCloudMusicDownloads/歌曲` |
 
-## 明确不做
-
-- 不下载、转码、缓存视频文件，不实现弹幕、投屏、画中画或自定义视频解码器。
-- 不新增 MV/视频评论发表、回复、点赞、删除或举报；现有歌曲评论写方法保持歌曲专用。
-- 不实现点赞/转发视频、上传视频、直播、短视频创作或完整视频频道体系。
-- 不把 MV 数字 ID 和视频字符串 ID 强行统一成 `Int64`。
-- 不改造歌曲播放队列来承载视频；视频使用详情页持有的 `AVPlayer`，开始播放前暂停歌曲播放器。
-- 不缓存、持久化或记录带鉴权参数的播放 URL。
+未登录点击星形收藏按钮会进入现有“登录与会话”页面。视频文件是直接下载，不进入歌曲“下载”队列页面，也不承诺断点续传。
 
 ## 接口契约
 
-表中 URI 为上游签名 URI；WEAPI 请求通过现有 `requestWEAPI` 使用对应 `/weapi/...` 物理路径。
+表中 URI 是上游签名 URI；WEAPI 请求通过现有 `requestWEAPI` 使用对应 `/weapi/...` 物理路径。
 
-| 功能 | 协议 | 上游 URI | 请求体 | 属性 |
+| 功能 | 协议 | 上游 URI | 请求体 | 缓存/认证 |
 | --- | --- | --- | --- | --- |
-| 推荐视频 | WEAPI | `/api/videotimeline/get` | `offset`, `filterLives: "[]"`, `withProgramInfo: "true"`, `needUrl: "1"`, `resolution: "480"` | `.detail`，只读 |
-| MV 详情 | WEAPI | `/api/v1/mv/detail` | `id` | `.detail`，只读 |
-| MV 播放 URL | WEAPI | `/api/song/enhance/play/mv/url` | `id`, `r` | 不缓存 |
-| MV 收藏 | WEAPI | `/api/mv/sub`、`/api/mv/unsub` | `mvId`, `mvIds` | 写请求，不重试 |
-| MV 评论 | WEAPI | `/api/v1/resource/comments/R_MV_5_<id>` | `rid`, `limit`, `offset`, `beforeTime` | `.comments`，只读 |
-| 视频详情 | WEAPI | `/api/cloudvideo/v1/video/detail` | `id` | `.detail`，只读 |
-| 视频播放 URL | WEAPI | `/api/cloudvideo/playurl` | `ids` JSON 字符串数组，`resolution` | 不缓存 |
-| 视频收藏 | WEAPI | `/api/cloudvideo/video/sub`、`/api/cloudvideo/video/unsub` | `id` | 写请求，不重试 |
-| 视频评论 | WEAPI | `/api/v1/resource/comments/R_VI_62_<id>` | `rid`, `limit`, `offset`, `beforeTime` | `.comments`，只读 |
-| 相关推荐 | WEAPI | `/api/cloudvideo/v1/allvideo/rcmd` | `id`, `type`；MV 为 `0`，视频为 `1` | `.detail`，只读 |
+| 个性化 MV | WEAPI | `/api/personalized/mv` | 空对象 | `.detail`，普通读取 |
+| 推荐视频 | WEAPI | `/api/videotimeline/get` | `offset`、`filterLives: "[]"`、`withProgramInfo: "true"`、`needUrl: "1"`、`resolution: "480"` | `.detail`，普通读取 |
+| 已收藏 MV/视频 | WEAPI | `/api/cloudvideo/allvideo/sublist` | `limit`、`offset`、`total: true` | `.library`，需要账号 |
+| 搜索 MV/视频 | EAPI | `/api/cloudsearch/pc` | `s`、`type: 1004/1014`、`limit`、`offset`、`total: true` | `.search`，只读 |
+| MV 详情 | WEAPI | `/api/v1/mv/detail` | `id` | `.detail`，普通读取 |
+| 视频详情 | WEAPI | `/api/cloudvideo/v1/video/detail` | `id` | `.detail`，普通读取 |
+| MV 百科 | EAPI | `/api/rep/ugc/mv/get` | `mvId` | `.detail`，只读 |
+| MV 播放 URL | WEAPI | `/api/song/enhance/play/mv/url` | `id`、`r` | 不缓存，`vip: true` |
+| 视频播放 URL | WEAPI | `/api/cloudvideo/playurl` | `ids` JSON 字符串数组、`resolution` | 不缓存，`vip: true` |
+| MV 收藏 | WEAPI | `/api/mv/sub`、`/api/mv/unsub` | `mvId`、`mvIds` | 写请求，不自动重试 |
+| 视频收藏 | WEAPI | `/api/cloudvideo/video/sub`、`/api/cloudvideo/video/unsub` | `id` | 写请求，不自动重试 |
+| MV 评论 | WEAPI | `/api/v1/resource/comments/R_MV_5_<id>` | `rid`、`limit`、`offset`、`beforeTime` | `.comments`，只读 |
+| 视频评论 | WEAPI | `/api/v1/resource/comments/R_VI_62_<id>` | `rid`、`limit`、`offset`、`beforeTime` | `.comments`，只读 |
+| 相关推荐 | WEAPI | `/api/cloudvideo/v1/allvideo/rcmd` | `id`、`type`；MV 为 `0`，视频为 `1` | `.detail`，只读 |
+| 最近播放 | WEAPI | `/api/play-record/newvideo/list` | `limit` | `.library`，需要账号 |
 
-所有动态路径只允许由已验证的资源 ID 生成。MV ID 必须大于 0；视频 ID 去除空白后非空且只能作为 payload/经过百分号编码的已知路径片段使用，不能接受任意 URL。
+推荐页实际请求 `/api/personalized/mv`，并请求 timeline 的 `offset=0/8/16` 三页。单个推荐请求失败不会遮蔽其他成功页；所有来源均无可用条目时才显示整体失败。
 
-收藏写请求只有业务 code 成功后才更新 UI。`mvIds` 按参考实现编码为包含当前 ID 的 JSON 字符串数组，不能用 Swift 数组描述猜测上游 form 编码。
+所有动态路径和 payload 先验证资源 ID。MV ID 必须大于零；视频 ID 去除首尾空白后必须非空，始终保留字符串原值，不能把纯数字字符串猜成 MV。
 
-## 协议与播放门槛
+## 播放、下载与认证
 
-- 直接复用现有 WEAPI，不新增 `VideoTransport` 或第二套加密实现。
-- `requestWEAPI` 默认会失效账号缓存；推荐、详情、播放 URL、评论和相关推荐等读取必须显式传 `invalidatesAccountCache: false`，只有收藏写入允许成功后失效缓存。
-- 每个固定 URI 必须进入 contract check；播放 URL 响应至少覆盖空 URL、多个清晰度、需登录和版权不可用。
-- 从响应真实字段选择清晰度；优先用户选择且服务端可用的值，失败可降一级一次，不能循环探测。
-- 播放 URL 必须是 HTTPS，并限制为脱敏 fixture/live contract 中确认的网易 CDN host。重定向后仍执行同一 allowlist。
-- 使用 `AVKit.VideoPlayer`/`AVPlayer` 提供播放、暂停、拖动、音量和系统全屏能力，不自绘控制条。
-- 切换资源或离开详情页时取消 URL 请求并停止该页播放器；过期 URL 只在用户再次播放时重新请求。
+- MV/视频播放 URL 优先使用独立 `MUSIC_U` 的 VIP requester，不转发完整扫码 Cookie 或扫码 CSRF；若独立 `MUSIC_U` 为空则直接使用扫码 Cookie。
+- VIP requester 返回空地址、不符合 URL allowlist 的地址，或 HTTP/业务响应为 3xx、401、403 时，仅在存在非游客扫码 Cookie 的前提下对同一清晰度回退。Cookie 回退沿用音频播放链接的 iPhone VIP 客户端配置；网络错误、HTTP 5xx、坏 JSON 和取消不会触发扫码 Cookie 请求。
+- 播放和下载优先按详情返回的真实清晰度选择；详情未列出清晰度时，使用当前默认值请求一次播放 URL，以服务端返回的实际清晰度为准，不再静默禁用播放。首选清晰度明确返回“不可用/空 URL”时，只降一级并重试一次；地址为空或无效时按 `VIP 720 -> Cookie 720 -> VIP 480 -> Cookie 480` 尝试，VIP 已明确鉴权失效时后续跳过它。鉴权失败、5xx、坏 JSON、取消或其他错误本身不触发清晰度 fallback。
+- 切换清晰度会重新获取播放 URL 并替换当前 `AVPlayer` item，保留播放时间和播放/暂停状态；切换失败恢复原清晰度和原播放器。
+- MV 详情优先读取 `brs` 字典键以及数组项中的 `resolution/r`，只接受 `1080/720/480/240` 档位；响应缺失或无法识别时显示这四个“请求档位”，服务端返回的实际 `r` 仍会更新当前选择。`br` 不作为分辨率，避免把码率显示成 `P` 值。
+- 鼠标位于播放器可见区域时，滚轮事件在 AVKit 私有内容视图处理前被截获并交给外层详情滚动页；拖动系统进度条仍可正常调整进度。
+- 下载按钮重新走同一播放 URL API、清晰度 fallback 和 URL allowlist，不调用 `download` 类专用接口。文件名为“标题 - 清晰度P.mp4”，完成后显示文件名提示。
+- 播放 URL API 的 VIP 与扫码 Cookie 请求均只允许 HTTPS 同 host 重定向。播放前使用 `Range: bytes=0-0` 仅读首字节预检，接受 200/206；下载器直接流式读取播放 URL。两条媒体路径的每次跳转都执行同一 allowlist，取消或下载失败时清理 `.part` 临时文件。
+- 页面离开、资源快速切换和账号切换会取消详情、相关、播放 URL、下载和收藏任务，并停止本页播放器。
 
-## 数据模型
+## 播放 URL 响应结构核对结论
 
-保持两类小模型，不建立通用媒体 CMS：
+2026-07-28 对仓库参考实现、脱敏结构与反编译解析路径进行了核对：已确认的候选地址字段是顶层 `url` 或 `urlInfo.url`，并带有 `r`、`expi/validity/validityTime` 等分辨率或有效期字段；未发现 `baseUrl`、`backupUrl`、`backupUrls` 或同义候选源数组。本次未读取生产凭据，也未执行认证播放 live 请求。
 
-```swift
-struct MVDetail: Identifiable, Equatable, Sendable {
-    let id: Int64
-    let title: String
-    let artistName: String
-    let coverURL: URL?
-    let durationMilliseconds: Int64
-    let isSubscribed: Bool
-}
+因此当前实现没有虚构“主源/备源”自动切换。现有自动处理严格分为：
 
-struct VideoDetail: Identifiable, Equatable, Sendable {
-    let id: String
-    let title: String
-    let creatorName: String
-    let coverURL: URL?
-    let durationMilliseconds: Int64
-    let isSubscribed: Bool
-}
+1. 网易官方 allowlist CDN 返回 `http://` 且使用默认 80 端口时，在本地规范化为同 host/path/query 的 `https://`。
+2. 未知 host、带 user/password、异常端口或仍不满足 HTTPS allowlist 的地址直接拒绝。
+3. 服务明确表示当前清晰度不可用时，只降一级一次；这不是 CDN 备源切换。
 
-enum VideoRecommendation: Identifiable, Equatable, Sendable {
-    case mv(MVSummary)
-    case video(VideoSummary)
-}
+如果未来真实脱敏 fixture 出现 `baseUrl/backupUrl` 等字段，应先补 decoder 和安全测试，再按顺序尝试同样通过 HTTPS allowlist 的候选源；在此之前验收不得声称支持响应内多源回退。
+
+播放器入口 URL 在交给 `AVPlayer` 前完成逐跳预检，并使用预检后的最终 URL；下载器也逐次校验跳转请求。原生 `AVPlayer` 后续内部请求不暴露等价的逐跳 hook，因此当前安全声明不扩展为“已审计 AVPlayer 播放后的每一次内部重定向”。
+
+## 百科、评论与相关推荐
+
+- MV：“百科”页读取 `/api/rep/ugc/mv/get`；接口失败或无 block 时可显示 MV 详情中的简介，百科失败不遮蔽播放和评论。
+- 普通视频：没有经过 fixture/contract 确认的独立视频百科 URI。“百科”页只展示视频详情已有的简介、发布时间和播放次数；字段为空时显示“暂无百科资料”。
+- 评论：MV 和视频分别生成 `R_MV_5_...`、`R_VI_62_...` thread ID，只读分页加载；不提供发表、回复、点赞、删除或举报。
+- 相关推荐：独立于百科和评论加载；加载中或失败时保留 Tab 以显示反馈和重试，成功非空时显示列表，成功空结果时隐藏 Tab；点击条目只接受最新详情响应。
+
+## 并发、缓存与安全边界
+
+- 推荐、详情和相关推荐使用 `.detail`，收藏列表使用 `.library`，搜索使用 `.search`，评论使用 `.comments`；播放 URL、下载响应和收藏写入不缓存。
+- 所有读取显式设置 `invalidatesAccountCache: false`；收藏成功后才失效 `.detail/.library` 缓存并更新 UI。
+- 收藏写请求固定发送一次。结果未知时重新读取详情确认，不自动重放写请求。
+- 不缓存、持久化或记录带鉴权 query 的播放 URL；日志不得包含 Cookie、`MUSIC_U`、完整响应或视频 ID 与账号的组合。
+- 下载文件只写入用户配置的下载目录；播放 URL 本身不写入下载元数据。
+- 远程标题、简介和评论按纯文本显示，不执行 HTML、脚本、任意 URL 或内嵌页面。
+- 不把视频加入歌曲播放队列；开始视频播放前暂停歌曲播放器。
+- 不实现弹幕、投屏、画中画、自定义解码器、转码、视频上传或评论写操作。
+
+## 自动检查
+
+离线检查应至少运行：
+
+```sh
+swift build -j 4 -Xswiftc -warnings-as-errors
+swift test -j 4
+TINYCLOUDMUSIC_COOKIE= TINYCLOUDMUSIC_MUSIC_U= Checks/run-api-checks.sh
 ```
 
-播放地址使用短生命周期值对象，至少包含 URL、分辨率和可选过期时间，不进入 `Equatable` 详情缓存。数字/数字字符串 ID 均要兼容；视频 ID 始终保留字符串原值。
+最后一条只允许通过 `run-api-checks.sh` 入口以显式空凭据运行。不要直接执行临时 live-check 二进制，也不要为自动检查读取生产 Keychain。
 
-评论只抽取现在确有复用价值的资源描述：
+覆盖重点：
 
-```swift
-enum CommentResource: Hashable, Sendable {
-    case song(Int64)
-    case mv(Int64)
-    case video(String)
-}
-```
+1. personalized MV 和 timeline 三页可合并、去重，部分请求失败仍保留成功结果。
+2. MV 数字 ID、视频字符串 ID 和最近播放 `threadId/isMV/type/resourceType` discriminator 不互相猜型。
+3. 播放 URL 支持 `url`/`urlInfo.url`，官方 HTTP CDN 可升级，未知 host/端口/凭据 URL 被拒绝。
+4. 只有 `.unavailable` 触发一次低清 fallback；HTTP 5xx 不 fallback。
+5. 播放 URL 请求先使用独立 `MUSIC_U` requester；地址为空/未通过 allowlist，或鉴权返回 HTTP/业务 3xx、401、403 时回退非游客扫码 Cookie；5xx、坏 JSON、取消以及无有效扫码 Cookie 时不回退。
+6. 下载只接受 allowlist URL，成功提交 MP4，失败不留下 `.part` 文件。
+7. 评论 thread ID、分页和相关推荐 `type` 正确。
+8. 收藏失败不留下本地假状态，歌曲评论和歌曲播放回归不受影响。
+9. 收藏列表按原始响应条数推进 offset，混合类型和跨页重复项不会产生错误 Route 或重复行。
+10. MV/视频搜索请求类型、分页、MV 数字 ID 与视频字符串 ID 路由正确。
+11. 播放器内滚轮命中播放器区域并转交页面滚动，播放器外滚轮不被 monitor 截获。
 
-由该类型生成 thread ID 和只读分页请求；歌曲评论写 API 继续显式接收 `songID`，不建立通用评论写框架。
+## 手工验收前提
 
-## UI 行为
+以下步骤由用户人工执行。Agent 默认不得启动 App、读取生产 Keychain、检查凭据环境变量、运行认证 live check 或执行收藏写入。
 
-- 推荐页使用混合 MV/视频列表，明确显示类型、标题、作者、时长和封面；没有巨型 hero 或嵌套卡片。
-- 详情页先显示真实封面和元数据，播放后在同一稳定比例区域切换为 `VideoPlayer`，建议 `16:9`。
-- 收藏使用星形图标按钮并提供 tooltip/辅助功能标签；未登录时引导现有会话页。
-- 评论区复用现有评论 row、排序和加载更多视觉样式，但只显示读取能力。
-- 相关推荐位于详情正文之后，点击时替换 Route；快速切换只接受最后一个详情响应。
-- 加载、空结果、不可播放、登录失效、网络失败分别呈现；评论失败不应遮蔽已经可播放的详情。
-- 最近播放视频摘要获得点击能力；未知/缺失 ID 保持不可点击，不制造伪 Route。
+- 若需要 agent 代为启动 App 或使用生产会话，用户必须对该次具体操作明确授权。
+- 不得使用 `security` CLI、Keychain UI 自动化或 Security framework API 读取 `com.tinycloudmusic.app.session`。
+- 不得用 `env`、`printenv`、shell 展开等方式查看 `TINYCLOUDMUSIC_COOKIE` 或 `TINYCLOUDMUSIC_MUSIC_U`。
+- 若 macOS 出现 Keychain/密码提示，取消或拒绝，并报告触发命令；不得输入密码或选择“始终允许”。
+- 未经该次明确授权，不得设置 `TINYCLOUDMUSIC_MUTATING_API_CHECK`，不得执行收藏/取消收藏等生产写请求。
 
-## 修改落点
+## 完整手工验收清单
 
-- 新建 `Sources/TinyCloudMusic/VideoModels.swift`：MV/视频模型和 fixture decoder。
-- 新建 `Sources/TinyCloudMusic/LiveVideoLibrary.swift`：固定 WEAPI 方法；持有现有 `EAPITransport`。
-- 新建 `Sources/TinyCloudMusic/VideoViews.swift`：推荐、详情、原生播放器和只读评论组合。
-- `Sources/TinyCloudMusic/Models.swift`：增加明确的 MV/视频 Route。
-- `Sources/TinyCloudMusic/Views.swift`、`LibraryFeatureViews.swift`：导航入口和最近视频直达。
-- `Sources/TinyCloudMusic/Repository.swift`、`LiveMusicRepository+Detail.swift`：在现有穷举 switch 中把新领域 Route 明确归为 `invalidRoute`；视频详情由 `LiveVideoLibrary` 加载，不塞进歌曲 `DetailContent`。
-- `Sources/TinyCloudMusic/MusicLibraryModels.swift`、`LibraryFeatureViews.swift`：抽取最小评论资源和 module-internal 纯展示 row。歌曲页面在外层保留回复/点赞/删除，视频页面只组合展示 row；不要复用绑定歌曲写操作的 `CommentsView`。
-- `Checks/WriteAPIContractCheck.swift`：固定路径、payload、读写和“不缓存播放 URL”断言。
-- 新领域源文件若被 contract check 引用，同步加入 `Checks/run-api-checks.sh` 的 `COMMON_SOURCES`。
+### A. 未登录可做项
 
-若 P2-02 同期进行，由一个 agent 独占 `Models.swift`/`Views.swift` 的 Route 汇总，另一个只提交领域文件，避免互相覆盖。
+- [ ] 启动 App 后，从左侧边栏进入“MV 与视频”，页面不是营销页或空壳。
+- [ ] 首次加载后列表明显多于单页 8 条，并同时存在红色“MV”和蓝色“视频”类型标识；标题、作者、时长和封面排版正常。
+- [ ] 点击刷新按钮，按钮在加载时禁用；刷新后不出现重复条目，已有成功来源不会被另一个失败来源清空。
+- [ ] 分别点击一个 MV 和一个普通视频，确认进入对应详情且标题、作者、封面、时长正确。
+- [ ] 播放器区域始终保持 16:9；普通视频详情未列出档位时不显示清晰度菜单，但点击播放或下载仍会请求一次默认档位并明确显示服务端错误，不制造伪 URL。
+- [ ] 视频按详情返回档位显示清晰度菜单；MV 即使详情缺少档位也显示 `1080P/720P/480P/240P` 请求选项，服务端返回较低实际档位时菜单同步更新，不显示码率数字。
+- [ ] 将鼠标放在视频画面或控制条上滚动，详情页继续上下滚动且播放进度不变化；直接拖动系统进度条仍有效。
+- [ ] 播放器下方能看到“百科/评论”切换控件，清晰度菜单位于其右侧。
+- [ ] MV“百科”显示 UGC block 或详情简介兜底；普通视频只显示简介、发布时间、播放次数或明确空状态，不显示虚构的“视频百科接口”内容。
+- [ ] 切到“评论”，确认加载、空结果或错误状态只影响评论区域，不遮蔽详情与播放器。
+- [ ] 相关推荐加载中或失败时显示 Tab 及对应反馈；成功返回条目时显示列表，成功空结果时 Tab 直接隐藏且当前选择安全切回“百科”。
+- [ ] 点击相关推荐连续进入下一条详情，确认 Route 类型仍正确；快速连续点击时最终只显示最后一次选择。
+- [ ] 点击星形收藏按钮进入“登录与会话”，没有先显示本地假收藏状态。
+- [ ] 返回“MV 与视频”首页切到“我的收藏”，未登录时显示“需要登录”和“前往登录”，不发送收藏列表请求。
+- [ ] 进入“搜索”，分别选择“MV”和“视频”搜索；结果含封面、标题和作者，点击后分别进入 MV/视频详情。
 
-## 并发、缓存与安全
+未登录时播放和下载是否成功取决于资源是否公开以及现有会话；显示“需登录/权益不足”属于有效失败状态，不能据此跳过登录态验收。
 
-- 详情、评论、推荐各自有 generation/in-flight 标记；旧资源响应不能覆盖新详情。
-- 推荐和详情可缓存；评论使用 `.comments`；播放 URL、收藏响应不缓存。
-- 收藏写请求固定发送一次；结果未知时重新读取详情确认，不能自动重放写请求。
-- 日志不得包含播放 URL、Cookie、视频 ID 与账号组合或完整响应。
-- 远程标题按纯文本显示；不执行响应 HTML、脚本、任意链接或内嵌页面。
-- 页面消失、账号切换和退出登录应停止视频、取消任务并清空账号相关收藏覆盖。
+### B. MV 与视频播放覆盖
 
-## 最小测试
+- [ ] 在有效 `MUSIC_U` 会话下选择一个公开 MV，点击播放，原生控制条可播放、暂停、拖动、调音量和全屏。
+- [ ] 选择一个普通视频重复上述操作，确认字符串 ID 没有被转换为 MV 数字 ID。
+- [ ] 播放歌曲后再播放视频，确认歌曲暂停；离开视频详情后视频停止，歌曲队列未被视频污染。
+- [ ] 播放中切换到另一个可用清晰度，确认画面使用新流、时间位置基本保持、原播放/暂停状态保持。
+- [ ] 对详情没有 `brs` 的 MV 依次选择两个请求档位，确认每次都会重新请求播放 URL；若服务端降档，UI 显示实际返回档位。
+- [ ] 制造或使用明确返回“当前清晰度不可用”的 fixture/资源，确认只请求下一级一次并更新菜单显示。
+- [ ] 对鉴权失败、5xx、坏 JSON 或安全校验失败场景，确认错误本身不触发低清晰度探测；只有随后扫码 Cookie 响应明确为空时才允许降一级。
+- [ ] 有独立 `MUSIC_U` 时确认先使用 VIP requester；令其返回空地址或 HTTP/业务 3xx、401、403，确认同一清晰度改用非游客扫码 Cookie 重试；VIP 已鉴权失效时低一级不得再次使用它。
+- [ ] 令 VIP requester 返回未知 host/异常端口等不安全地址，确认不使用该地址，并以音频同款 iPhone VIP 配置对同一清晰度发送一次扫码 Cookie 回退；回退地址仍需通过 allowlist。
+- [ ] HTTP 5xx、坏 JSON、取消或网络错误不得触发 Cookie 回退。清空独立 `MUSIC_U` 但保留扫码 Cookie 时应直接请求一次；移除扫码 Cookie 或只保留游客 Cookie 时，不得在 VIP 失败后伪造账号 Cookie 回退。
+- [ ] 使用损坏或不可解码的媒体 fixture，确认加载/播放失败后显示具体错误、封面和播放按钮恢复，可再次重试。
+- [ ] 快速切换多个详情或返回上一页，确认旧 URL 响应不会重新挂回播放器。
 
-1. MV 数字 ID 与视频字符串 ID fixture 分别解码且不会互相转换。
-2. 十个固定接口的 WEAPI 路径、payload、缓存/写属性正确；所有读取均显式设置 `invalidatesAccountCache: false`。
-3. 评论 thread ID 分别为 `R_MV_5_...` 和 `R_VI_62_...`，分页 offset/beforeTime 正确。
-4. 播放 URL 为空、HTTP、未知 host 时被拒绝；播放 URL 不进入响应缓存或日志。
-5. 收藏失败不留下本地假状态，成功后失效 `.library`。
-6. 快速切换推荐项时只显示最后选择的详情，离开页面后播放器停止。
-7. 现有歌曲评论写路径和歌曲播放测试保持通过。
+### C. URL 安全与回退
 
-## 验收标准
+- [ ] 使用脱敏 fixture 验证官方 `http://*.vod.126.net` 或 `http://*.music.126.net` 默认端口地址被规范化为同一地址的 HTTPS 后可用。
+- [ ] 验证未知 host、伪后缀 host、userinfo、非 80/443 端口和无法升级的 HTTP 地址显示“播放地址未通过安全校验”。
+- [ ] 检查应用日志、下载队列和偏好设置，不出现播放 URL query、Cookie、`MUSIC_U` 或完整响应。
+- [ ] 确认当前响应没有 `baseUrl/backupUrl` 时 UI 不声称正在切换备源；只验证 HTTPS 升级和一次低清 fallback。
+- [ ] 如果未来响应出现备源字段，先保存脱敏 fixture 并补测试，不能直接把未校验 URL 送入播放器或下载器。
 
-- 用户可以从推荐或最近播放进入 MV/视频详情并用原生控件播放。
-- 登录用户可收藏/取消收藏；刷新后状态与服务端一致。
-- MV/视频评论可分页读取，相关推荐可连续导航。
-- 播放 URL 过期后按需重新获取，未被持久化、记录或下载。
-- 没有新增视频上传、评论写入、通用 URL 请求或自定义解码器。
-- `swift build -j 4 -Xswiftc -warnings-as-errors`、`swift test -j 4` 和 `Checks/run-api-checks.sh` 通过。
+### D. 下载
+
+- [ ] 在“设置 > 存储”确认下载目录；如修改目录，使用用户明确选择的普通测试目录。
+- [ ] 分别打开一个 MV 和一个普通视频，选择目标清晰度后点击下载按钮。
+- [ ] 下载中按钮显示忙碌状态且不能重复点击；切换清晰度控件暂时禁用。
+- [ ] 完成后看到“视频已下载：<文件名>”提示，并在下载目录找到“标题 - 清晰度P.mp4”。
+- [ ] 用系统播放器打开文件，确认内容和清晰度对应当前详情；下载过程没有调用网易云音乐专用下载 URL 接口。
+- [ ] 同名重复下载不会覆盖已有文件，而是生成可用的新目标名。
+- [ ] 用 MP3/FLAC 或其他非 MP4 响应 fixture 验证下载显示“视频下载响应无效”，不会把内容伪装成 `.mp4` 保存。
+- [ ] 下载中离开详情，确认没有最终假成功文件，`.part` 临时文件被清理。
+- [ ] 用未知 CDN 或不安全跳转 fixture 验证下载被拒绝且不落盘。
+
+### E. 最近播放
+
+此组需要已登录账号，只读但仍属于认证 live 操作；agent 执行前必须取得该次明确授权。
+
+- [ ] 从左侧边栏进入“最近播放”，切换到“视频”，列表正常显示。
+- [ ] 分别单击和双击明确类型的条目，均能进入详情；整行标题、封面和空白区域均可点击。
+- [ ] 点击一个明确 `isMV=true`、`type=0`、`resourceType=MV/1`、`mvId` 或 `R_MV_5_...` 的记录，进入 MV 详情而不是 cloud-video 参数错误页。
+- [ ] 点击一个明确 `isMV=false`、`type=1`、`resourceType=MLOG/VIDEO/5`、`vid/videoId/uuid` 或 `R_VI_62_...` 的记录，进入普通视频详情；即使 ID 是纯数字字符串也保持视频类型。
+- [ ] 响应外层 `resourceId` 与内层 `vid/videoId/uuid/mvId/id` 不同时，确认使用内层真实 ID。
+- [ ] 仅含通用 `id`、缺少明确 discriminator 或有效 ID 的条目保持只读、不可点击，不制造伪 Route。
+
+### F. 登录收藏写入
+
+此组会修改生产账号状态，只能由用户人工执行，或在用户对该次写入明确授权后执行。
+
+- [ ] 在 MV 详情点击空心星形，成功后变为实心；刷新详情仍为已收藏。
+- [ ] 再次点击取消收藏，成功后恢复空心；刷新后与服务端一致。
+- [ ] 对普通视频重复收藏与取消收藏。
+- [ ] 回到“MV 与视频 > 我的收藏”，确认刚收藏的 MV/视频出现且类型标识正确；点击后进入对应详情。
+- [ ] 收藏条目超过一页时滚动到底部继续加载，确认无重复项、无跳页；分页失败后“重试”继续当前页而不是清空已有列表。
+- [ ] 在详情取消收藏后返回收藏页，确认列表刷新且该条目消失。
+- [ ] 断网或制造服务失败，确认星形不留下本地假状态，并显示独立错误信息。
+- [ ] 快速离开详情或切换账号，旧收藏响应不会覆盖新页面/新账号状态。
+- [ ] 不启用任何评论写入；视频/MV 评论始终只读。
+
+### G. 账号与回归
+
+- [ ] 从账号 A 切换到账号 B，详情收藏状态和最近播放重新加载，账号 A 状态不泄漏。
+- [ ] 退出登录后收藏按钮重新引导登录，已打开视频停止，账号相关任务取消。
+- [ ] 播放一首歌曲，确认歌曲音频、歌词、队列和歌曲下载仍正常。
+- [ ] 打开歌曲评论，确认原有歌曲评论写能力没有被视频只读评论模型破坏。
+- [ ] 在窄窗口检查 tabs、清晰度、下载和收藏控件不重叠，标题和最长错误文本不溢出。
+
+### H. 搜索 MV/视频
+
+- [ ] 未登录和登录状态各搜索一次 MV，确认请求成功、分页可继续加载，点击结果进入 `.mv` 详情。
+- [ ] 搜索普通视频，选择一个带字母、前导零或连字符的 ID，确认点击结果进入 `.video(String)` 详情且不被转换成 MV。
+- [ ] 快速切换“MV/视频”范围和关键词，确认旧结果不会覆盖当前范围；加载中有进度反馈，失败有重试，空结果有明确空态。
+- [ ] 返回搜索结果后查询词、范围和列表位置按现有搜索导航行为保留。
+
+## 验收结论记录
+
+完成后记录以下信息，不记录任何凭据或完整播放 URL：
+
+- App 构建版本/commit：
+- macOS 版本：
+- 未登录清单结果：
+- MV 资源结果：
+- 普通视频资源结果：
+- 最近播放结果：
+- 收藏列表结果：
+- MV/视频搜索结果：
+- 下载目录与生成文件名（仅路径/文件名，不含 URL）：
+- 登录收藏写入是否由用户明确授权：
+- 未执行项及原因：
+- 发现的脱敏错误码/错误文案：
+
+## 完成标准
+
+- 推荐首页稳定展示多页视频和 personalized MV，不再只有单页 8 个视频。
+- 推荐和最近播放均能分别进入正确的 MV/视频详情。
+- “我的收藏”可分页展示并进入已收藏 MV/视频；搜索页可按 MV/视频类型查询并保持正确 ID 类型。
+- MV/视频可使用 VIP requester 获取播放 URL，并通过原生控件播放；官方 HTTP CDN 可安全升级，未知地址被拒绝。
+- MV 和视频均提供清晰度切换；播放器内滚轮只滚动详情页，不调整播放进度。
+- 百科/简介、只读评论和相关推荐互不遮蔽；相关推荐空结果隐藏 Tab，加载和错误状态仍可见、可恢复。
+- 播放 URL 下载可生成可播放 MP4，且不调用专用下载接口、不泄漏 URL/凭据。
+- 收藏写入只在明确成功后更新；所有生产认证和写入检查遵守 Keychain/凭据安全边界。
+- 离线 build、test、空凭据 API checks 通过；未获授权的生产登录、Keychain 和写入检查明确标记为未执行，而不是伪报通过。

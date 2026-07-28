@@ -119,6 +119,18 @@ struct CoreTests {
         )
         #expect(vipCookie.contains("MUSIC_U=vip-token"))
         #expect(vipCookie.hasSuffix("requestId=request"))
+        let iPhoneVIPCookie = EAPICookieHeader.value(
+            cookie: "QR_SESSION=qr-session; __csrf=csrf; MUSIC_U=embedded-token",
+            musicU: "vip-token",
+            vip: true,
+            buildVersion: 123,
+            requestID: "request",
+            iPhoneClient: true
+        )
+        #expect(iPhoneVIPCookie.contains("MUSIC_U=vip-token"))
+        #expect(!iPhoneVIPCookie.contains("QR_SESSION="))
+        #expect(!iPhoneVIPCookie.contains("__csrf="))
+        #expect(!iPhoneVIPCookie.contains("embedded-token"))
         let embeddedFallbackCookie = EAPICookieHeader.value(
             cookie: "__csrf=csrf; MUSIC_U=embedded-token",
             musicU: "",
@@ -588,6 +600,11 @@ struct CoreTests {
         )
         #expect(secureRequest.url?.scheme == "https")
         #expect(secureRequest.imageID?.hasPrefix("https://") == true)
+        let protocolRelative = try #require(URL(string: "//p1.music.126.net/cover.jpg"))
+        let protocolRelativeRequest = try #require(
+            ArtworkPipeline.request(for: protocolRelative, size: CGSize(width: 44, height: 44), now: now)
+        )
+        #expect(protocolRelativeRequest.url?.absoluteString == "https://p1.music.126.net/cover.jpg")
 
         let watermarked = try #require(
             URL(string: "http://p1.music.126.net/cover.jpg?enlarge=1%7CimageView=1&image=dGVzdA==")

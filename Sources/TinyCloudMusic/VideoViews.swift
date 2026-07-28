@@ -1,3 +1,4 @@
+import AppKit
 import AVKit
 import SwiftUI
 
@@ -73,6 +74,27 @@ private enum VideoPageDetail: Equatable {
         }
     }
 
+    var descriptionText: String {
+        switch self {
+        case let .mv(value): value.description
+        case let .video(value): value.description
+        }
+    }
+
+    var publishTime: String {
+        switch self {
+        case let .mv(value): value.publishTime
+        case let .video(value): value.publishTime
+        }
+    }
+
+    var playCount: Int64 {
+        switch self {
+        case let .mv(value): value.playCount
+        case let .video(value): value.playCount
+        }
+    }
+
     func settingSubscribed(_ subscribed: Bool) -> Self {
         switch self {
         case let .mv(value): .mv(value.settingSubscribed(subscribed))
@@ -81,73 +103,186 @@ private enum VideoPageDetail: Equatable {
     }
 }
 
-private enum VideoDetailSection: String, CaseIterable {
+private enum VideoDetailSection: String {
+    case knowledge = "百科"
     case comments = "评论"
     case related = "相关推荐"
 
     var symbol: String {
         switch self {
+        case .knowledge: "text.book.closed"
         case .comments: "bubble.left"
         case .related: "rectangle.stack"
         }
     }
+}
 
-    static func visible(hasRelated: Bool) -> [Self] {
-        hasRelated ? allCases : [.comments]
+// AppKit runs local event monitors on the main thread, but the imported callback is not actor-annotated.
+private struct MainThreadScrollEvent: @unchecked Sendable {
+    let value: NSEvent
+}
+
+struct VideoPlayerScrollGestureState: Sendable {
+    private var routesGestureToPage = false
+
+    mutating func shouldRouteToPage(
+        phase: NSEvent.Phase,
+        momentumPhase: NSEvent.Phase,
+        pointerInsidePlayer: Bool
+    ) -> Bool {
+        if phase.isEmpty, momentumPhase.isEmpty {
+            return pointerInsidePlayer
+        }
+        if phase.contains(.mayBegin) || phase.contains(.began) {
+            routesGestureToPage = pointerInsidePlayer
+        }
+        let shouldRoute = routesGestureToPage || pointerInsidePlayer
+        if phase.contains(.cancelled)
+            || momentumPhase.contains(.ended)
+            || momentumPhase.contains(.cancelled)
+        {
+            routesGestureToPage = false
+        }
+        return shouldRoute
+    }
+}
+
+private final class WeakPlayerView: @unchecked Sendable {
+    weak var value: AVPlayerView?
+
+    init(_ value: AVPlayerView) { self.value = value }
+}
+
+private final class MainThreadScrollGestureState: @unchecked Sendable {
+    @MainActor var value = VideoPlayerScrollGestureState()
+}
+
+struct NativeVideoPlayerView: NSViewRepresentable {
+    let player: AVPlayer
+
+    final class Coordinator {
+        private var scrollMonitor: Any?
+        private let scrollGesture = MainThreadScrollGestureState()
+
+        deinit {
+            if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor) }
+        }
+
+        func installScrollMonitor(for view: AVPlayerView) {
+            let view = WeakPlayerView(view)
+            let scrollGesture = scrollGesture
+            scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+                let event = MainThreadScrollEvent(value: event)
+                let consumed = MainActor.assumeIsolated {
+                    guard let view = view.value,
+                          event.value.window === view.window
+                    else { return false }
+                    let pointerInsidePlayer = NativeVideoPlayerView.containsScrollLocation(
+                        event.value.locationInWindow,
+                        window: event.value.window,
+                        in: view
+                    )
+                    guard scrollGesture.value.shouldRouteToPage(
+                        phase: event.value.phase,
+                        momentumPhase: event.value.momentumPhase,
+                        pointerInsidePlayer: pointerInsidePlayer
+                    ) else { return false }
+                    view.enclosingScrollView?.scrollWheel(with: event.value)
+                    return true
+                }
+                return consumed ? nil : event.value
+            }
+        }
+
+        func removeScrollMonitor() {
+            if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor) }
+            scrollMonitor = nil
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    @MainActor
+    static func containsScrollLocation(
+        _ location: NSPoint,
+        window: NSWindow?,
+        in view: AVPlayerView
+    ) -> Bool {
+        guard let viewWindow = view.window, window === viewWindow else { return false }
+        return view.visibleRect.contains(view.convert(location, from: nil))
+    }
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.player = player
+        context.coordinator.installScrollMonitor(for: view)
+        return view
+    }
+
+    func updateNSView(_ view: AVPlayerView, context: Context) {
+        if view.player !== player { view.player = player }
+    }
+
+    static func dismantleNSView(_ view: AVPlayerView, coordinator: Coordinator) {
+        coordinator.removeScrollMonitor()
+        view.player = nil
+    }
+}
+
+private enum VideoHomeSection: String, CaseIterable {
+    case recommendations = "推荐"
+    case subscriptions = "我的收藏"
+
+    var symbol: String {
+        switch self {
+        case .recommendations: "sparkles"
+        case .subscriptions: "star"
+        }
     }
 }
 
 struct VideoRecommendationsView: View {
     let library: LiveVideoLibrary
+    let currentUserID: Int64?
     let onOpenRoute: (Route) -> Void
+    let onLogin: () -> Void
 
-    @State private var items: [VideoRecommendation] = []
+    @State private var selectedSection = VideoHomeSection.recommendations
+    @State private var recommendations: [VideoRecommendation] = []
+    @State private var subscriptionPage: VideoSubscriptionPage?
     @State private var isLoading = false
+    @State private var isLoadingMore = false
     @State private var errorMessage: String?
     @State private var generation = 0
     @State private var loadTask: Task<Void, Never>?
 
     var body: some View {
-        Group {
-            if isLoading && items.isEmpty {
-                ProgressView("正在加载推荐…")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let errorMessage, items.isEmpty {
-                ContentUnavailableView {
-                    Label("推荐加载失败", systemImage: "wifi.exclamationmark")
-                } description: {
-                    Text(errorMessage)
-                } actions: {
-                    Button("重试") { startLoad() }
-                }
-            } else if items.isEmpty {
-                ContentUnavailableView("暂无推荐", systemImage: "play.rectangle")
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(items) { item in
-                            Button { onOpenRoute(item.route) } label: {
-                                VideoRecommendationRow(item: item)
-                            }
-                            .buttonStyle(.plain)
-                            Divider().padding(.leading, 132)
-                        }
-                    }
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 12)
+        VStack(spacing: 0) {
+            Picker("视频内容", selection: $selectedSection) {
+                ForEach(VideoHomeSection.allCases, id: \.self) { section in
+                    Label(section.rawValue, systemImage: section.symbol).tag(section)
                 }
             }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 360)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 12)
+
+            Divider()
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .navigationTitle("MV 与视频")
         .toolbar {
             ToolbarItem {
-                Button(action: startLoad) { Image(systemName: "arrow.clockwise") }
-                    .help("刷新推荐")
-                    .accessibilityLabel("刷新推荐")
-                    .disabled(isLoading)
+                Button { startLoad(force: true) } label: { Image(systemName: "arrow.clockwise") }
+                    .help(refreshLabel)
+                    .accessibilityLabel(refreshLabel)
+                    .disabled(isLoading || isLoadingMore || isLoggedOutSubscription)
             }
         }
-        .task { startLoad() }
+        .task(id: loadIdentity) { startLoad() }
         .onDisappear {
             generation &+= 1
             loadTask?.cancel()
@@ -155,19 +290,128 @@ struct VideoRecommendationsView: View {
         }
     }
 
+    @ViewBuilder
+    private var content: some View {
+        if isLoggedOutSubscription {
+            ContentUnavailableView {
+                Label("需要登录", systemImage: "person.crop.circle.badge.exclamationmark")
+            } description: {
+                Text("登录后查看收藏的 MV 与视频。")
+            } actions: {
+                Button("前往登录", action: onLogin)
+            }
+        } else if isLoading && items.isEmpty {
+            ProgressView(loadingLabel)
+        } else if let errorMessage, items.isEmpty {
+            ContentUnavailableView {
+                Label(errorTitle, systemImage: "wifi.exclamationmark")
+            } description: {
+                Text(errorMessage)
+            } actions: {
+                Button("重试") { startLoad() }
+            }
+        } else if items.isEmpty {
+            ContentUnavailableView(emptyTitle, systemImage: selectedSection.symbol)
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(items) { item in
+                        Button { onOpenRoute(item.route) } label: {
+                            VideoRecommendationRow(item: item)
+                        }
+                        .buttonStyle(.plain)
+                        Divider().padding(.leading, 132)
+                    }
+                    if let errorMessage {
+                        InlineRetry(message: errorMessage) {
+                            if selectedSection == .subscriptions, let page = subscriptionPage, page.hasMore {
+                                Task { await loadMore(page) }
+                            } else {
+                                startLoad()
+                            }
+                        }
+                    } else if selectedSection == .subscriptions,
+                              let page = subscriptionPage,
+                              page.hasMore {
+                        LoadMoreTrigger(title: isLoadingMore ? "正在加载更多…" : "继续加载") {
+                            Task { await loadMore(page) }
+                        }
+                        .id(page.nextOffset)
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 12)
+            }
+        }
+    }
+
+    private var items: [VideoRecommendation] {
+        switch selectedSection {
+        case .recommendations: recommendations
+        case .subscriptions: subscriptionPage?.items ?? []
+        }
+    }
+
+    private var isLoggedOutSubscription: Bool {
+        selectedSection == .subscriptions && currentUserID == nil
+    }
+
+    private var loadIdentity: String {
+        "\(selectedSection.rawValue):\(currentUserID.map(String.init) ?? "guest")"
+    }
+
+    private var loadingLabel: String {
+        selectedSection == .subscriptions ? "正在加载收藏…" : "正在加载推荐…"
+    }
+
+    private var errorTitle: String {
+        selectedSection == .subscriptions ? "收藏列表加载失败" : "推荐加载失败"
+    }
+
+    private var emptyTitle: String {
+        selectedSection == .subscriptions ? "暂无收藏的 MV 或视频" : "暂无推荐"
+    }
+
+    private var refreshLabel: String {
+        selectedSection == .subscriptions ? "刷新收藏" : "刷新推荐"
+    }
+
     @MainActor
-    private func startLoad() {
+    private func startLoad(force: Bool = false) {
         generation &+= 1
         let requestGeneration = generation
+        let section = selectedSection
         loadTask?.cancel()
-        isLoading = true
+        isLoadingMore = false
         errorMessage = nil
+        guard !isLoggedOutSubscription else {
+            subscriptionPage = nil
+            isLoading = false
+            loadTask = nil
+            return
+        }
+
+        if section == .subscriptions { subscriptionPage = nil }
+        isLoading = true
         loadTask = Task { @MainActor in
             do {
-                let loaded = try await library.recommendations()
-                try Task.checkCancellation()
-                guard generation == requestGeneration else { return }
-                items = loaded
+                if force {
+                    await library.invalidateCachedResponses(
+                        in: section == .subscriptions ? [.library] : [.detail]
+                    )
+                }
+                switch section {
+                case .recommendations:
+                    let loaded = try await loadRecommendations()
+                    try Task.checkCancellation()
+                    guard generation == requestGeneration else { return }
+                    recommendations = loaded
+                case .subscriptions:
+                    let loaded = try await library.subscriptions()
+                    try Task.checkCancellation()
+                    guard generation == requestGeneration else { return }
+                    subscriptionPage = loaded
+                }
             } catch is CancellationError {
             } catch {
                 guard generation == requestGeneration else { return }
@@ -178,6 +422,51 @@ struct VideoRecommendationsView: View {
             loadTask = nil
         }
     }
+
+    @MainActor
+    private func loadMore(_ current: VideoSubscriptionPage) async {
+        let requestGeneration = generation
+        let accountID = currentUserID
+        guard selectedSection == .subscriptions,
+              accountID != nil,
+              current.hasMore,
+              !isLoadingMore
+        else { return }
+        isLoadingMore = true
+        errorMessage = nil
+        defer {
+            if generation == requestGeneration { isLoadingMore = false }
+        }
+        do {
+            let next = try await library.subscriptions(offset: current.nextOffset)
+            try Task.checkCancellation()
+            guard generation == requestGeneration,
+                  currentUserID == accountID,
+                  selectedSection == .subscriptions,
+                  subscriptionPage?.nextOffset == current.nextOffset
+            else { return }
+            subscriptionPage = current.appending(next)
+        } catch is CancellationError {
+        } catch {
+            guard generation == requestGeneration, currentUserID == accountID else { return }
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func loadRecommendations() async throws -> [VideoRecommendation] {
+        async let featuredMVs = try? library.personalizedMVs()
+        async let firstPage = try? library.recommendations(offset: 0)
+        async let secondPage = try? library.recommendations(offset: 8)
+        async let thirdPage = try? library.recommendations(offset: 16)
+        let pages = await (featuredMVs, firstPage, secondPage, thirdPage)
+        var seen = Set<String>()
+        let items = [pages.0, pages.1, pages.2, pages.3]
+            .compactMap { $0 }
+            .flatMap { $0 }
+            .filter { seen.insert($0.id).inserted }
+        guard !items.isEmpty else { throw VideoLibraryError.unavailable("暂无可用推荐") }
+        return items
+    }
 }
 
 struct VideoDetailView: View {
@@ -186,26 +475,34 @@ struct VideoDetailView: View {
     let knowledgeLibrary: LiveMusicKnowledgeLibrary?
     @Bindable var songPlayer: PlayerController
     let currentUserID: Int64?
+    let downloadDirectory: URL
     let onOpenUser: (Int64) -> Void
     let onOpenRelated: (Route) -> Void
     let onLogin: () -> Void
+    let onDownloadCompleted: (URL) -> Void
 
     @State private var detail: VideoPageDetail?
     @State private var related: [VideoRecommendation] = []
     @State private var detailError: String?
     @State private var relatedError: String?
     @State private var playbackError: String?
+    @State private var downloadError: String?
     @State private var subscriptionError: String?
     @State private var selectedResolution = 720
     @State private var isPreparingPlayback = false
+    @State private var isDownloading = false
+    @State private var downloadProgress: Double?
     @State private var isUpdatingSubscription = false
     @State private var videoPlayer: AVPlayer?
-    @State private var selectedSection = VideoDetailSection.comments
+    @State private var selectedSection = VideoDetailSection.knowledge
     @State private var generation = 0
     @State private var detailTask: Task<Void, Never>?
     @State private var relatedTask: Task<Void, Never>?
     @State private var playbackTask: Task<Void, Never>?
+    @State private var downloadTask: Task<Void, Never>?
     @State private var subscriptionTask: Task<Void, Never>?
+    @State private var playerStatusObservation: NSKeyValueObservation?
+    @State private var playerFailureObserver: NSObjectProtocol?
 
     var body: some View {
         Group {
@@ -222,44 +519,21 @@ struct VideoDetailView: View {
                 }
             } else if let detail {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 24, pinnedViews: [.sectionHeaders]) {
+                    LazyVStack(alignment: .leading, spacing: 24) {
                         mediaArea(detail)
+                        controls(detail)
                         metadata(detail)
-                        Section {
-                            switch selectedSection {
-                            case .comments:
-                                if case let .mv(id) = resource, let knowledgeLibrary {
-                                    MusicKnowledgeSection(
-                                        resource: .mv(id),
-                                        library: knowledgeLibrary,
-                                        onOpenRoute: onOpenRelated
-                                    )
-                                }
-                                VideoCommentsSection(
-                                    resource: resource.commentResource,
-                                    library: library,
-                                    onOpenUser: onOpenUser
-                                )
-                            case .related:
-                                relatedSection
-                            }
-                        } header: {
-                            if visibleSections.count > 1 {
-                                HStack {
-                                    Picker("视频内容", selection: $selectedSection) {
-                                        ForEach(visibleSections, id: \.self) { section in
-                                            Label(section.rawValue, systemImage: section.symbol)
-                                                .tag(section)
-                                        }
-                                    }
-                                    .pickerStyle(.segmented)
-                                    .labelsHidden()
-                                    .frame(maxWidth: 360)
-                                    Spacer()
-                                }
-                                .padding(.vertical, 8)
-                                .background(Color(nsColor: .windowBackgroundColor))
-                            }
+                        switch selectedSection {
+                        case .knowledge:
+                            knowledgeSection(detail)
+                        case .comments:
+                            VideoCommentsSection(
+                                resource: resource.commentResource,
+                                library: library,
+                                onOpenUser: onOpenUser
+                            )
+                        case .related:
+                            relatedSection
                         }
                     }
                     .frame(maxWidth: 920)
@@ -274,11 +548,91 @@ struct VideoDetailView: View {
         .onDisappear(perform: stopAndCancel)
     }
 
+    private func controls(_ detail: VideoPageDetail) -> some View {
+        HStack(spacing: 10) {
+            Picker("视频内容", selection: $selectedSection) {
+                ForEach(visibleSections, id: \.self) { section in
+                    Label(section.rawValue, systemImage: section.symbol).tag(section)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 360)
+
+            Spacer()
+
+            if !detail.availableResolutions.isEmpty {
+                Picker("清晰度", selection: $selectedResolution) {
+                    ForEach(detail.availableResolutions, id: \.self) { value in
+                        Text("\(value)P").tag(value)
+                    }
+                }
+                .pickerStyle(.menu)
+                .fixedSize()
+                .frame(minHeight: 44)
+                .disabled(isPreparingPlayback || isDownloading)
+                .onChange(of: selectedResolution) { previousResolution, _ in
+                    guard videoPlayer != nil, !isPreparingPlayback else { return }
+                    startPlayback(revertingTo: previousResolution)
+                }
+            }
+
+            Button(action: startDownload) {
+                if isDownloading {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 18, height: 18)
+                } else {
+                    Image(systemName: "arrow.down.circle")
+                        .frame(width: 18, height: 18)
+                }
+            }
+            .buttonStyle(.bordered)
+            .frame(minWidth: 44, minHeight: 44)
+            .disabled(isDownloading || isPreparingPlayback)
+            .help(isDownloading ? "正在下载" : "下载视频")
+            .accessibilityLabel(isDownloading ? "正在下载视频" : "下载视频")
+            .accessibilityValue(downloadProgress.map { "\(Int($0 * 100))%" } ?? "")
+
+            Button(action: toggleSubscription) {
+                Group {
+                    if isUpdatingSubscription {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: detail.isSubscribed ? "star.fill" : "star")
+                    }
+                }
+                .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.bordered)
+            .frame(minWidth: 44, minHeight: 44)
+            .disabled(isUpdatingSubscription)
+            .help(detail.isSubscribed ? "取消收藏" : "收藏")
+            .accessibilityLabel(detail.isSubscribed ? "取消收藏" : "收藏")
+        }
+    }
+
+    private var visibleSections: [VideoDetailSection] {
+        var sections: [VideoDetailSection] = [.knowledge, .comments]
+        if relatedTask != nil || relatedError != nil || !related.isEmpty {
+            sections.append(.related)
+        }
+        return sections
+    }
+
     private func mediaArea(_ detail: VideoPageDetail) -> some View {
         ZStack {
             Color.black
             if let videoPlayer {
-                VideoPlayer(player: videoPlayer)
+                NativeVideoPlayerView(player: videoPlayer)
+                if isPreparingPlayback {
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(.white)
+                        .padding(16)
+                        .background(.black.opacity(0.68), in: Circle())
+                        .accessibilityLabel("正在准备播放")
+                }
             } else {
                 VideoArtwork(url: detail.coverURL, symbol: "play.rectangle")
                 Button(action: { startPlayback() }) {
@@ -293,8 +647,8 @@ struct VideoDetailView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .disabled(detail.availableResolutions.isEmpty || isPreparingPlayback)
-                .help(detail.availableResolutions.isEmpty ? "该资源暂无可用清晰度" : "播放")
+                .disabled(isPreparingPlayback)
+                .help("播放")
                 .accessibilityLabel("播放")
             }
         }
@@ -314,72 +668,58 @@ struct VideoDetailView: View {
 
     private func metadata(_ detail: VideoPageDetail) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 16) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Label(resource.displayName, systemImage: "play.rectangle")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text(detail.title)
-                        .font(.title2.weight(.semibold))
-                        .textSelection(.enabled)
-                    HStack(spacing: 8) {
-                        if !detail.creator.isEmpty {
-                            Label(detail.creator, systemImage: "person")
-                        }
-                        Label(videoDurationText(detail.durationMilliseconds), systemImage: "clock")
-                    }
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+            Label(resource.displayName, systemImage: "play.rectangle")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(detail.title)
+                .font(.title2.weight(.semibold))
+                .textSelection(.enabled)
+            HStack(spacing: 8) {
+                if !detail.creator.isEmpty {
+                    Label(detail.creator, systemImage: "person")
                 }
-                Spacer()
-                HStack(spacing: 8) {
-                    if !detail.availableResolutions.isEmpty {
-                        Picker("清晰度", selection: $selectedResolution) {
-                            ForEach(detail.availableResolutions, id: \.self) { value in
-                                Text("\(value)P").tag(value)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .fixedSize()
-                        .frame(minHeight: 44)
-                        .disabled(isPreparingPlayback)
-                        .onChange(of: selectedResolution) { previousResolution, _ in
-                            guard videoPlayer != nil, !isPreparingPlayback else { return }
-                            startPlayback(revertingTo: previousResolution)
-                        }
-                    }
-                    Button(action: toggleSubscription) {
-                        Group {
-                            if isUpdatingSubscription {
-                                ProgressView().controlSize(.small)
-                            } else {
-                                Image(systemName: detail.isSubscribed ? "star.fill" : "star")
-                            }
-                        }
-                        .frame(width: 18, height: 18)
-                    }
-                    .buttonStyle(.bordered)
-                    .frame(minWidth: 44, minHeight: 44)
-                    .disabled(isUpdatingSubscription)
-                    .help(detail.isSubscribed ? "取消收藏" : "收藏")
-                    .accessibilityLabel(detail.isSubscribed ? "取消收藏" : "收藏")
-                }
+                Label(videoDurationText(detail.durationMilliseconds), systemImage: "clock")
             }
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
             if let subscriptionError {
                 Label(subscriptionError, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            if let downloadError {
+                Label(downloadError, systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.red)
             }
         }
     }
 
-    private var visibleSections: [VideoDetailSection] {
-        VideoDetailSection.visible(hasRelated: !related.isEmpty || relatedError != nil)
+    @ViewBuilder
+    private func knowledgeSection(_ detail: VideoPageDetail) -> some View {
+        if case let .mv(id) = resource, let knowledgeLibrary {
+            MusicKnowledgeSection(
+                resource: .mv(id),
+                library: knowledgeLibrary,
+                fallbackText: detail.descriptionText,
+                showsTitle: false,
+                onOpenRoute: onOpenRelated
+            )
+        } else {
+            VideoKnowledgeSection(
+                description: detail.descriptionText,
+                publishTime: detail.publishTime,
+                playCount: detail.playCount
+            )
+        }
     }
 
     @ViewBuilder
     private var relatedSection: some View {
-        if let relatedError, related.isEmpty {
+        if relatedTask != nil, related.isEmpty {
+            ProgressView("正在加载相关推荐…")
+                .frame(maxWidth: .infinity, minHeight: 96)
+        } else if let relatedError, related.isEmpty {
             InlineRetry(message: relatedError) { startRelatedLoad(generation: generation) }
         } else {
             LazyVStack(alignment: .leading, spacing: 0) {
@@ -401,18 +741,24 @@ struct VideoDetailView: View {
         detailTask?.cancel()
         relatedTask?.cancel()
         playbackTask?.cancel()
+        downloadTask?.cancel()
         subscriptionTask?.cancel()
+        clearPlaybackObservers()
         videoPlayer?.pause()
+        videoPlayer?.replaceCurrentItem(with: nil)
         videoPlayer = nil
         detail = nil
         related = []
         detailError = nil
         relatedError = nil
         playbackError = nil
+        downloadError = nil
         subscriptionError = nil
         isPreparingPlayback = false
+        isDownloading = false
+        downloadProgress = nil
         isUpdatingSubscription = false
-        selectedSection = .comments
+        selectedSection = .knowledge
         detailTask = Task { @MainActor in
             do {
                 let loaded: VideoPageDetail = switch resource {
@@ -441,7 +787,6 @@ struct VideoDetailView: View {
     private func startRelatedLoad(generation requestGeneration: Int) {
         relatedTask?.cancel()
         relatedError = nil
-        if related.isEmpty { selectedSection = .comments }
         relatedTask = Task { @MainActor in
             do {
                 let loaded = switch resource {
@@ -451,7 +796,9 @@ struct VideoDetailView: View {
                 try Task.checkCancellation()
                 guard generation == requestGeneration else { return }
                 related = loaded
-                if loaded.isEmpty { selectedSection = .comments }
+                if loaded.isEmpty, selectedSection == .related {
+                    selectedSection = .knowledge
+                }
             } catch is CancellationError {
             } catch {
                 guard generation == requestGeneration else { return }
@@ -472,35 +819,26 @@ struct VideoDetailView: View {
         isPreparingPlayback = true
         playbackTask = Task { @MainActor in
             do {
-                let source = switch resource {
-                case let .mv(id): try await library.mvPlaybackSource(
-                    id: id,
-                    preferredResolution: selectedResolution,
-                    availableResolutions: detail.availableResolutions
-                )
-                case let .video(id): try await library.videoPlaybackSource(
-                    id: id,
-                    preferredResolution: selectedResolution,
-                    availableResolutions: detail.availableResolutions
-                )
-                }
+                let source = try await playbackSource(for: detail)
                 try Task.checkCancellation()
                 guard generation == requestGeneration else { return }
                 let playbackURL = try await VideoPlaybackURLResolver.resolve(source.url)
                 try Task.checkCancellation()
                 guard generation == requestGeneration else { return }
                 songPlayer.pauseForVideo()
-                let player = AVPlayer(url: playbackURL)
+                let player = AVPlayer(playerItem: AVPlayerItem(url: playbackURL))
                 if let position = previousPlayer?.currentTime(), position.isNumeric {
                     _ = await player.seek(to: position, toleranceBefore: .zero, toleranceAfter: .zero)
                 }
                 try Task.checkCancellation()
                 guard generation == requestGeneration else { return }
                 let shouldPlay = previousPlayer?.timeControlStatus != .paused
+                clearPlaybackObservers()
                 previousPlayer?.pause()
                 previousPlayer?.replaceCurrentItem(with: nil)
                 videoPlayer = player
                 selectedResolution = source.resolution
+                installPlaybackObservers(for: player, generation: requestGeneration)
                 if shouldPlay { player.play() }
             } catch is CancellationError {
             } catch {
@@ -509,10 +847,120 @@ struct VideoDetailView: View {
                     selectedResolution = previousResolution
                 }
                 playbackError = error.localizedDescription
+                isPreparingPlayback = false
             }
             guard generation == requestGeneration else { return }
-            isPreparingPlayback = false
             playbackTask = nil
+        }
+    }
+
+    @MainActor
+    private func installPlaybackObservers(for player: AVPlayer, generation requestGeneration: Int) {
+        guard let item = player.currentItem else { return }
+        playerStatusObservation = item.observe(\.status, options: [.initial, .new]) { item, _ in
+            let status = item.status
+            let message = item.error?.localizedDescription
+            Task { @MainActor in
+                guard generation == requestGeneration, videoPlayer === player else { return }
+                switch status {
+                case .readyToPlay:
+                    isPreparingPlayback = false
+                case .failed:
+                    failPlayback(player, message: message ?? "视频播放失败，请重试")
+                case .unknown:
+                    break
+                @unknown default:
+                    failPlayback(player, message: "视频播放状态无法识别")
+                }
+            }
+        }
+        playerFailureObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { notification in
+            let message = (notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?
+                .localizedDescription ?? "视频播放中断，请重试"
+            MainActor.assumeIsolated {
+                guard generation == requestGeneration, videoPlayer === player else { return }
+                failPlayback(player, message: message)
+            }
+        }
+    }
+
+    @MainActor
+    private func failPlayback(_ player: AVPlayer, message: String) {
+        clearPlaybackObservers()
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        videoPlayer = nil
+        isPreparingPlayback = false
+        playbackError = message
+    }
+
+    @MainActor
+    private func clearPlaybackObservers() {
+        playerStatusObservation?.invalidate()
+        playerStatusObservation = nil
+        if let playerFailureObserver {
+            NotificationCenter.default.removeObserver(playerFailureObserver)
+            self.playerFailureObserver = nil
+        }
+    }
+
+    private func playbackSource(for detail: VideoPageDetail) async throws -> VideoPlaybackSource {
+        switch resource {
+        case let .mv(id):
+            try await library.mvPlaybackSource(
+                id: id,
+                preferredResolution: selectedResolution,
+                availableResolutions: detail.availableResolutions
+            )
+        case let .video(id):
+            try await library.videoPlaybackSource(
+                id: id,
+                preferredResolution: selectedResolution,
+                availableResolutions: detail.availableResolutions
+            )
+        }
+    }
+
+    @MainActor
+    private func startDownload() {
+        guard let detail, !isDownloading else { return }
+        let requestGeneration = generation
+        downloadTask?.cancel()
+        downloadError = nil
+        downloadProgress = nil
+        isDownloading = true
+        downloadTask = Task { @MainActor in
+            do {
+                let source = try await playbackSource(for: detail)
+                try Task.checkCancellation()
+                guard generation == requestGeneration else { return }
+                let savedURL = try await VideoFileDownload.download(
+                    source.url,
+                    title: detail.title,
+                    resolution: source.resolution,
+                    to: downloadDirectory
+                ) { progress in
+                    Task { @MainActor in
+                        guard generation == requestGeneration else { return }
+                        downloadProgress = progress
+                    }
+                }
+                try Task.checkCancellation()
+                guard generation == requestGeneration else { return }
+                onDownloadCompleted(savedURL)
+            } catch is CancellationError {
+            } catch {
+                guard generation == requestGeneration else { return }
+                downloadError = error.localizedDescription
+            }
+            guard generation == requestGeneration else { return }
+            isDownloading = false
+            downloadProgress = nil
+            downloadTask = nil
         }
     }
 
@@ -568,10 +1016,47 @@ struct VideoDetailView: View {
         detailTask?.cancel()
         relatedTask?.cancel()
         playbackTask?.cancel()
+        downloadTask?.cancel()
         subscriptionTask?.cancel()
+        clearPlaybackObservers()
         videoPlayer?.pause()
         videoPlayer?.replaceCurrentItem(with: nil)
         videoPlayer = nil
+    }
+}
+
+private struct VideoKnowledgeSection: View {
+    let description: String
+    let publishTime: String
+    let playCount: Int64
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if !description.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("简介").font(.title3.weight(.semibold))
+                    Text(description)
+                        .lineSpacing(5)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if !publishTime.isEmpty {
+                LabeledContent("发布时间", value: publishTime)
+            }
+            if playCount > 0 {
+                LabeledContent("播放次数", value: playCount.formatted())
+            }
+            if description.isEmpty, publishTime.isEmpty, playCount <= 0 {
+                ContentUnavailableView(
+                    "暂无百科资料",
+                    systemImage: "text.book.closed",
+                    description: Text("该资源还没有可显示的百科内容。")
+                )
+                .frame(maxWidth: .infinity, minHeight: 180)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

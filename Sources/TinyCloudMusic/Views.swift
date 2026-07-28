@@ -261,7 +261,12 @@ private struct PrimaryContentView: View {
             SearchView(model: model, player: player)
         case .videos:
             if let library = model.videoLibrary {
-                VideoRecommendationsView(library: library, onOpenRoute: model.open)
+                VideoRecommendationsView(
+                    library: library,
+                    currentUserID: model.currentUserID,
+                    onOpenRoute: model.open,
+                    onLogin: { model.selectSidebar(.session) }
+                )
             } else {
                 ContentUnavailableView("视频不可用", systemImage: "play.rectangle")
             }
@@ -384,9 +389,11 @@ private struct RouteDestinationView: View {
                     knowledgeLibrary: model.knowledgeLibrary,
                     songPlayer: player,
                     currentUserID: model.currentUserID,
+                    downloadDirectory: model.downloadFolderURL,
                     onOpenUser: { model.open(.user($0)) },
                     onOpenRelated: { model.replaceCurrentRoute(with: $0) },
-                    onLogin: { model.selectSidebar(.session) }
+                    onLogin: { model.selectSidebar(.session) },
+                    onDownloadCompleted: { model.showToast("视频已下载：\($0.lastPathComponent)") }
                 )
             } else {
                 ContentUnavailableView("MV 不可用", systemImage: "play.rectangle")
@@ -399,9 +406,11 @@ private struct RouteDestinationView: View {
                     knowledgeLibrary: model.knowledgeLibrary,
                     songPlayer: player,
                     currentUserID: model.currentUserID,
+                    downloadDirectory: model.downloadFolderURL,
                     onOpenUser: { model.open(.user($0)) },
                     onOpenRelated: { model.replaceCurrentRoute(with: $0) },
-                    onLogin: { model.selectSidebar(.session) }
+                    onLogin: { model.selectSidebar(.session) },
+                    onDownloadCompleted: { model.showToast("视频已下载：\($0.lastPathComponent)") }
                 )
             } else {
                 ContentUnavailableView("视频不可用", systemImage: "play.rectangle")
@@ -418,10 +427,11 @@ private struct RouteDestinationView: View {
             } else {
                 ContentUnavailableView("节目不可用", systemImage: "waveform")
             }
-        case let .broadcast(id):
+        case let .broadcast(id, coverURL):
             if let library = model.audioLibrary {
                 BroadcastChannelDetailView(
                     channelID: id,
+                    coverURL: coverURL,
                     library: library,
                     model: model,
                     songPlayer: player
@@ -741,7 +751,7 @@ private struct SearchView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(maxWidth: 560)
+                .frame(maxWidth: 720)
             }
             .padding(.horizontal, 28)
             .padding(.top, 22)
@@ -756,7 +766,7 @@ private struct SearchView: View {
             text: queryBinding,
             isPresented: $isSearchPresented,
             placement: .toolbar,
-            prompt: "搜索音乐、歌手、专辑、歌单或用户"
+            prompt: "搜索歌曲、歌手、专辑、歌单、用户、MV 或视频"
         )
         .searchSuggestions {
             if !model.searchHints.isEmpty {
@@ -2684,7 +2694,7 @@ struct SettingsView: View {
             }
 
             Section("存储") {
-                LabeledContent("歌曲下载位置") {
+                LabeledContent("媒体下载位置") {
                     folderControls(path: model.downloadPath, url: model.downloadFolderURL) {
                         choosingDownloadFolder = true
                     }

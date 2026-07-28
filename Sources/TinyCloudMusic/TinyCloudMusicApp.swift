@@ -24,6 +24,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarPlayer: MenuBarPlayerController?
     private var model: AppModel?
     private var credentialObserver: NSObjectProtocol?
+    private var sleepObserver: NSObjectProtocol?
     private var terminationConfirmed = false
     private var terminationTask: Task<Void, Never>?
 
@@ -51,6 +52,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             transport: transport,
             maximumConcurrentDownloads: storedConcurrency
         )
+        let uploads = AudioUploadManager(
+            musicLibrary: library,
+            audioLibrary: audioLibrary
+        )
         let session = SessionController(
             store: credentialStore,
             transport: transport,
@@ -76,9 +81,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             knowledgeLibrary: knowledgeLibrary,
             extras: extras,
             downloads: downloads,
+            uploads: uploads,
             session: session
         )
         self.model = model
+        sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak uploads] _ in
+            Task { @MainActor in await uploads?.pauseAll() }
+        }
         ArtworkPipeline.shared.configure(cacheRoot: model.cacheFolderURL)
         let player = PlayerController(
             repository: repository,
@@ -250,12 +263,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         guard confirmTermination() else { return .terminateCancel }
         terminationConfirmed = true
 
-        guard let downloads = model?.downloads,
-              downloads.runningDownloadCount > 0 || downloads.queuedDownloadCount > 0
+        let downloads = model?.downloads
+        let uploads = model?.uploads
+        guard downloads?.runningDownloadCount ?? 0 > 0
+                || downloads?.queuedDownloadCount ?? 0 > 0
+                || uploads?.isActive == true
         else { return .terminateNow }
 
         terminationTask = Task { [weak self] in
-            await downloads.pauseAll()
+            await downloads?.pauseAll()
+            await uploads?.pauseAll()
             self?.terminationTask = nil
             sender.reply(toApplicationShouldTerminate: true)
         }
@@ -266,7 +283,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "确定要退出小云音乐吗？"
-        alert.informativeText = "当前播放将停止；未完成的下载会保存进度，并在下次启动时继续。"
+        alert.informativeText = "当前播放将停止；未完成的下载和上传会保存已确认进度。"
         alert.addButton(withTitle: "退出")
         alert.addButton(withTitle: "取消")
         alert.buttons.first?.hasDestructiveAction = true

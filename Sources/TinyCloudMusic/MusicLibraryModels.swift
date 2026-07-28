@@ -46,9 +46,14 @@ enum RecentPlaybackKind: String, CaseIterable, Sendable {
     }
 }
 
+enum RecentVideoKind: String, Equatable, Sendable {
+    case mv, video
+}
+
 struct RecentMediaSummary: Identifiable, Equatable, Sendable {
     let id: String
     let resourceID: String
+    let videoKind: RecentVideoKind?
     let title: String
     let subtitle: String
     let artworkURL: URL?
@@ -330,13 +335,20 @@ enum MusicLibraryDecoder {
     ) -> [RecentMediaSummary] {
         var seen = Set<String>()
         return recentRecordPairs(root, kind: kind).compactMap { record, resource in
-            let resourceID = firstString(record, keys: ["resourceId", "resourceID"])
-                ?? firstString(resource, keys: recentIDKeys[kind] ?? ["id"])
+            let videoKind = kind == .video ? recentVideoKind(record: record, resource: resource) : nil
+            let internalID = kind == .video
+                ? recentVideoResourceID(record: record, resource: resource, kind: videoKind)
+                : firstString(resource, keys: recentIDKeys[kind] ?? ["id"])
+            let externalID = firstString(record, keys: ["resourceId", "resourceID"])
+            let resourceID = kind == .video ? internalID ?? externalID : externalID ?? internalID
             let title = firstString(resource, keys: ["name", "title"])
-            guard let resourceID, let title, seen.insert(resourceID).inserted else { return nil }
+            guard let resourceID, let title else { return nil }
+            let identity = videoKind.map { "\($0.rawValue)-\(resourceID)" } ?? resourceID
+            guard seen.insert(identity).inserted else { return nil }
             return RecentMediaSummary(
-                id: resourceID,
+                id: identity,
                 resourceID: resourceID,
+                videoKind: videoKind,
                 title: title,
                 subtitle: recentSubtitle(resource),
                 artworkURL: firstString(
@@ -539,7 +551,7 @@ enum MusicLibraryDecoder {
         .song: ["id"],
         .album: ["id"],
         .playlist: ["id"],
-        .video: ["vid", "videoId", "id"],
+        .video: ["vid", "videoId", "uuid", "mvId", "id"],
         .voice: ["voiceId", "programId", "id"],
         .podcast: ["radioId", "djRadioId", "id"]
     ]
@@ -557,6 +569,69 @@ enum MusicLibraryDecoder {
             }
             return nil
         }
+    }
+
+    private static func recentVideoKind(
+        record: [String: Any],
+        resource: [String: Any]
+    ) -> RecentVideoKind? {
+        for value in [resource, record] {
+            guard let threadID = firstString(value, keys: ["threadId", "threadID"]) else { continue }
+            if threadID.hasPrefix("R_MV_5_") { return .mv }
+            if threadID.hasPrefix("R_VI_62_") { return .video }
+        }
+        for value in [resource, record] {
+            for key in ["isMV", "isMv"] where value[key] != nil {
+                return bool(value, key) ? .mv : .video
+            }
+        }
+        for value in [resource, record] {
+            switch firstString(value, keys: ["type"])?.lowercased() {
+            case "0", "mv": return .mv
+            case "1", "video", "mlog", "newvideo": return .video
+            default: break
+            }
+            switch firstString(value, keys: ["resourceType"])?.lowercased() {
+            case "1", "mv": return .mv
+            case "5", "video", "mlog", "newvideo": return .video
+            default: break
+            }
+        }
+        for value in [resource, record] {
+            if value["mvId"] != nil { return .mv }
+            if ["vid", "videoId", "uuid"].contains(where: { value[$0] != nil }) { return .video }
+        }
+        return nil
+    }
+
+    private static func recentVideoResourceID(
+        record: [String: Any],
+        resource: [String: Any],
+        kind: RecentVideoKind?
+    ) -> String? {
+        let explicitKeys: [String] = switch kind {
+        case .mv: ["mvId", "vid"]
+        case .video: ["vid", "videoId", "uuid"]
+        case nil: recentIDKeys[.video] ?? []
+        }
+        if let id = firstString(resource, keys: explicitKeys) { return id }
+
+        let prefix = switch kind {
+        case .mv: "R_MV_5_"
+        case .video: "R_VI_62_"
+        case nil: ""
+        }
+        if !prefix.isEmpty {
+            for value in [resource, record] {
+                guard let threadID = firstString(value, keys: ["threadId", "threadID"]),
+                      threadID.hasPrefix(prefix)
+                else { continue }
+                let id = String(threadID.dropFirst(prefix.count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !id.isEmpty { return id }
+            }
+        }
+        return firstString(resource, keys: ["id"])
     }
 
     private static func recentSubtitle(_ value: [String: Any]) -> String {

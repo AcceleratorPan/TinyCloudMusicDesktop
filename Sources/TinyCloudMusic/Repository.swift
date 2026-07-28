@@ -194,6 +194,8 @@ struct FixtureMusicRepository: MusicRepository {
                 $0.nickname.localizedCaseInsensitiveContains(query)
                     || $0.signature.localizedCaseInsensitiveContains(query)
             }.map(SearchItem.user)
+        case .mvs, .videos:
+            matches = []
         }
 
         let start = min(offset, matches.count)

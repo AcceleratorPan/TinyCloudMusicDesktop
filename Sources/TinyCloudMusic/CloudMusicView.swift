@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct CloudMusicView: View {
     @Bindable var model: AppModel
@@ -14,6 +15,9 @@ struct CloudMusicView: View {
     @State private var errorMessage: String?
     @State private var loadMoreError: String?
     @State private var generation = 0
+    @State private var isImporting = false
+    @State private var showsUploadTasks = false
+    @State private var uploadError: String?
 
     private let pageSize = 30
 
@@ -52,6 +56,16 @@ struct CloudMusicView: View {
         }
         .navigationTitle("音乐云盘")
         .toolbar {
+            if model.uploads != nil, model.currentUserID != nil {
+                ToolbarItemGroup {
+                    Button { isImporting = true } label: { Image(systemName: "arrow.up.circle") }
+                        .help("上传到音乐云盘")
+                        .accessibilityLabel("上传到音乐云盘")
+                    Button { showsUploadTasks = true } label: { Image(systemName: "tray.full") }
+                        .help("查看上传任务")
+                        .accessibilityLabel("查看上传任务")
+                }
+            }
             ToolbarItem {
                 Button {
                     Task { await load(reset: true) }
@@ -62,6 +76,32 @@ struct CloudMusicView: View {
                 .help("刷新音乐云盘")
                 .accessibilityLabel("刷新音乐云盘")
             }
+        }
+        .onChange(of: model.uploads?.completionRevision ?? 0) { _, _ in
+            Task { await load(reset: true) }
+        }
+        .fileImporter(isPresented: $isImporting, allowedContentTypes: [.audio]) { result in
+            switch result {
+            case let .success(url):
+                guard model.uploads?.prepareCloudFile(url) != nil else {
+                    uploadError = "当前账号不可用于上传"
+                    return
+                }
+                showsUploadTasks = true
+            case let .failure(error):
+                uploadError = error.localizedDescription
+            }
+        }
+        .sheet(isPresented: $showsUploadTasks) {
+            if let uploads = model.uploads { AudioUploadTaskSheet(manager: uploads) }
+        }
+        .alert("上传失败", isPresented: Binding(
+            get: { uploadError != nil },
+            set: { if !$0 { uploadError = nil } }
+        )) {
+            Button("好") { uploadError = nil }
+        } message: {
+            Text(uploadError ?? "")
         }
         .task(id: model.currentUserID) { await load(reset: true) }
         .task(id: selectedID) { await loadSelectedDetail() }

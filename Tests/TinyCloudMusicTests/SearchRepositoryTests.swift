@@ -2,6 +2,63 @@ import Foundation
 import Testing
 @testable import TinyCloudMusic
 
+private final class SearchRepositoryProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var responseData = Data()
+    nonisolated(unsafe) private static var capturedURL: URL?
+    nonisolated(unsafe) private static var capturedBody = Data()
+
+    static func reset(response: String) {
+        lock.withLock {
+            responseData = Data(response.utf8)
+            capturedURL = nil
+            capturedBody = Data()
+        }
+    }
+
+    static func capturedRequest() -> (url: URL?, body: Data) {
+        lock.withLock { (capturedURL, capturedBody) }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let body = requestBody(request)
+        let responseData = Self.lock.withLock {
+            Self.capturedURL = request.url
+            Self.capturedBody = body
+            return Self.responseData
+        }
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: responseData)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    private func requestBody(_ request: URLRequest) -> Data {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open()
+        defer { stream.close() }
+        var body = Data()
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            body.append(buffer, count: count)
+        }
+        return body
+    }
+}
+
 @Suite("Live search decoding")
 struct SearchRepositoryTests {
     private let repository = LiveMusicRepository()
@@ -156,5 +213,52 @@ struct SearchRepositoryTests {
         #expect(combined.items.map(\.numericID) == [1, 2])
         #expect(combined.offset == 20)
         #expect(!combined.hasMore)
+    }
+
+    @Test("MV and video search use cloudsearch and preserve typed routes")
+    func videoSearch() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SearchRepositoryProtocol.self]
+        let repository = LiveMusicRepository(transport: EAPITransport(
+            session: URLSession(configuration: configuration),
+            cookie: "",
+            musicU: ""
+        ))
+
+        SearchRepositoryProtocol.reset(response: #"{"code":200,"result":{"mvs":[{"id":42,"name":"MV","artistName":"Artist","cover":"https://img.test/mv.jpg","duration":120000}],"mvCount":2}}"#)
+        let mvPage = try await repository.search(query: "MV Query", scope: .mvs, offset: 0, limit: 20)
+        let mvRequest = SearchRepositoryProtocol.capturedRequest()
+        #expect(mvRequest.url?.host == "interface3.music.163.com")
+        #expect(mvRequest.url?.path == "/eapi/cloudsearch/pc")
+        let expectedMVBody = try EAPICodec.requestBody(
+            path: "/api/cloudsearch/pc",
+            json: compactJSON(["s": "MV Query", "type": 1004, "limit": 20, "offset": 0, "total": true])
+        )
+        #expect(mvRequest.body == expectedMVBody)
+        guard case let .mv(mv) = try #require(mvPage.items.first) else {
+            Issue.record("Expected an MV")
+            return
+        }
+        #expect(mv.id == 42)
+        #expect(mvPage.items.first?.route == .mv(42))
+        #expect(mvPage.hasMore)
+
+        SearchRepositoryProtocol.reset(response: #"{"code":200,"result":{"videos":[{"vid":"00042-video","id":99,"title":"Video","creator":[{"userName":"Creator"}],"coverUrl":"https://img.test/video.jpg","durationms":34000}],"videoCount":1}}"#)
+        let videoPage = try await repository.search(query: "Video Query", scope: .videos, offset: 0, limit: 20)
+        let videoRequest = SearchRepositoryProtocol.capturedRequest()
+        #expect(videoRequest.url?.path == "/eapi/cloudsearch/pc")
+        let expectedVideoBody = try EAPICodec.requestBody(
+            path: "/api/cloudsearch/pc",
+            json: compactJSON(["s": "Video Query", "type": 1014, "limit": 20, "offset": 0, "total": true])
+        )
+        #expect(videoRequest.body == expectedVideoBody)
+        guard case let .video(video) = try #require(videoPage.items.first) else {
+            Issue.record("Expected a video")
+            return
+        }
+        #expect(video.id == "00042-video")
+        #expect(videoPage.items.first?.numericID == nil)
+        #expect(videoPage.items.first?.route == .video("00042-video"))
+        #expect(!videoPage.hasMore)
     }
 }

@@ -28,6 +28,7 @@ private func fixtureObject(_ fixture: [String: Any], _ key: String) throws -> [S
 
 private func verifyListeningSuccessFixture() throws {
     let fixture = try listeningFixture("listening-success")
+    let annualFixture = try listeningFixture("annual-report")
     let library = LiveMusicLibrary()
     guard try library.decodeTotalListeningDuration(fixtureObject(fixture, "total")) == 1_219_210
     else { throw ListeningReportCheckError.failed }
@@ -40,6 +41,7 @@ private func verifyListeningSuccessFixture() throws {
     )
     let report = library.decodeListeningReport(try fixtureObject(fixture, "report"), period: .week)
     let years = library.decodeYearListeningFootprints(try fixtureObject(fixture, "year"))
+    let annual = library.decodeAnnualListeningReport(annualFixture, year: 2024)
     let memory = library.decodeFirstListenMemory(
         try fixtureObject(fixture, "first"),
         now: Date(timeIntervalSince1970: 1_735_689_600)
@@ -68,6 +70,55 @@ private func verifyListeningSuccessFixture() throws {
               YearListeningFootprint(year: 2025, playCount: 1_234, durationSeconds: 567_890),
               YearListeningFootprint(year: 2024, playCount: 987, durationSeconds: 3_600)
           ],
+          annual.year == 2024,
+          annual.overviewMetrics == [
+              ListeningMetric(kind: .duration, value: .number(65_432)),
+              ListeningMetric(kind: .plays, value: .number(321))
+          ],
+          annual.sections.map(\.id) == [
+              "listening-methods", "annual-song", "annual-singer", "favorite-album",
+              "annual-playlist", "genres", "discoveries", "seasons", "months",
+              "listening-times", "late-listening", "loop-song", "crowd-memory",
+              "monthly-moods", "listen-together", "singer-comparison", "keyword-firstKeyWord"
+          ],
+          annual.sections.first(where: { $0.id == "annual-playlist" })?.tracks.first?.song.id == 104,
+          annual.sections.first(where: { $0.id == "annual-playlist" })?.tracks.first?.song.artists.first?.id == 204,
+          annual.sections.first(where: { $0.id == "annual-singer" })?.tracks.first?.song.album.artwork.remoteURL
+              == URL(string: "https://p1.music.126.net/example/singer-song.jpg"),
+          annual.sections.first(where: { $0.id == "annual-song" })?.tracks.first?.caption == "First Artist / Second Artist",
+          annual.sections.first(where: { $0.id == "genres" })?.items == [
+              .genre(name: "Pop", percent: 60),
+              .genre(name: "Rock", percent: 20),
+              .genre(name: "Electronic", percent: 12),
+              .genre(name: "Classical", percent: 8)
+          ],
+          annual.sections.first(where: { $0.id == "discoveries" })?.items == [
+              .artist(
+                  id: 401,
+                  name: "New Artist",
+                  imageURL: URL(string: "https://p1.music.126.net/example/new-artist.jpg"),
+                  note: "新遇见 · 5 首歌"
+              ),
+              .artist(
+                  id: 402,
+                  name: "Frequent Artist",
+                  imageURL: URL(string: "https://p1.music.126.net/example/frequent-artist.jpg"),
+                  note: "常听歌手"
+              )
+          ],
+          annual.sections.first(where: { $0.id == "months" })?.items == [
+              .month(
+                  month: 7,
+                  durationSeconds: 7_200,
+                  artistID: 403,
+                  artistName: "July Artist",
+                  imageURL: URL(string: "https://p1.music.126.net/example/july.jpg")
+              )
+          ],
+          annual.sections.first(where: { $0.id == "monthly-moods" })?.items == [
+              .mood(month: 7, name: "Calm", genre: "Ambient")
+          ],
+          annual.sections.first(where: { $0.id == "keyword-firstKeyWord" })?.tracks.first?.song.artists.first?.id == 208,
           memory.listenedAt == Date(timeIntervalSince1970: 1_704_067_200),
           memory.text == "Found in a daily recommendation"
     else { throw ListeningReportCheckError.failed }
@@ -139,6 +190,11 @@ private func verifyInvalidListeningPeriods() async throws {
     }
     do {
         _ = try await LiveMusicLibrary().realtimeListeningReport(period: .year)
+        throw ListeningReportCheckError.failed
+    } catch EAPIError.invalidPayload {
+    }
+    do {
+        _ = try await LiveMusicLibrary().annualListeningReport(year: 2025)
         throw ListeningReportCheckError.failed
     } catch EAPIError.invalidPayload {
     }

@@ -67,23 +67,50 @@ private func verifyLibraryDecoders() throws {
     let recentVideos = LiveMusicLibrary().decodeRecentlyPlayedMedia([
         "data": ["list": [
             [
-                "resourceId": "A1B2-video",
+                "resourceId": "wrong-outer-video-id",
                 "playTime": 1_700_000_000_000,
                 "data": [
-                    "vid": "A1B2-video",
+                    "id": 999,
+                    "uuid": "A1B2-video",
+                    "threadId": "R_VI_62_A1B2-video",
                     "title": "recent video",
                     "coverUrl": "https://example.com/video.jpg",
                     "creator": [["userName": "video creator"]]
                 ]
             ],
             [
-                "resourceId": "A1B2-video",
-                "data": ["vid": "A1B2-video", "title": "duplicate video"]
+                "resourceId": "different-duplicate-id",
+                "data": ["vid": "A1B2-video", "type": 1, "title": "duplicate video"]
             ],
+            [
+                "resourceId": "wrong-outer-mv-id",
+                "data": ["id": 42, "uuid": "wrong-mv-uuid", "isMV": true, "title": "recent MV"]
+            ],
+            [
+                "resourceId": "wrong-outer-numeric-video-id",
+                "data": ["vid": "00042", "isMV": false, "title": "numeric video"]
+            ],
+            ["resourceType": "MLOG", "data": ["id": "typed-video", "title": "typed video"]],
+            ["resourceType": "VIDEO", "data": ["id": "video-alias", "title": "typed video alias"]],
+            ["resourceType": "MV", "data": ["id": 45, "title": "typed MV"]],
+            ["resourceType": 5, "data": ["id": "numeric-video", "title": "numeric typed video"]],
+            ["resourceType": 1, "data": ["id": 46, "title": "numeric typed MV"]],
+            ["resourceId": "wrong-mv-vid", "data": ["vid": "47", "type": 0, "title": "MV using vid"]],
+            ["resourceId": "wrong-thread-mv", "data": ["threadId": "R_MV_5_48", "title": "thread MV"]],
+            ["resourceId": "wrong-thread-video", "data": ["threadId": "R_VI_62_thread-video", "title": "thread video"]],
+            ["data": ["vid": "12345", "title": "video identified by vid"]],
+            ["data": ["mvId": 43, "title": "MV identified by mvId"]],
+            ["data": ["id": 44, "title": "ambiguous resource"]],
             ["video": ["vid": "missing-title"]]
         ]]
     ], kind: .video)
-    guard recentVideos.map(\.resourceID) == ["A1B2-video"],
+    guard recentVideos.map(\.resourceID) == [
+        "A1B2-video", "42", "00042", "typed-video", "video-alias", "45", "numeric-video", "46",
+        "47", "48", "thread-video", "12345", "43", "44"
+    ], recentVideos.map(\.videoKind) == [
+        .video, .mv, .video, .video, .video, .mv, .video, .mv, .mv, .mv, .video, .video,
+        .mv, nil
+    ],
           recentVideos[0].subtitle == "video creator",
           recentVideos[0].playedAt?.timeIntervalSince1970 == 1_700_000_000
     else { throw LiveMusicLibraryCheckError.failed }

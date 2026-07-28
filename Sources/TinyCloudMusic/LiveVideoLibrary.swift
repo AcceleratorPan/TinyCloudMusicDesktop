@@ -23,6 +23,27 @@ struct LiveVideoLibrary: Sendable {
         return VideoDecoder.recommendations(root)
     }
 
+    func personalizedMVs() async throws -> [VideoRecommendation] {
+        VideoDecoder.personalizedMVs(try await request(
+            path: "/weapi/personalized/mv",
+            payload: [:],
+            cache: .detail
+        ))
+    }
+
+    func subscriptions(offset: Int = 0, limit: Int = 25) async throws -> VideoSubscriptionPage {
+        guard offset >= 0, (1...100).contains(limit) else { throw EAPIError.invalidPayload }
+        return VideoDecoder.subscriptions(
+            try await request(
+                path: "/weapi/cloudvideo/allvideo/sublist",
+                payload: ["limit": limit, "offset": offset, "total": true],
+                cache: .library
+            ),
+            offset: offset,
+            limit: limit
+        )
+    }
+
     func mvDetail(id: Int64) async throws -> MVDetail {
         guard id > 0 else { throw EAPIError.invalidPayload }
         guard let detail = VideoDecoder.mvDetail(try await request(
@@ -49,11 +70,14 @@ struct LiveVideoLibrary: Sendable {
         availableResolutions: [Int]
     ) async throws -> VideoPlaybackSource {
         guard id > 0 else { throw EAPIError.invalidPayload }
-        return try await playbackSource(preferredResolution, available: availableResolutions) { resolution in
+        return try await playbackSource(preferredResolution, available: availableResolutions) {
+            resolution, credential in
             try VideoDecoder.mvPlaybackSource(
                 await request(
                     path: "/weapi/song/enhance/play/mv/url",
-                    payload: ["id": id, "r": resolution]
+                    payload: ["id": id, "r": resolution],
+                    vipCredential: credential,
+                    restrictsRedirects: true
                 ),
                 requestedResolution: resolution
             )
@@ -67,11 +91,14 @@ struct LiveVideoLibrary: Sendable {
     ) async throws -> VideoPlaybackSource {
         let id = try videoID(rawID)
         let ids = try jsonString([id])
-        return try await playbackSource(preferredResolution, available: availableResolutions) { resolution in
+        return try await playbackSource(preferredResolution, available: availableResolutions) {
+            resolution, credential in
             try VideoDecoder.videoPlaybackSource(
                 await request(
                     path: "/weapi/cloudvideo/playurl",
-                    payload: ["ids": ids, "resolution": resolution]
+                    payload: ["ids": ids, "resolution": resolution],
+                    vipCredential: credential,
+                    restrictsRedirects: true
                 ),
                 requestedResolution: resolution
             )
@@ -152,35 +179,78 @@ struct LiveVideoLibrary: Sendable {
     private func request(
         path: String,
         payload: [String: Any],
-        cache: EAPIReadCache? = nil
+        cache: EAPIReadCache? = nil,
+        vipCredential: VIPRequesterCredential? = nil,
+        restrictsRedirects: Bool = false
     ) async throws -> [String: Any] {
         try decodedJSONObject(try await transport.requestWEAPI(
             path: path,
             payload: payload,
             cache: cache,
-            invalidatesAccountCache: false
+            invalidatesAccountCache: false,
+            vip: vipCredential != nil,
+            useStoredCookieForVIP: vipCredential == .storedCookie,
+            restrictsRedirects: restrictsRedirects
         ))
     }
 
     func playbackSource(
         _ preferredResolution: Int,
         available: [Int],
-        load: (Int) async throws -> VideoPlaybackSource
+        load: (Int, VIPRequesterCredential) async throws -> VideoPlaybackSource
     ) async throws -> VideoPlaybackSource {
+        let available = available.isEmpty ? [preferredResolution] : available
         guard let resolution = VideoResolutionPolicy.preferred(preferredResolution, available: available) else {
             throw VideoLibraryError.unavailable("服务未返回可用清晰度")
         }
-        do {
-            return try await load(resolution)
-        } catch let error as VideoLibraryError {
-            try Task.checkCancellation()
-            guard case .unavailable = error,
-                  let fallback = VideoResolutionPolicy.fallback(below: resolution, available: available)
-            else {
-                throw error
-            }
-            return try await load(fallback)
+
+        var resolutions = [resolution]
+        if let fallback = VideoResolutionPolicy.fallback(below: resolution, available: available) {
+            resolutions.append(fallback)
         }
+        let credentials = transport.credentials()
+        let hasVIPRequester = !credentials.musicU.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let cookie = credentials.cookie.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasAccountCookie = !cookie.isEmpty && !NeteaseCookieHeader.isGuest(cookie)
+        var vipAuthenticationFailed = false
+        var lastUnavailable: VideoLibraryError?
+
+        for resolution in resolutions {
+            if hasVIPRequester, !vipAuthenticationFailed {
+                do {
+                    return try await load(resolution, .independentMusicU)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    try Task.checkCancellation()
+                    if SessionCredentialIssue.isAuthenticationFailure(error) {
+                        vipAuthenticationFailed = true
+                        guard hasAccountCookie else { throw error }
+                    } else if let playbackError = error as? VideoLibraryError {
+                        switch playbackError {
+                        case .unavailable:
+                            lastUnavailable = playbackError
+                            guard hasAccountCookie else { continue }
+                        case .unsafePlaybackURL:
+                            guard hasAccountCookie else { throw playbackError }
+                        }
+                    } else {
+                        throw error
+                    }
+                }
+            }
+
+            do {
+                return try await load(resolution, .storedCookie)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let unavailable as VideoLibraryError {
+                try Task.checkCancellation()
+                guard case .unavailable = unavailable else { throw unavailable }
+                lastUnavailable = unavailable
+            }
+        }
+        throw lastUnavailable ?? VideoLibraryError.unavailable("服务未返回可用播放地址")
     }
 
     private func videoID(_ rawID: String) throws -> String {

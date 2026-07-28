@@ -10,7 +10,9 @@ export TINYCLOUDMUSIC_MUSIC_U=${TINYCLOUDMUSIC_MUSIC_U-}
 COMMON_SOURCES=(
   Sources/TinyCloudMusic/Models.swift
   Sources/TinyCloudMusic/ListeningReportModels.swift
+  Sources/TinyCloudMusic/ListenTogetherModels.swift
   Sources/TinyCloudMusic/VideoModels.swift
+  Sources/TinyCloudMusic/VideoDownload.swift
   Sources/TinyCloudMusic/AudioContentModels.swift
   Sources/TinyCloudMusic/MusicKnowledgeModels.swift
   Sources/TinyCloudMusic/RecommendationMemoryModels.swift
@@ -24,11 +26,16 @@ COMMON_SOURCES=(
   Sources/TinyCloudMusic/MusicLibraryModels.swift
   Sources/TinyCloudMusic/MusicExtraModels.swift
   Sources/TinyCloudMusic/PlaylistImageUpload.swift
+  Sources/TinyCloudMusic/AudioUploadModels.swift
+  Sources/TinyCloudMusic/NOSAudioUpload.swift
+  Sources/TinyCloudMusic/AudioUploadAPI.swift
+  Sources/TinyCloudMusic/AudioUploadManager.swift
   Sources/TinyCloudMusic/LiveMusicRepository.swift
   Sources/TinyCloudMusic/LiveMusicRepository+Search.swift
   Sources/TinyCloudMusic/LiveMusicRepository+Detail.swift
   Sources/TinyCloudMusic/LiveMusicRepository+Home.swift
   Sources/TinyCloudMusic/LiveMusicLibrary.swift
+  Sources/TinyCloudMusic/LiveListenTogetherService.swift
   Sources/TinyCloudMusic/LiveVideoLibrary.swift
   Sources/TinyCloudMusic/LiveAudioContentLibrary.swift
   Sources/TinyCloudMusic/LiveMusicKnowledgeLibrary.swift
@@ -92,6 +99,11 @@ swiftc -D AUDIO_CONTENT_CHECK -warnings-as-errors \
   Tests/TinyCloudMusicTests/AudioContentTests.swift \
   -o /tmp/tinycloudmusic-audio-content-check
 /tmp/tinycloudmusic-audio-content-check
+swiftc -D AUDIO_UPLOAD_CHECK -warnings-as-errors \
+  "${COMMON_SOURCES[@]}" \
+  Tests/TinyCloudMusicTests/AudioUploadTests.swift \
+  -o /tmp/tinycloudmusic-audio-upload-check
+/tmp/tinycloudmusic-audio-upload-check
 swiftc -D MUSIC_KNOWLEDGE_CHECK -warnings-as-errors \
   Sources/TinyCloudMusic/Models.swift \
   Sources/TinyCloudMusic/CredentialStore.swift \

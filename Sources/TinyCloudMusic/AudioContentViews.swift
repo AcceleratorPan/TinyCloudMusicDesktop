@@ -19,6 +19,7 @@ struct AudioContentView: View {
     @Bindable var player: PlayerController
 
     @State private var selectedTab = AudioContentTab.podcasts
+    @State private var showsPodcastUploads = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -44,6 +45,20 @@ struct AudioContentView: View {
             }
         }
         .navigationTitle("播客与广播")
+        .toolbar {
+            if selectedTab == .podcasts, model.currentUserID != nil, model.uploads != nil {
+                ToolbarItem {
+                    Button { showsPodcastUploads = true } label: { Image(systemName: "mic.badge.plus") }
+                        .help("上传播客声音")
+                        .accessibilityLabel("上传播客声音")
+                }
+            }
+        }
+        .sheet(isPresented: $showsPodcastUploads) {
+            if let uploads = model.uploads {
+                MyPodcastUploadView(library: library, manager: uploads)
+            }
+        }
     }
 }
 
@@ -229,8 +244,14 @@ private struct BroadcastDiscoveryView: View {
         case let .loaded(page):
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(page.channels) { channel in
-                        Button { model.open(.broadcast(channel.id)) } label: {
+                    ForEach(page.channels) { value in
+                        let channel = value.settingCollected(
+                            model.broadcastCollectionOverrides[value.id] ?? value.isCollected
+                        )
+                        Button {
+                            model.broadcastCollectionOverrides[channel.id] = channel.isCollected
+                            model.open(.broadcast(channel.id, channel.coverURL))
+                        } label: {
                             BroadcastRow(channel: channel)
                         }
                         .buttonStyle(.plain)
@@ -556,6 +577,7 @@ struct PodcastEpisodeDetailView: View {
 
 struct BroadcastChannelDetailView: View {
     let channelID: String
+    let coverURL: URL?
     let library: LiveAudioContentLibrary
     @Bindable var model: AppModel
     @Bindable var songPlayer: PlayerController
@@ -570,13 +592,18 @@ struct BroadcastChannelDetailView: View {
         playbackTask != nil || streamPlayer.isLoading || streamPlayer.isPlaying
     }
 
+    private var isCollected: Bool {
+        guard let info else { return false }
+        return model.broadcastCollectionOverrides[channelID] ?? info.channel.isCollected
+    }
+
     var body: some View {
         Group {
             if let info {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
                         HStack(alignment: .top, spacing: 20) {
-                            AudioArtwork(url: info.channel.coverURL, symbol: "radio", size: 150)
+                            AudioArtwork(url: coverURL ?? info.channel.coverURL, symbol: "radio", size: 150)
                             VStack(alignment: .leading, spacing: 10) {
                                 Text(info.channel.name).font(.title.weight(.bold))
                                 if !info.channel.regionName.isEmpty {
@@ -599,11 +626,11 @@ struct BroadcastChannelDetailView: View {
                                             systemImage: isStreamActive ? "stop.fill" : "play.fill"
                                         )
                                     }
-                                    Button { collect(!info.channel.isCollected) } label: {
-                                        Image(systemName: info.channel.isCollected ? "star.fill" : "star")
+                                    Button { collect(!isCollected) } label: {
+                                        Image(systemName: isCollected ? "star.fill" : "star")
                                     }
-                                    .help(info.channel.isCollected ? "取消收藏" : "收藏")
-                                    .accessibilityLabel(info.channel.isCollected ? "取消收藏" : "收藏")
+                                    .help(isCollected ? "取消收藏" : "收藏")
+                                    .accessibilityLabel(isCollected ? "取消收藏" : "收藏")
                                     .disabled(isWriting)
                                 }
                             }
@@ -686,6 +713,7 @@ struct BroadcastChannelDetailView: View {
             do {
                 try await library.setBroadcastCollected(channelID, collected: collected)
                 guard accountID == model.currentUserID else { return }
+                model.broadcastCollectionOverrides[channelID] = collected
                 if let current = info {
                     info = BroadcastCurrentInfo(
                         channel: current.channel.settingCollected(collected),
@@ -698,6 +726,7 @@ struct BroadcastChannelDetailView: View {
                 guard accountID == model.currentUserID else { return }
                 if let confirmed = try? await library.broadcastCurrentInfo(channelID: channelID),
                    confirmed.channel.isCollected == collected {
+                    model.broadcastCollectionOverrides[channelID] = collected
                     info = withoutStream(confirmed)
                     return
                 }
@@ -856,7 +885,7 @@ private struct BroadcastRow: View {
     }
 }
 
-private struct AudioArtwork: View {
+struct AudioArtwork: View {
     let url: URL?
     let symbol: String
     let size: CGFloat

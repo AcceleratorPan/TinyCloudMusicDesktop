@@ -59,7 +59,7 @@ enum EAPICheck {
         precondition(vipCookie.contains("MUSIC_U=vip-token"))
         precondition(vipCookie.hasSuffix("requestId=request"))
         let iPhoneVIPCookie = EAPICookieHeader.value(
-            cookie: "__csrf=csrf; MUSIC_U=embedded-token; os=pc",
+            cookie: "QR_SESSION=qr-session; __csrf=csrf; MUSIC_U=embedded-token; os=pc",
             musicU: "vip-token",
             vip: true,
             buildVersion: 123,
@@ -69,6 +69,8 @@ enum EAPICheck {
         precondition(iPhoneVIPCookie.contains("os=iPhone OS; appver=9.0.90"))
         precondition(iPhoneVIPCookie.contains("MUSIC_U=vip-token"))
         precondition(!iPhoneVIPCookie.contains("embedded-token"))
+        precondition(!iPhoneVIPCookie.contains("QR_SESSION="))
+        precondition(!iPhoneVIPCookie.contains("__csrf="))
         precondition(!iPhoneVIPCookie.contains("os=pc"))
         let embeddedFallbackCookie = EAPICookieHeader.value(
             cookie: "__csrf=csrf; MUSIC_U=embedded-token",

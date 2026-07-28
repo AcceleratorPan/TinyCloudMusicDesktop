@@ -10,13 +10,18 @@ private final class RequestCaptureProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) private static var capturedRequests: [URLRequest] = []
     nonisolated(unsafe) private static var count = 0
     nonisolated(unsafe) private static var responses: [String: (statusCode: Int, body: Data)] = [:]
+    nonisolated(unsafe) private static var vipFailurePaths: Set<String> = []
 
-    static func reset(responses: [String: (statusCode: Int, body: Data)] = [:]) {
+    static func reset(
+        responses: [String: (statusCode: Int, body: Data)] = [:],
+        vipFailurePaths: Set<String> = []
+    ) {
         lock.lock()
         captured = nil
         capturedRequests = []
         count = 0
         self.responses = responses
+        self.vipFailurePaths = vipFailurePaths
         lock.unlock()
     }
 
@@ -59,7 +64,13 @@ private final class RequestCaptureProtocol: URLProtocol, @unchecked Sendable {
         Self.captured = capturedRequest
         Self.capturedRequests.append(capturedRequest)
         Self.count += 1
-        let stub = Self.responses[request.url?.path ?? ""]
+        let path = request.url?.path ?? ""
+        let cookie = request.value(forHTTPHeaderField: "Cookie") ?? ""
+        let failsVIP = Self.vipFailurePaths.contains(path)
+            && NeteaseCookieHeader.value(named: "MUSIC_U", in: cookie) == "vip-token"
+        let stub = failsVIP
+            ? (200, Data(#"{"code":301,"message":"authentication failed"}"#.utf8))
+            : Self.responses[path]
         Self.lock.unlock()
         let response = HTTPURLResponse(
             url: request.url!,
@@ -89,12 +100,19 @@ enum WriteAPIContractCheck {
         let reportingTransport = EAPITransport(
             session: URLSession(configuration: configuration),
             cookie: "MUSIC_U=test; os=pc; osver=old; appver=old; channel=old",
-            musicU: ""
+            musicU: "reporting-vip-token"
         )
         let library = LiveMusicLibrary(transport: transport)
         let videoLibrary = LiveVideoLibrary(transport: transport)
+        let vipVideoLibrary = LiveVideoLibrary(transport: EAPITransport(
+            session: URLSession(configuration: configuration),
+            cookie: "MUSIC_U=video-qr-cookie; __csrf=video-csrf",
+            musicU: "video-vip-token",
+            weapiSecretKey: "0123456789abcdef"
+        ))
         let audioLibrary = LiveAudioContentLibrary(transport: transport)
         let knowledgeLibrary = LiveMusicKnowledgeLibrary(transport: transport)
+        let listenTogetherService = LiveListenTogetherService(transport: transport)
         let originalCookieLibrary = LiveMusicLibrary(transport: EAPITransport(
             session: URLSession(configuration: configuration),
             cookie: "MUSIC_U=original-cookie; deviceId=test-device",
@@ -111,6 +129,7 @@ enum WriteAPIContractCheck {
                 && $0.contains("appver=3.1.10.5100")
                 && !$0.contains("os=pc")
                 && !$0.contains("appver=old")
+                && !$0.contains("reporting-vip-token")
         }
         var count = 0
 
@@ -218,6 +237,8 @@ enum WriteAPIContractCheck {
         try await verifyCoverUpload(library: library)
         try await verifyCoverFailureStops(library: library)
         count += 3
+        try await verifyAudioUploadContracts(library: library, audioLibrary: audioLibrary)
+        count += 8
 
         try await verify("/eapi/v1/playlist/manipulate/tracks", signing: "/api/v1/playlist/manipulate/tracks", call: {
             try await library.addSongs([11, 12], to: 16)
@@ -317,18 +338,27 @@ enum WriteAPIContractCheck {
         }
         count += 1
 
+        try await verifyWEAPI("/weapi/personalized/mv", call: {
+            _ = try await videoLibrary.personalizedMVs()
+        }) { $0.string("csrf_token") == "csrf" }
+        count += 1
+
         try await verifyWEAPI("/weapi/v1/mv/detail", call: {
             _ = try await videoLibrary.mvDetail(id: 42)
         }) { $0.int64("id") == 42 }
         count += 1
 
-        try await verifyWEAPI("/weapi/song/enhance/play/mv/url", call: {
-            _ = try await videoLibrary.mvPlaybackSource(
-                id: 42,
-                preferredResolution: 720,
-                availableResolutions: [720]
-            )
-        }) { $0.int64("id") == 42 && $0.int("r") == 720 }
+        try await verifyWEAPI(
+            "/weapi/song/enhance/play/mv/url",
+            cookieMatches: videoVIPCookieMatches,
+            call: {
+                _ = try await vipVideoLibrary.mvPlaybackSource(
+                    id: 42,
+                    preferredResolution: 720,
+                    availableResolutions: [720]
+                )
+            }
+        ) { $0.int64("id") == 42 && $0.int("r") == 720 }
         count += 1
 
         for subscribed in [true, false] {
@@ -356,13 +386,17 @@ enum WriteAPIContractCheck {
         }) { $0.string("id") == "00042" }
         count += 1
 
-        try await verifyWEAPI("/weapi/cloudvideo/playurl", call: {
-            _ = try await videoLibrary.videoPlaybackSource(
-                id: "00042",
-                preferredResolution: 720,
-                availableResolutions: [720]
-            )
-        }) {
+        try await verifyWEAPI(
+            "/weapi/cloudvideo/playurl",
+            cookieMatches: videoVIPCookieMatches,
+            call: {
+                _ = try await vipVideoLibrary.videoPlaybackSource(
+                    id: "00042",
+                    preferredResolution: 720,
+                    availableResolutions: [720]
+                )
+            }
+        ) {
             $0.string("ids") == #"["00042"]"# && $0.int("resolution") == 720
         }
         count += 1
@@ -708,6 +742,17 @@ enum WriteAPIContractCheck {
         ) { originalClientHeaderMatches($0) }
         count += 1
 
+        for (year, key) in [(2019, "userdata"), (2024, "data")] {
+            try await verify(
+                "/eapi/activity/summary/annual/\(year)/\(key)",
+                signing: "/api/activity/summary/annual/\(year)/\(key)",
+                host: "interfacepc.music.163.com",
+                cookieMatches: originalCookieMatches,
+                call: { _ = try await originalCookieLibrary.annualListeningReport(year: year) }
+            ) { originalClientHeaderMatches($0) }
+            count += 1
+        }
+
         try await verify(
             "/eapi/content/activity/music/first/listen/info",
             signing: "/api/content/activity/music/first/listen/info",
@@ -721,7 +766,8 @@ enum WriteAPIContractCheck {
 
         for invalidCall in [
             { _ = try await originalCookieLibrary.listeningSongRank(period: .year) },
-            { _ = try await originalCookieLibrary.realtimeListeningReport(period: .year) }
+            { _ = try await originalCookieLibrary.realtimeListeningReport(period: .year) },
+            { _ = try await originalCookieLibrary.annualListeningReport(year: 2025) }
         ] {
             RequestCaptureProtocol.reset()
             do {
@@ -765,9 +811,14 @@ enum WriteAPIContractCheck {
         ) { payload in
             guard let log = playbackLog(in: payload) else { return false }
             let json = log.object("json")
+            let header = payload.object("header")
             return log.string("action") == "startplay"
                 && json.int64("id") == 17
                 && json.string("type") == "song"
+                && header.string("MUSIC_U") == "test"
+                && !header.values.contains { String(describing: $0).contains("reporting-vip-token") }
+                && header.string("os") == "osx"
+                && header.string("appver") == "3.1.10.5100"
         }
         count += 1
 
@@ -780,10 +831,15 @@ enum WriteAPIContractCheck {
         ) { payload in
             guard let log = playbackLog(in: payload) else { return false }
             let json = log.object("json")
+            let header = payload.object("header")
             return log.string("action") == "play"
                 && json.int64("id") == 17
                 && json.int("time") == 42
                 && json.string("end") == "playend"
+                && header.string("MUSIC_U") == "test"
+                && !header.values.contains { String(describing: $0).contains("reporting-vip-token") }
+                && header.string("os") == "osx"
+                && header.string("appver") == "3.1.10.5100"
         }
         count += 1
 
@@ -927,7 +983,192 @@ enum WriteAPIContractCheck {
         precondition(RequestCaptureProtocol.requestCount() == 1)
         count += 1
 
+        count += try await verifyListenTogether(listenTogetherService)
+        try await verifyListenTogetherRequestPolicies(
+            service: listenTogetherService,
+            transport: transport
+        )
+
         print("Write API contract checks passed: \(count) requests captured locally")
+    }
+
+    private static func verifyListenTogether(_ service: LiveListenTogetherService) async throws -> Int {
+        let playCommand = try ListenTogetherPlayCommand(
+            commandType: .goTo,
+            progress: 12_345,
+            playStatus: .playing,
+            formerSongID: -1,
+            targetSongID: 42,
+            clientSequence: 7
+        )
+        let playlistCommand = try ListenTogetherPlaylistCommand(
+            commandType: .replace,
+            userID: 99,
+            version: 8,
+            randomList: [43, 42],
+            displayList: [42, 43]
+        )
+
+        try await verify(
+            "/eapi/listen/together/room/create",
+            signing: "/api/listen/together/room/create",
+            call: { _ = try await service.createRoom() }
+        ) { $0.string("refer") == "songplay_more" }
+        try await verify(
+            "/eapi/listen/together/room/check",
+            signing: "/api/listen/together/room/check",
+            call: { _ = try await service.checkRoom(roomID: "room-1") }
+        ) { $0.string("roomId") == "room-1" }
+        try await verify(
+            "/eapi/listen/together/play/invitation/accept",
+            signing: "/api/listen/together/play/invitation/accept",
+            call: { _ = try await service.acceptInvitation(roomID: "room-1", inviterID: 99) }
+        ) {
+            $0.string("refer") == "inbox_invite"
+                && $0.string("roomId") == "room-1"
+                && $0.int64("inviterId") == 99
+        }
+        try await verifyWEAPI("/weapi/listen/together/status/get", call: {
+            _ = try await service.status()
+        }) { $0.string("csrf_token") == "csrf" }
+        try await verify(
+            "/eapi/listen/together/heartbeat",
+            signing: "/api/listen/together/heartbeat",
+            call: {
+                _ = try await service.heartbeat(
+                    roomID: "room-1",
+                    songID: 42,
+                    playStatus: .playing,
+                    progress: 12_345
+                )
+            }
+        ) {
+            $0.string("roomId") == "room-1"
+                && $0.int64("songId") == 42
+                && $0.string("playStatus") == "PLAY"
+                && $0.int64("progress") == 12_345
+        }
+        try await verify(
+            "/eapi/listen/together/play/command/report",
+            signing: "/api/listen/together/play/command/report",
+            call: { _ = try await service.reportPlayCommand(roomID: "room-1", command: playCommand) }
+        ) {
+            guard $0.string("roomId") == "room-1",
+                  let command = jsonObject($0.string("commandInfo"))
+            else { return false }
+            return command.string("commandType") == "GOTO"
+                && command.int64("progress") == 12_345
+                && command.string("playStatus") == "PLAY"
+                && command.int64("formerSongId") == -1
+                && command.int64("targetSongId") == 42
+                && command.int64("clientSeq") == 7
+        }
+        try await verify(
+            "/eapi/listen/together/sync/list/command/report",
+            signing: "/api/listen/together/sync/list/command/report",
+            call: { _ = try await service.reportPlaylistCommand(roomID: "room-1", command: playlistCommand) }
+        ) {
+            guard $0.string("roomId") == "room-1",
+                  let playlist = jsonObject($0.string("playlistParam")),
+                  let version = playlist.array("version").first
+            else { return false }
+            return playlist.string("commandType") == "REPLACE"
+                && version.int64("userId") == 99
+                && version.int64("version") == 8
+                && playlist.string("anchorSongId").isEmpty
+                && playlist.int("anchorPosition") == -1
+                && playlist["randomList"] as? [String] == ["43", "42"]
+                && playlist["displayList"] as? [String] == ["42", "43"]
+        }
+        try await verify(
+            "/eapi/listen/together/sync/playlist/get",
+            signing: "/api/listen/together/sync/playlist/get",
+            call: { _ = try await service.playlist(roomID: "room-1") }
+        ) { $0.string("roomId") == "room-1" }
+        try await verify(
+            "/eapi/listen/together/end/v2",
+            signing: "/api/listen/together/end/v2",
+            call: { _ = try await service.endRoom(roomID: "room-1") }
+        ) { $0.string("roomId") == "room-1" }
+
+        RequestCaptureProtocol.reset()
+        do {
+            _ = try await service.checkRoom(roomID: " ")
+            preconditionFailure("Blank room IDs must fail before sending a request")
+        } catch EAPIError.invalidPayload {
+        }
+        precondition(RequestCaptureProtocol.requestCount() == 0)
+        return 9
+    }
+
+    private static func verifyListenTogetherRequestPolicies(
+        service: LiveListenTogetherService,
+        transport: EAPITransport
+    ) async throws {
+        RequestCaptureProtocol.reset(responses: [
+            "/eapi/listen/together/heartbeat": (500, Data(#"{"code":500}"#.utf8))
+        ])
+        do {
+            _ = try await service.heartbeat(
+                roomID: "room-1",
+                songID: 42,
+                playStatus: .paused,
+                progress: 0
+            )
+            preconditionFailure("The local HTTP 500 response must fail")
+        } catch EAPIError.http(500) {
+        }
+        precondition(RequestCaptureProtocol.requestCount() == 1, "Realtime commands must not retry")
+
+        RequestCaptureProtocol.reset(responses: [
+            "/eapi/listen/together/sync/playlist/get": (200, Data(#"{"code":200}"#.utf8))
+        ])
+        _ = try await service.playlist(roomID: "room-1")
+        _ = try await service.playlist(roomID: "room-1")
+        precondition(RequestCaptureProtocol.requestCount() == 2, "Realtime EAPI reads must not be cached")
+
+        RequestCaptureProtocol.reset(responses: [
+            "/weapi/listen/together/status/get": (200, Data(#"{"code":200}"#.utf8))
+        ])
+        _ = try await service.status()
+        _ = try await service.status()
+        precondition(RequestCaptureProtocol.requestCount() == 2, "Realtime WEAPI reads must not be cached")
+
+        try await verifyListenTogetherDoesNotInvalidateCache(
+            probePath: "/eapi/listen/together/cache-probe-eapi",
+            realtimePath: "/eapi/listen/together/room/create",
+            transport: transport,
+            call: { _ = try await service.createRoom() }
+        )
+        try await verifyListenTogetherDoesNotInvalidateCache(
+            probePath: "/eapi/listen/together/cache-probe-weapi",
+            realtimePath: "/weapi/listen/together/status/get",
+            transport: transport,
+            call: { _ = try await service.status() }
+        )
+    }
+
+    private static func verifyListenTogetherDoesNotInvalidateCache(
+        probePath: String,
+        realtimePath: String,
+        transport: EAPITransport,
+        call: () async throws -> Void
+    ) async throws {
+        RequestCaptureProtocol.reset(responses: [
+            probePath: (200, Data(#"{"code":200}"#.utf8)),
+            realtimePath: (200, Data(#"{"code":200}"#.utf8))
+        ])
+        let endpoint = EAPIEndpoint(probePath)
+        let payload = Data(#"{"probe":1}"#.utf8)
+        _ = try await transport.request(endpoint, json: payload, cache: .library)
+        try await call()
+        _ = try await transport.request(endpoint, json: payload, cache: .library)
+        precondition(RequestCaptureProtocol.requestCount() == 2, "Realtime calls must not invalidate account cache")
+    }
+
+    private static func jsonObject(_ value: String) -> [String: Any]? {
+        guard let data = value.data(using: .utf8) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
     private static func verifyPlaybackQualityVIPProfile() async throws {
@@ -978,6 +1219,55 @@ enum WriteAPIContractCheck {
                 && !$0.contains("os=pc")
                 && !$0.contains("appver=old")
                 && !$0.contains("os=Android")
+        })
+
+        let failoverTransport = EAPITransport(
+            session: URLSession(configuration: configuration),
+            cookie: "QR_SESSION=qr-session; MUSIC_U=qr-token; __csrf=qr-csrf; os=pc",
+            musicU: "vip-token"
+        )
+        let failoverRepository = LiveMusicRepository(transport: failoverTransport)
+        let playbackSuccess = Data(
+            #"{"code":200,"data":[{"id":17,"code":200,"url":"https://m1.music.126.net/fallback.mp3","type":"mp3","level":"lossless"}]}"#.utf8
+        )
+
+        RequestCaptureProtocol.reset(
+            responses: ["/eapi/song/enhance/player/url/v1": (200, playbackSuccess)],
+            vipFailurePaths: ["/eapi/song/enhance/player/url/v1"]
+        )
+        do {
+            _ = try await failoverRepository.playbackSource(for: 17, level: "lossless")
+        } catch {
+            preconditionFailure("Audio playback credential fallback failed: \(error)")
+        }
+        verifyVIPThenCookie(RequestCaptureProtocol.requests(), vipCount: 1, cookieCount: 1)
+
+        RequestCaptureProtocol.reset(
+            responses: responses,
+            vipFailurePaths: ["/eapi/song/music/detail/get", "/eapi/v3/song/detail"]
+        )
+        do {
+            _ = try await failoverRepository.songQualityDetails(for: 17)
+        } catch {
+            preconditionFailure("Quality credential fallback failed: \(error)")
+        }
+        verifyVIPThenCookie(RequestCaptureProtocol.requests(), vipCount: 2, cookieCount: 2)
+    }
+
+    private static func verifyVIPThenCookie(
+        _ requests: [URLRequest],
+        vipCount: Int,
+        cookieCount: Int
+    ) {
+        let cookies = requests.map { $0.value(forHTTPHeaderField: "Cookie") ?? "" }
+        let vipCookies = cookies.filter { NeteaseCookieHeader.value(named: "MUSIC_U", in: $0) == "vip-token" }
+        let accountCookies = cookies.filter { NeteaseCookieHeader.value(named: "MUSIC_U", in: $0) == "qr-token" }
+        precondition(vipCookies.count == vipCount && accountCookies.count == cookieCount)
+        precondition(vipCookies.allSatisfy { !$0.contains("QR_SESSION=") && !$0.contains("qr-csrf") })
+        precondition(accountCookies.allSatisfy {
+            $0.contains("QR_SESSION=qr-session")
+                && $0.contains("os=iPhone OS")
+                && !$0.contains("vip-token")
         })
     }
 
@@ -1121,6 +1411,115 @@ enum WriteAPIContractCheck {
         }
     }
 
+    private static func verifyAudioUploadContracts(
+        library: LiveMusicLibrary,
+        audioLibrary: LiveAudioContentLibrary
+    ) async throws {
+        let form = PodcastUploadForm(
+            name: "Episode",
+            description: "Description",
+            voiceListID: 71,
+            coverImageID: 72,
+            categoryID: 73,
+            secondCategoryID: 74
+        )
+        var manifest = AudioUploadManifest(
+            id: UUID(),
+            accountID: 7,
+            destination: .cloud,
+            bookmark: Data(),
+            filename: "track.mp3",
+            fileExtension: "mp3",
+            contentType: "audio/mpeg",
+            byteCount: 123,
+            modificationTime: 1,
+            md5: "900150983cd24fb0d6963f7d28e17f72",
+            metadata: AudioUploadMetadata(
+                title: "Track",
+                artist: "Artist",
+                album: "Album",
+                durationMilliseconds: 1_000,
+                bitrate: 320_000
+            )
+        )
+        manifest.cloud.songID = 41
+        RequestCaptureProtocol.reset(responses: [
+            "/eapi/cloud/upload/check": (200, Data(#"{"code":200,"needUpload":true,"songId":41}"#.utf8)),
+            "/weapi/nos/token/alloc": (200, Data(#"{"code":200,"result":{"token":"nos-token","objectKey":"folder/track.mp3","resourceId":"42","docId":42}}"#.utf8)),
+            "/eapi/upload/cloud/info/v2": (200, Data(#"{"code":200,"songId":43}"#.utf8)),
+            "/eapi/cloud/pub/v2": (200, Data(#"{"code":200}"#.utf8))
+        ])
+        let check = try await library.checkCloudUpload(manifest)
+        let allocation = try await library.allocateCloudUpload(manifest)
+        let registeredID = try await library.registerCloudUpload(manifest, allocation: allocation)
+        try await library.publishCloudUpload(songID: registeredID)
+        let cloudRequests = RequestCaptureProtocol.requests()
+        guard check == CloudUploadCheck(needsUpload: true, songID: 41),
+              allocation.resourceID == "42",
+              registeredID == 43,
+              cloudRequests.count == 4,
+              let checkBody = cloudRequests[0].httpBody,
+              let decodedCheck = try decode(body: checkBody),
+              decodedCheck.path == "/api/cloud/upload/check",
+              decodedCheck.payload.int("bitrate") == 320_000,
+              decodedCheck.payload.string("ext").isEmpty,
+              decodedCheck.payload.int64("length") == 123,
+              let allocationBody = cloudRequests[1].httpBody,
+              let decodedAllocation = try decodeWEAPI(body: allocationBody, secretKey: "0123456789abcdef"),
+              decodedAllocation.payload.string("bucket") == NOSAudioUpload.cloudBucket,
+              decodedAllocation.payload.int("nos_product") == 3,
+              let registerBody = cloudRequests[2].httpBody,
+              let decodedRegister = try decode(body: registerBody),
+              decodedRegister.path == "/api/upload/cloud/info/v2",
+              decodedRegister.payload.string("resourceId") == "42",
+              let publishBody = cloudRequests[3].httpBody,
+              let decodedPublish = try decode(body: publishBody),
+              decodedPublish.path == "/api/cloud/pub/v2",
+              decodedPublish.payload.int64("songid") == 43
+        else { preconditionFailure("Cloud upload contract mismatch") }
+
+        RequestCaptureProtocol.reset(responses: [
+            "/weapi/nos/token/alloc": (200, Data(#"{"code":200,"result":{"token":"podcast-token","objectKey":"folder/episode.mp3","docId":75}}"#.utf8)),
+            "/weapi/voice/workbench/voice/batch/upload/preCheck": (200, Data(#"{"code":200}"#.utf8)),
+            "/weapi/voice/workbench/voice/batch/upload/v2": (200, Data(#"{"code":200}"#.utf8))
+        ])
+        manifest.podcastForm = form
+        let podcastAllocation = try await audioLibrary.allocatePodcastUpload(manifest)
+        try await audioLibrary.precheckPodcastUpload(form: form, documentID: 75, token: podcastAllocation.token)
+        try await audioLibrary.submitPodcastUpload(form: form, documentID: 75, token: podcastAllocation.token)
+        let podcastRequests = RequestCaptureProtocol.requests()
+        guard podcastRequests.count == 3,
+              let podcastAllocationBody = podcastRequests[0].httpBody,
+              let decodedPodcastAllocation = try decodeWEAPI(
+                body: podcastAllocationBody,
+                secretKey: "0123456789abcdef"
+              ),
+              decodedPodcastAllocation.payload.string("bucket") == NOSAudioUpload.podcastBucket,
+              decodedPodcastAllocation.payload.int("nos_product") == 0,
+              decodedPodcastAllocation.payload.string("type") == "other",
+              let precheckBody = podcastRequests[1].httpBody,
+              let precheck = try decodeWEAPI(body: precheckBody, secretKey: "0123456789abcdef"),
+              let submitBody = podcastRequests[2].httpBody,
+              let submit = try decodeWEAPI(body: submitBody, secretKey: "0123456789abcdef"),
+              precheck.payload.string("dupkey") != submit.payload.string("dupkey"),
+              podcastRequests[1].value(forHTTPHeaderField: "x-nos-token") == "podcast-token",
+              podcastRequests[2].value(forHTTPHeaderField: "x-nos-token") == "podcast-token",
+              let voiceData = precheck.payload.string("voiceData").data(using: .utf8),
+              let voices = try JSONSerialization.jsonObject(with: voiceData) as? [[String: Any]],
+              voices.first?.int64("dfsId") == 75
+        else { preconditionFailure("Podcast upload contract mismatch") }
+
+        RequestCaptureProtocol.reset(responses: [
+            "/eapi/upload/cloud/info/v2": (500, Data())
+        ])
+        do {
+            _ = try await library.registerCloudUpload(manifest, allocation: allocation)
+            preconditionFailure("Unknown cloud registration must fail")
+        } catch EAPIError.http(500) {
+        }
+        precondition(RequestCaptureProtocol.requestCount() == 1, "Cloud registration must not retry")
+    }
+
     private static func jpeg(width: Int, height: Int) throws -> Data {
         guard let context = CGContext(
             data: nil,
@@ -1249,6 +1648,7 @@ enum WriteAPIContractCheck {
 
     private static func verifyWEAPI(
         _ physicalPath: String,
+        cookieMatches: (String) -> Bool = { $0.contains("__csrf=csrf") },
         call: () async throws -> Void,
         payloadMatches: ([String: Any]) -> Bool
     ) async throws {
@@ -1263,13 +1663,19 @@ enum WriteAPIContractCheck {
               request.url?.host == "music.163.com",
               RequestCaptureProtocol.requestCount() == 1,
               request.value(forHTTPHeaderField: "Referer") == "https://music.163.com/",
-              request.value(forHTTPHeaderField: "Cookie")?.contains("__csrf=csrf") == true,
+              cookieMatches(request.value(forHTTPHeaderField: "Cookie") ?? ""),
               let body = request.httpBody,
               let decoded = try decodeWEAPI(body: body, secretKey: "0123456789abcdef"),
               decoded.encSecKey == "35701388baf89fed412e11269b9c76625d095ecaf17f03fa018abe19ea2d38b949debf242ee39a71ca1f6cda71b1b86a45aa909ee27f7e78e267d34e732f0de948206c3340a788d0003372183e2f753c1f78b66ac23d134ac1fc9b993156520ea826b8aa89a962d4491b4b8d7e08738e1da9b07aa39bf4a7ef0b1c210728cd52",
               decoded.payload["e_r"] as? Bool == false,
               payloadMatches(decoded.payload)
         else { preconditionFailure("Request contract mismatch for \(physicalPath)") }
+    }
+
+    private static func videoVIPCookieMatches(_ cookie: String) -> Bool {
+        NeteaseCookieHeader.value(named: "MUSIC_U", in: cookie) == "video-vip-token"
+            && !cookie.contains("video-qr-cookie")
+            && !cookie.contains("video-csrf")
     }
 
     private static func playbackLog(in payload: [String: Any]) -> [String: Any]? {

@@ -68,24 +68,28 @@ struct LiveMusicRepository: MusicRepository {
         requiresExactLevel: Bool
     ) async throws -> PlaybackSource {
         guard SongQualityDetail.orderedLevels.contains(level) else { throw EAPIError.invalidPayload }
-        let data = try await request(
-            EAPIEndpoint(
-                "/eapi/song/enhance/player/url/v1",
-                signing: "/api/song/enhance/player/url/v1",
-                host: Self.interfaceHost,
-                responseEncoding: .automatic
-            ),
-            payload: Self.playbackSourcePayload(songID: songID, level: level),
-            vip: true,
-            iPhoneClient: true
-        )
         do {
-            return try Self.decodePlaybackSource(
-                data,
-                expectedSongID: songID,
-                requestedLevel: level,
-                requiresExactLevel: requiresExactLevel
-            )
+            return try await transport.withVIPRequesterFallback(
+                fallbackOn: { $0 is PlaybackUnavailableError }
+            ) { credential in
+                let data = try await request(
+                    EAPIEndpoint(
+                        "/eapi/song/enhance/player/url/v1",
+                        signing: "/api/song/enhance/player/url/v1",
+                        host: Self.interfaceHost,
+                        responseEncoding: .automatic
+                    ),
+                    payload: Self.playbackSourcePayload(songID: songID, level: level),
+                    vipCredential: credential,
+                    iPhoneClient: true
+                )
+                return try Self.decodePlaybackSource(
+                    data,
+                    expectedSongID: songID,
+                    requestedLevel: level,
+                    requiresExactLevel: requiresExactLevel
+                )
+            }
         } catch let error as PlaybackUnavailableError {
             let alternatives: [Song]
             do {
@@ -110,25 +114,27 @@ struct LiveMusicRepository: MusicRepository {
     }
 
     func songQualityDetails(for songID: Int64) async throws -> [SongQualityDetail] {
-        async let qualityData = request(
-            EAPIEndpoint(
-                "/eapi/song/music/detail/get",
-                signing: "/api/song/music/detail/get",
-                host: Self.interfaceHost,
-                responseEncoding: .automatic
-            ),
-            payload: ["songId": songID],
-            vip: true,
-            cache: .detail
-        )
-        async let privilegeData = request(
-            EAPIEndpoint("/eapi/v3/song/detail"),
-            payload: ["c": "[{\"id\":\(songID)}]"],
-            vip: true,
-            cache: .detail
-        )
-        let result = try await (qualityData, privilegeData)
-        return try Self.decodeSongQualityDetails(result.0, privileges: result.1)
+        try await transport.withVIPRequesterFallback { credential in
+            async let qualityData = request(
+                EAPIEndpoint(
+                    "/eapi/song/music/detail/get",
+                    signing: "/api/song/music/detail/get",
+                    host: Self.interfaceHost,
+                    responseEncoding: .automatic
+                ),
+                payload: ["songId": songID],
+                vipCredential: credential,
+                cache: .detail
+            )
+            async let privilegeData = request(
+                EAPIEndpoint("/eapi/v3/song/detail"),
+                payload: ["c": "[{\"id\":\(songID)}]"],
+                vipCredential: credential,
+                cache: .detail
+            )
+            let result = try await (qualityData, privilegeData)
+            return try Self.decodeSongQualityDetails(result.0, privileges: result.1)
+        }
     }
 
     func copyrightAlternatives(for songID: Int64) async throws -> [Song] {
@@ -257,6 +263,7 @@ struct LiveMusicRepository: MusicRepository {
                 json: try compactJSON(["logs": logsJSON]),
                 invalidatesAccountCache: true,
                 macOSClient: true,
+                includesClientHeader: true,
                 retryable: false
             )
         )
@@ -283,14 +290,15 @@ struct LiveMusicRepository: MusicRepository {
     func request(
         _ endpoint: EAPIEndpoint,
         payload: [String: Any],
-        vip: Bool = false,
+        vipCredential: VIPRequesterCredential? = nil,
         iPhoneClient: Bool = false,
         cache: EAPIReadCache? = nil
     ) async throws -> Data {
         try await transport.request(
             endpoint,
             json: compactJSON(payload),
-            vip: vip,
+            vip: vipCredential != nil,
+            useStoredCookieForVIP: vipCredential == .storedCookie,
             cache: cache,
             iPhoneClient: iPhoneClient
         )

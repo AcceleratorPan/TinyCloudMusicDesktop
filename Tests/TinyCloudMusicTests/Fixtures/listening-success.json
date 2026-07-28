@@ -85,7 +85,8 @@
     "data": {
       "yearItems": [
         {"year": 2025, "playNum": 1234, "playDuration": 567890},
-        {"year": 2024, "playNum": 987, "playDuration": 3600}
+        {"year": 2024, "playNum": 987, "playDuration": 3600},
+        {"year": 2023, "playNum": 0, "playDuration": 0}
       ]
     }
   },

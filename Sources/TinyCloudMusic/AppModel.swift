@@ -85,6 +85,7 @@ final class AppModel {
     var albumSubscriptionOverrides: [Int64: Bool] = [:]
     var artistFollowOverrides: [Int64: Bool] = [:]
     var userFollowOverrides: [Int64: Bool] = [:]
+    var broadcastCollectionOverrides: [String: Bool] = [:]
     var currentUserID: Int64?
     var playlistPickerSong: Song?
     var librarySnapshot: LibrarySnapshot?
@@ -97,6 +98,7 @@ final class AppModel {
     let knowledgeLibrary: LiveMusicKnowledgeLibrary?
     let extras: LiveMusicExtras?
     let downloads: MusicDownloadManager?
+    let uploads: AudioUploadManager?
     let session: SessionController?
     let homeDescriptors: [HomeSectionDescriptor]
 
@@ -130,6 +132,7 @@ final class AppModel {
         knowledgeLibrary: LiveMusicKnowledgeLibrary? = nil,
         extras: LiveMusicExtras? = nil,
         downloads: MusicDownloadManager? = nil,
+        uploads: AudioUploadManager? = nil,
         session: SessionController? = nil,
         defaults: UserDefaults = .standard
     ) {
@@ -140,6 +143,7 @@ final class AppModel {
         self.knowledgeLibrary = knowledgeLibrary
         self.extras = extras
         self.downloads = downloads
+        self.uploads = uploads
         self.session = session
         self.defaults = defaults
         homeDescriptors = repository.homeDescriptors
@@ -1035,11 +1039,13 @@ final class AppModel {
         albumSubscriptionOverrides.removeAll()
         artistFollowOverrides.removeAll()
         userFollowOverrides.removeAll()
+        broadcastCollectionOverrides.removeAll()
         librarySnapshot = nil
         playlistContentRevision = 0
         cachedPlaylistRevision = -1
         cachedPlaylistsLoadedAt = nil
         playlistPickerSong = nil
+        uploads?.setAccount(userID)
         currentUserID = userID
     }
 

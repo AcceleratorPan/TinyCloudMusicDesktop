@@ -265,6 +265,29 @@ struct LiveMusicLibrary: Sendable {
         return decodeYearListeningFootprints(root)
     }
 
+    func annualListeningReport(
+        year: Int,
+        forceRefresh: Bool = false
+    ) async throws -> AnnualListeningReport {
+        guard AnnualListeningReportDecoder.supportedYears.contains(year) else {
+            throw EAPIError.invalidPayload
+        }
+        let key = year <= 2019 ? "userdata" : "data"
+        let path = "/api/activity/summary/annual/\(year)/\(key)"
+        let root = try await call(
+            EAPIEndpoint(
+                path.replacingOccurrences(of: "/api/", with: "/eapi/"),
+                signing: path,
+                host: Self.eapiHost
+            ),
+            payload: [:],
+            cache: forceRefresh ? nil : .library,
+            includesClientHeader: true
+        )
+        try requireSuccess(root)
+        return decodeAnnualListeningReport(root, year: year)
+    }
+
     func firstListenMemory(
         songID: Int64,
         forceRefresh: Bool = false
@@ -313,6 +336,10 @@ struct LiveMusicLibrary: Sendable {
 
     func decodeYearListeningFootprints(_ root: [String: Any]) -> [YearListeningFootprint] {
         ListeningReportDecoder.yearFootprints(root)
+    }
+
+    func decodeAnnualListeningReport(_ root: [String: Any], year: Int) -> AnnualListeningReport {
+        AnnualListeningReportDecoder.report(root, year: year, decodeSong: songDecoder.decodeLiveSong)
     }
 
     func decodeFirstListenMemory(_ root: [String: Any], now: Date = Date()) -> FirstListenMemory {

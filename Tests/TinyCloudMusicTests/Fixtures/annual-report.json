@@ -1,0 +1,176 @@
+{
+  "code": 200,
+  "message": "",
+  "data": {
+    "meetTimeOverview": {
+      "playCount": 321,
+      "playTime": 65432,
+      "pcTerminalPlayTime": 3600,
+      "podcastPlayTime": 1200,
+      "regTime": 1688313600000,
+      "albumCoverUrl": ["https://p1.music.126.net/example/cover.jpg"]
+    },
+    "annualSong": {
+      "songId": 101,
+      "songName": "Annual Song",
+      "artistNameList": "First Artist,Second Artist",
+      "songPicUrl": "https://p1.music.126.net/example/song.jpg",
+      "playCnt": 20,
+      "playDays": 8,
+      "userCountOfThisAnnualSong": 9000,
+      "firstDate": 1719792000000
+    },
+    "annualSinger": {
+      "artistId": "201",
+      "singerName": "Annual Singer",
+      "singerPicUrl": "https://p1.music.126.net/example/singer.jpg",
+      "playCount": 88,
+      "singerPlayDays": 16,
+      "top5Songs": [
+        {
+          "songId": 102,
+          "name": "Singer Song",
+          "picUrl": null,
+          "songPicUrl": "https://p1.music.126.net/example/singer-song.jpg",
+          "playCount": 12,
+          "index": 1
+        }
+      ]
+    },
+    "annualPlaylistAlbum": {
+      "favoriteAlbum": {
+        "songId": 103,
+        "songName": "Album Song",
+        "artistName": "Album Artist",
+        "albumId": "301",
+        "albumName": "Annual Album",
+        "albumPicUrl": "https://p1.music.126.net/example/album.jpg",
+        "playCount": 9,
+        "playDays": 4
+      }
+    },
+    "annualPlaylist": {
+      "items": [
+        {
+          "songId": 104,
+          "songName": "Top Song",
+          "artistId": "204",
+          "artistName": "Top Artist",
+          "picUrl": "https://p1.music.126.net/example/top.jpg",
+          "playCount": 7
+        }
+      ]
+    },
+    "genrePlayRank": {
+      "musicAge": 22,
+      "word": "A year in music",
+      "genreRank": [
+        {"genreTagName": "Pop", "rank": 1, "percent": 60},
+        {"genreTagName": "Rock", "rank": 2, "percent": 20},
+        {"genreTagName": "Electronic", "rank": 3, "percent": 12},
+        {"genreTagName": "Classical", "rank": 4, "percent": 8}
+      ]
+    },
+    "newDiscoveryDTO": {
+      "totalArtistCount": 40,
+      "newArtistCount": 15,
+      "totalGenreCount": 8,
+      "newGenreCount": 3,
+      "specialGenre": ["Indie", "Electronic"],
+      "newSingerDetailDto": {
+        "artistId": 401,
+        "artistName": "New Artist",
+        "artistPicUrl": "//p1.music.126.net/example/new-artist.jpg",
+        "songCount": 5
+      },
+      "top5SingerDetails": [
+        {
+          "singerId": "402",
+          "singerName": "Frequent Artist",
+          "singerPicUrl": "https://p1.music.126.net/example/frequent-artist.jpg"
+        }
+      ]
+    },
+    "seasonsListen": {
+      "summer": {
+        "songId": 105,
+        "songName": "Summer Song",
+        "artistId": "205",
+        "artistName": "Summer Artist",
+        "picUrl": "https://p1.music.126.net/example/summer.jpg",
+        "playNum": 6
+      }
+    },
+    "monthListenDTO": {
+      "monthListenItemList": [
+        {
+          "monthIndex": 7,
+          "playTime": "7200",
+          "artistId": 403,
+          "artistName": "July Artist",
+          "artistPicUrl": "https://p1.music.126.net/example/july.jpg"
+        }
+      ]
+    },
+    "listenTimePeriod": {
+      "maxTimePeriod": "NIGHT",
+      "totalMaxPlayCount": 18,
+      "distributions": [{"month": 7, "hour": 22, "peak": 18}]
+    },
+    "latePlayDTO": {
+      "datetime": 1722384000000,
+      "songId": 106,
+      "songName": "Late Song",
+      "artistId": "206",
+      "artistName": "Late Artist",
+      "songPicUrl": "https://p1.music.126.net/example/late.jpg"
+    },
+    "loopSongDTO": {
+      "playDate": 1725062400000,
+      "songId": "107",
+      "songName": "Loop Song",
+      "singerId": "207",
+      "singerName": "Loop Artist",
+      "songPicUrl": "https://p1.music.126.net/example/loop.jpg",
+      "playCount": 11
+    },
+    "minorMassDTO": {
+      "massSongName": "Shared Song",
+      "massSingerName": "Shared Artist",
+      "massFindUserCount": 12345,
+      "massSongCoverUrl": "https://p1.music.126.net/example/shared.jpg"
+    },
+    "keyWord": {
+      "firstKeyWord": {
+        "keyword": "Dream",
+        "lyricCnt": 14,
+        "lyricList": [
+          {
+            "songId": 108,
+            "songName": "Lyric Song",
+            "artistId": 208,
+            "artistName": "Lyric Artist",
+            "lyric": "A line containing the keyword",
+            "effectivePlayCntStd": 5
+          }
+        ]
+      }
+    },
+    "spiritDto": {
+      "spiritItems": [
+        {"playMonth": 7, "moodTag": "Calm", "genreTagName": "Ambient"},
+        {"playMonth": 8, "moodTag": "空窗期", "genreTagName": "Pop"}
+      ]
+    },
+    "listenTogetherBizPage": {
+      "listenTogetherDuration": 1800,
+      "listenTogetherLongestCreateDate": 1727740800000
+    },
+    "annualSingerComparePage": {
+      "singers": [
+        {"year": 2023, "singerName": "Previous Singer"},
+        {"year": 2024, "singerName": "Annual Singer"}
+      ]
+    }
+  }
+}

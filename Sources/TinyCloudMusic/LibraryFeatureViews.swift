@@ -1135,13 +1135,21 @@ struct ListeningHistoryView: View {
     private func recentRoute(for kind: RecentPlaybackKind, item: RecentMediaSummary) -> Route? {
         switch kind {
         case .video:
-            .video(item.resourceID)
+            switch item.videoKind {
+            case .mv:
+                guard let id = Int64(item.resourceID), id > 0 else { return nil }
+                return .mv(id)
+            case .video:
+                return .video(item.resourceID)
+            case nil:
+                return nil
+            }
         case .voice:
-            Int64(item.resourceID).map(Route.podcastEpisode)
+            return Int64(item.resourceID).map(Route.podcastEpisode)
         case .podcast:
-            Int64(item.resourceID).map(Route.podcast)
+            return Int64(item.resourceID).map(Route.podcast)
         case .song, .album, .playlist:
-            nil
+            return nil
         }
     }
 
@@ -1629,10 +1637,13 @@ struct DownloadsView: View {
         let paused = manager.states.values.reduce(into: 0) { count, state in
             if case .paused = state { count += 1 }
         }
-        let running = manager.runningDownloadCount
-        let queued = manager.queuedDownloadCount
+        let running = manager.states.values.reduce(into: 0) { count, state in
+            if case .running = state { count += 1 }
+        }
+        let queued = manager.states.values.filter { $0 == .queued }.count
+        let active = running + queued
         var parts: [String] = []
-        if running > 0 { parts.append("\(running)/\(manager.maximumConcurrentDownloads) 首下载中") }
+        if running > 0 { parts.append("\(running)/\(active) 首下载中") }
         if queued > 0 { parts.append("\(queued) 首等待") }
         if paused > 0 { parts.append("\(paused) 首已暂停") }
         if completed > 0 { parts.append("\(completed) 首已完成") }

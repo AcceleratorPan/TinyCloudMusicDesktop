@@ -21,13 +21,26 @@ extension LiveMusicRepository {
                 "limit": limit,
                 "e_r": true
             ]
+        case .mvs, .videos:
+            endpoint = EAPIEndpoint(
+                "/eapi/cloudsearch/pc",
+                signing: "/api/cloudsearch/pc",
+                host: "https://interface3.music.163.com"
+            )
+            payload = [
+                "s": query,
+                "type": scope == .mvs ? 1004 : 1014,
+                "limit": limit,
+                "offset": offset,
+                "total": true
+            ]
         case .artists, .albums, .playlists, .users:
             let kind = switch scope {
             case .artists: "artist"
             case .albums: "album"
             case .playlists: "playlist"
             case .users: "user"
-            case .songs: fatalError("handled above")
+            case .songs, .mvs, .videos: fatalError("handled above")
             }
             endpoint = EAPIEndpoint(
                 "/eapi/v1/search/\(kind)/get",
@@ -89,6 +102,16 @@ extension LiveMusicRepository {
             values = result.array("userprofiles")
             countKey = "userprofileCount"
             items = values.compactMap(decodeLiveUser).map(SearchItem.user)
+        case .mvs:
+            page = result
+            values = result.array("mvs")
+            countKey = "mvCount"
+            items = values.compactMap(VideoDecoder.mvSummary).map(SearchItem.mv)
+        case .videos:
+            page = result
+            values = result.array("videos")
+            countKey = "videoCount"
+            items = values.compactMap(VideoDecoder.videoSummary).map(SearchItem.video)
         }
 
         let hasMore = page.keys.contains("hasMore")
