@@ -26,7 +26,9 @@ struct PlaybackControls: View {
                             symbol: "waveform.path.ecg",
                             label: heartModeLabel,
                             isActive: player.isHeartModeEnabled,
-                            isDisabled: player.currentSong == nil || player.isLoadingHeartMode,
+                            isDisabled: player.currentSong == nil
+                                || player.isLoadingHeartMode
+                                || player.isSharedControlActive,
                             badge: player.isLoadingHeartMode ? "…" : (player.heartModeErrorMessage == nil ? nil : "!")
                         ) {
                             player.toggleHeartMode()
@@ -99,9 +101,11 @@ struct PlaybackControls: View {
                 if showsQueueOptions {
                     PlayerIconButton(
                         symbol: player.repeatMode.symbol,
-                        label: player.repeatMode.actionLabel,
+                        label: player.isSharedControlActive
+                            ? "一起听期间不可切换循环模式"
+                            : player.repeatMode.actionLabel,
                         isActive: player.repeatMode != .off,
-                        isDisabled: player.isLinearQueueMode
+                        isDisabled: player.isLinearQueueMode || player.isSharedControlActive
                     ) {
                         player.cycleRepeatMode()
                     }
@@ -117,6 +121,8 @@ struct PlaybackControls: View {
                     onEditingChanged: updateScrubbing
                 )
                 .disabled(player.currentSong == nil)
+                .accessibilityLabel("播放进度")
+                .accessibilityValue("\(timeText(displayedPosition))，总时长 \(timeText(player.duration))")
                 Text(timeText(player.duration))
                     .frame(width: 38, alignment: .leading)
             }
@@ -127,6 +133,7 @@ struct PlaybackControls: View {
             isScrubbing = false
             scrubPosition = 0
         }
+        .disabled(player.isControlInteractionLocked)
     }
 
     private var playbackButtonLabel: String {
@@ -135,6 +142,7 @@ struct PlaybackControls: View {
     }
 
     private var heartModeLabel: String {
+        if player.isSharedControlActive { return "一起听期间不可开启心动模式" }
         if player.isLoadingHeartMode { return "正在开启心动模式" }
         if let message = player.heartModeErrorMessage { return "心动模式失败：\(message)，点按重试" }
         return player.isHeartModeEnabled ? "关闭心动模式" : "开启心动模式"
@@ -285,6 +293,19 @@ struct NowPlayingDetailView: View {
             }
 
             Spacer()
+
+            Button {
+                model.isListenTogetherPresented = true
+            } label: {
+                Image(systemName: "person.2.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(NowPlayingToolbarButtonStyle())
+            .foregroundStyle(model.listenTogether?.room == nil ? Color.secondary : Color.red)
+            .disabled(model.currentUserID == nil || model.listenTogether == nil)
+            .help("一起听")
+            .accessibilityLabel("一起听")
 
             Button(action: close) {
                 Image(systemName: "xmark")
@@ -595,6 +616,7 @@ private struct PlaybackQueueView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .disabled(player.isControlInteractionLocked)
                     .id(item.id)
                     .accessibilityLabel(item.song.map { "\($0.name)，\($0.artistsDisplay)" } ?? "正在加载歌曲")
                     .accessibilityValue(player.currentSongID == item.id ? "当前歌曲" : item.song?.durationText ?? "")
@@ -723,6 +745,7 @@ private struct LyricRow: View {
             .opacity(isCurrent ? 1 : 0.72)
         }
         .buttonStyle(.plain)
+        .disabled(player.isControlInteractionLocked)
         .help("跳转到 \(timeText(line.timestampMilliseconds))")
         .accessibilityLabel(
             [line.text, line.romanization, line.translation].compactMap { $0 }.joined(separator: "，")

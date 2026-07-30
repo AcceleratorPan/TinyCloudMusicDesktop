@@ -61,6 +61,7 @@ struct SessionSettingsSections: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .help("使用网易云音乐客户端扫码登录")
+                    .disabled(controller.state == .authenticated || isRefreshing || isLoggingOut)
 
                     Button {
                         showingWebLogin = true
@@ -68,6 +69,7 @@ struct SessionSettingsSections: View {
                         Label("备用网页登录", systemImage: "safari")
                     }
                     .help("打开网易云音乐官方登录页并自动保存 Cookie")
+                    .disabled(controller.state == .authenticated || isRefreshing || isLoggingOut)
                 }
                 .controlSize(.large)
 

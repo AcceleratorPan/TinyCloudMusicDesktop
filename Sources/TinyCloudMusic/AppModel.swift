@@ -88,10 +88,19 @@ final class AppModel {
     var artistFollowOverrides: [Int64: Bool] = [:]
     var userFollowOverrides: [Int64: Bool] = [:]
     var broadcastCollectionOverrides: [String: Bool] = [:]
-    var currentUserID: Int64?
+    var currentUserID: Int64? {
+        didSet {
+            guard currentUserID != oldValue else { return }
+            listenTogether?.updateAccount(currentUserID)
+        }
+    }
     var playlistPickerSong: Song?
+    var isListenTogetherPresented = false
     var librarySnapshot: LibrarySnapshot?
     var personalFM: PersonalFMController?
+    var listenTogether: ListenTogetherController? {
+        didSet { listenTogether?.updateAccount(currentUserID) }
+    }
 
     let repository: any MusicRepository
     let library: LiveMusicLibrary?

@@ -30,6 +30,7 @@ enum QRLoginStatus: Equatable, Sendable {
 final class SessionController {
     typealias Validator = @Sendable (SessionCredentials) async throws -> Bool
     typealias VIPValidator = @Sendable (String) async throws -> Bool
+    typealias BeforeLogout = @MainActor @Sendable () async -> Void
 
     private(set) var state: SessionState = .guest
     private(set) var isVIPVerified = false
@@ -40,6 +41,7 @@ final class SessionController {
     @ObservationIgnored private let validator: Validator
     @ObservationIgnored private let vipValidator: VIPValidator
     @ObservationIgnored private var generation = 0
+    @ObservationIgnored var beforeLogout: BeforeLogout?
 
     init(
         store: CredentialStore,
@@ -258,6 +260,7 @@ final class SessionController {
     }
 
     func logout() async -> String? {
+        await beforeLogout?()
         var warning: String?
         let current = try? storedCredentials()
         if let current, !current.cookie.isEmpty, !NeteaseCookieHeader.isGuest(current.cookie) {

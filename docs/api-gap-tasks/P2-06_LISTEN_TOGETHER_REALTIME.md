@@ -9,10 +9,10 @@
 
 ## 当前状态
 
-- `PlayerController` 已有歌曲队列、播放/暂停、切歌、seek、模式、预缓冲和恢复逻辑。
-- App 没有房间模型、邀请入口、心跳任务、远程命令抑制、单调序列或播放列表版本。
-- 网络层支持 EAPI/WEAPI，但普通读缓存和写后全账号缓存失效都不适合高频实时请求。
-- 没有 WebSocket 依赖；参考接口是一组 HTTP 命令与状态接口。
+- 已实现独立房间状态机、邀请入口、串行心跳、命令序列、权威播放列表、播放器反馈抑制、睡眠/断线恢复和退出清理。
+- 实时下行使用随 App 打包的 NIM Native SDK 10.9.40；HTTP 接口负责房间写入、心跳和权威状态读取。
+- 房间页使用 `roomInfo.roomCreateTime` 显示服务端会话时长；SwiftUI 原生 timer 自动刷新，不增加轮询请求。
+- 2026-07-29 双账号 live smoke 已通过创建/加入、NIM 登录与入聊天室、双向播放命令、列表同步、结束和清理全链路。
 
 ## 交付范围
 
@@ -22,7 +22,7 @@
 4. 本地播放、暂停、seek、切歌转换为带单调 `clientSeq` 的命令；远程命令按序应用。
 5. 播放列表同步使用服务端版本，支持显示列表和随机列表，版本变化时拉取权威列表。
 6. 网络中断、应用睡眠/唤醒和临时接口失败后先读取状态/列表对账，再恢复命令发送。
-7. 房主结束房间、成员离开、账号退出和房间失效都停止实时任务并恢复普通播放器控制。
+7. 任一参与者结束一起听、账号退出和房间失效都停止实时任务并恢复普通播放器控制。
 8. 启动时若服务端报告未结束房间，只提示用户恢复，不自动播放或加入。
 
 ## 明确不做
@@ -47,14 +47,21 @@
 | 心跳 | EAPI | `/api/listen/together/heartbeat` | `roomId`, `songId`, `playStatus`, `progress` |
 | 播放命令 | EAPI | `/api/listen/together/play/command/report` | `roomId`, `commandInfo` JSON |
 | 列表命令 | EAPI | `/api/listen/together/sync/list/command/report` | `roomId`, `playlistParam` JSON |
-| 获取权威列表 | EAPI | `/api/listen/together/sync/playlist/get` | `roomId` |
-| 结束房间 | EAPI | `/api/listen/together/end/v2` | `roomId` |
+| 获取权威列表 | EAPI | `/api/listen/together/sync/playlist/get` | `roomId`, 本地 `playlistParam` JSON |
+| 获取实时凭据 | Query | `https://interface3.music.163.com/api/middle/im/token/get` | `bizName=music_listenTogether` |
+| 结束一起听 | EAPI | `/api/listen/together/end/v2` | `roomId`；任一参与者调用都会结束双方会话 |
 
 `status/get` 调用 `requestWEAPI` 时必须显式传 `invalidatesAccountCache: false`。EAPI 房间读取、心跳和命令也使用无缓存且不失效账号缓存的实时请求属性，不能复用会触发 `.invalidateAccount` 的普通 `mutate` 包装；命令成功后同样不应清空无关资料库缓存。
 
 `commandInfo` 必须包含经过枚举验证的 `commandType`、`progress`、`playStatus`、`formerSongId`、`targetSongId` 和单调 `clientSeq`。
 
 `playlistParam` 包含经过枚举验证的 `commandType`、当前用户/version、`anchorSongId`、`anchorPosition`、`randomList`、`displayList`。Swift 内部保持 `[Int64]`，仅在边界按 live contract 编码，不能从逗号字符串直接进入领域状态。
+
+`sync/playlist/get` 同样必须附带本地队列生成的 `playlistParam`，字段为 `playMode`、`anchorSongId`、`anchorPosition`、`randomList` 和 `displayList`。服务端顺序播放响应允许 `randomList: null`，此时以 `displayList` 作为随机列表的领域回退值。
+
+创建、接受和状态响应中的 `roomInfo.roomCreateTime` 是毫秒时间戳，可作为当前会话计时起点。`effectiveDurationMs` 不是已听时长，心跳 `timeSpan` 是轮询间隔；`end/v2` 的 `shareInfo.thisDuration` 仅用于结束后的结算摘要。
+
+实时 token 不使用默认 `cloudmusic` 业务名；必须向 `interface3.music.163.com` 查询并传 `bizName=music_listenTogether`。NIM 初始化和登录使用 AppKey `3a6a3e48f6854dfa4e4464f3bdaec3b4`，聊天室请求的扩展参数传空。
 
 ## Live contract 门槛
 
@@ -68,14 +75,12 @@
 
 没有上述契约时只可提交 service/fixture，不得接管真实播放器。禁止根据字段名拍脑袋实现同步。
 
-双账号 live smoke 必须是独立的显式写检查，不并入默认 `run-api-checks.sh`。新增 `Checks/run-listen-together-live-smoke.sh`，仅在 `TINYCLOUDMUSIC_RUN_LISTEN_TOGETHER_LIVE_WRITES=1` 且同时提供以下四项时运行：
+双账号 live smoke 是独立的显式写检查，不并入默认 `run-api-checks.sh`。`Checks/run-listen-together-live-smoke.sh` 仅在 `TINYCLOUDMUSIC_RUN_LISTEN_TOGETHER_LIVE_WRITES=1` 且本地存在以下两个权限为 `0600` 的专用测试文件时运行：
 
-- `TINYCLOUDMUSIC_LISTEN_TOGETHER_HOST_COOKIE`
-- `TINYCLOUDMUSIC_LISTEN_TOGETHER_HOST_MUSIC_U`
-- `TINYCLOUDMUSIC_LISTEN_TOGETHER_MEMBER_COOKIE`
-- `TINYCLOUDMUSIC_LISTEN_TOGETHER_MEMBER_MUSIC_U`
+- `~/Library/Application Support/TinyCloudMusic/ListenTogetherTest/host.cookie`
+- `~/Library/Application Support/TinyCloudMusic/ListenTogetherTest/member.cookie`
 
-脚本为两个账号创建独立 transport，禁止打印凭据/邀请数据，并用退出清理保证成功或失败都由房主结束测试房间。缺少 opt-in 或任一凭据时只报告 skip，不发送任何写请求。
+每个文件保存完整 Cookie，测试只在内存中提取 `MUSIC_U`。脚本为两个账号创建独立 transport 和 NIM 数据目录，禁止打印凭据、账号、房间或邀请数据，并保证成功或失败都尝试清理测试会话。缺少 opt-in 或任一文件时只报告 skip，不发送写请求；不得读取生产 Keychain。
 
 ## 房间状态机
 
@@ -110,6 +115,7 @@ enum ListenTogetherRole: Equatable, Sendable {
 - 不自动重发结果未知的命令。读取当前状态和权威列表后，若服务端尚未应用，再由用户动作产生新序列。
 - 应用远程命令时设置 scoped suppression 标记，调用 `PlayerController` 后不再反向发送同一动作，避免反馈环。
 - `lastAppliedRemoteSeq` 之前或相同序列的命令丢弃；发现缺口时停止增量应用并拉取权威状态。
+- 权威列表对账完成后仍无法匹配的待处理播放命令视为已被权威状态覆盖的过期增量，静默丢弃，不显示永久错误。
 - 换歌立即按权威 song ID 切换；同歌进度偏差超过一个集中定义且经 live contract 校准的阈值（建议起点 1.5 秒）才 seek，避免每次心跳抖动。
 - `ContinuousClock` 用于本地经过时间估计；服务端时间戳只用于对账，不用墙上时钟直接推进播放器。
 - 播放列表 version 单调递增；冲突或未知版本时拉取 `sync/playlist/get`，绝不本地合并两份不同顺序。
@@ -120,15 +126,15 @@ enum ListenTogetherRole: Equatable, Sendable {
 - App 进入睡眠/网络中断时停止发命令；唤醒后先 `status/get` + `sync/playlist/get`，对账完成前禁用房间控制。
 - 短暂断线保留房间信息但不猜远端进度；超过失败上限暂停本地播放。
 - 服务端返回房间结束/成员移除时立即取消全部 Task、清空序列与列表版本。
-- 房主点击结束仅发送一次 `/end/v2`；响应未知时查询状态。成员离开按 live contract 的明确语义执行，不能擅自结束全房间。
+- Host 或 Member 点击结束仅发送一次 `/end/v2`；响应未知时查询状态。live contract 已确认该接口会结束双方会话，因此两种角色都必须先显示“所有成员将退出”的确认。
 - 退出账号前 best-effort 结束/离开当前会话，随后无条件本地清理；不能用新账号凭据补发旧房间请求。
 - 普通单人播放开始前明确退出房间或由用户确认，避免两套控制同时操作播放器。
 
 ## UI 行为
 
 - 播放器区域提供“一起听”图标入口；未连接时可创建或输入/粘贴受支持的邀请信息。
-- 房间面板显示连接状态、角色、成员摘要、当前歌曲和结束/离开动作；不显示协议调试字段。
-- 创建成功使用系统 ShareLink/复制能力分享服务端提供的邀请文本，不自行构造公网短链。
+- 房间面板显示连接状态、角色、成员摘要、当前歌曲和结束动作；不显示协议调试字段。
+- 创建成功使用系统 ShareLink/复制能力，按已验证的 `st.music.163.com/listen-together/share/` 官方格式组合 `songId`、`roomId` 和 `inviterId`；不生成自有短链。
 - 对账/重连时显示紧凑状态并临时禁用冲突控制；普通播放 UI 不应跳动或重建布局。
 - 非房主不能执行服务端禁止的列表动作；权限来自房间响应，不用客户端昵称/邀请来源猜测。
 - 错误区分房间失效、账号失效、歌曲不可播放和网络中断，并提供唯一明确恢复动作。
@@ -170,7 +176,7 @@ enum ListenTogetherRole: Equatable, Sendable {
 
 - 两个合法账号可以创建/加入同一房间，并在播放、暂停、seek、切歌和队列变化上保持服务端权威同步。
 - 断线与睡眠恢复先对账，不重复发送旧命令，不出现远程/本地反馈环。
-- 房间结束、成员离开和账号切换能完整停止心跳并恢复单人播放。
+- 任一成员结束一起听和账号切换都能完整停止心跳并恢复单人播放。
 - 不可播放歌曲按现有权限提示，不使用替代或绕过 URL。
 - 功能由独立状态机/controller 驱动，而不是散落的 View Task 和 request 方法。
 - `swift build -j 4 -Xswiftc -warnings-as-errors`、`swift test -j 4` 和 `Checks/run-api-checks.sh` 通过；提供双账号凭据并显式 opt-in 时，独立 live smoke 通过且总能清理测试房间。

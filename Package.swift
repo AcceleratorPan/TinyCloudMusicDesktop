@@ -17,7 +17,8 @@ let package = Package(
             dependencies: [
                 .product(name: "Nuke", package: "Nuke"),
                 .product(name: "NukeUI", package: "Nuke")
-            ]
+            ],
+            resources: [.copy("Resources/NIMNative")]
         ),
         .testTarget(
             name: "TinyCloudMusicTests",

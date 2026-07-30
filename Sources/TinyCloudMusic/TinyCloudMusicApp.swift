@@ -25,6 +25,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var model: AppModel?
     private var credentialObserver: NSObjectProtocol?
     private var sleepObserver: NSObjectProtocol?
+    private var wakeObserver: NSObjectProtocol?
     private var terminationConfirmed = false
     private var terminationTask: Task<Void, Never>?
 
@@ -91,13 +92,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             session: session
         )
         self.model = model
-        sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.willSleepNotification,
-            object: nil,
-            queue: .main
-        ) { [weak uploads] _ in
-            Task { @MainActor in await uploads?.pauseAll() }
-        }
         ArtworkPipeline.shared.configure(cacheRoot: model.cacheFolderURL)
         let player = PlayerController(
             repository: repository,
@@ -105,6 +99,31 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             cacheRoot: model.cacheFolderURL,
             crossfadeDuration: model.settings.crossfadeDuration
         )
+        let listenTogether = ListenTogetherController(
+            service: LiveListenTogetherService(transport: transport),
+            player: player
+        )
+        model.listenTogether = listenTogether
+        session.beforeLogout = { [weak listenTogether] in
+            await listenTogether?.prepareForLogout()
+        }
+        sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak uploads, weak listenTogether] _ in
+            Task { @MainActor in
+                await uploads?.pauseAll()
+                await listenTogether?.sleep()
+            }
+        }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak listenTogether] _ in
+            Task { @MainActor in listenTogether?.wake() }
+        }
         model.personalFM = PersonalFMController(
             library: library,
             player: player,
@@ -271,14 +290,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let downloads = model?.downloads
         let uploads = model?.uploads
+        let listenTogether = model?.listenTogether
         guard downloads?.runningDownloadCount ?? 0 > 0
                 || downloads?.queuedDownloadCount ?? 0 > 0
                 || uploads?.isActive == true
+                || listenTogether?.requiresShutdown == true
         else { return .terminateNow }
 
         terminationTask = Task { [weak self] in
             await downloads?.pauseAll()
             await uploads?.pauseAll()
+            await listenTogether?.shutdown()
             self?.terminationTask = nil
             sender.reply(toApplicationShouldTerminate: true)
         }
@@ -558,15 +580,20 @@ private final class MenuBarPlayerController: NSObject {
             previousButton,
             symbol: "backward.end.fill",
             label: player.position > 3 ? "从头播放" : "上一首",
-            enabled: player.canGoPrevious
+            enabled: player.canGoPrevious && !player.isControlInteractionLocked
         )
         update(
             playbackButton,
             symbol: player.isPlaybackRequested ? "pause.fill" : "play.fill",
             label: player.isPlaybackRequested ? "暂停" : "播放",
-            enabled: song != nil
+            enabled: song != nil && !player.isControlInteractionLocked
         )
-        update(nextButton, symbol: "forward.end.fill", label: "下一首", enabled: player.canGoNext)
+        update(
+            nextButton,
+            symbol: "forward.end.fill",
+            label: "下一首",
+            enabled: player.canGoNext && !player.isControlInteractionLocked
+        )
         let isLiked = song.map { model.likedSongIDs.contains($0.id) } ?? false
         let isPodcastEpisode = song?.isPodcastEpisode == true
         update(

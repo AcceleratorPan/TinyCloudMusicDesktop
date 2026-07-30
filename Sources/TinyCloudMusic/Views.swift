@@ -185,6 +185,10 @@ struct RootView: View {
                 model.loadHome()
             }
         }
+        .onChange(of: listenTogetherPhase) { _, phase in
+            guard let phase, case .recoveryAvailable = phase else { return }
+            model.isListenTogetherPresented = true
+        }
         .onChange(of: model.settings.playbackQuality) { _, quality in
             player.configure(playbackQuality: quality, cacheRoot: model.cacheFolderURL)
         }
@@ -238,6 +242,17 @@ struct RootView: View {
                 .frame(width: 420, height: 240)
             }
         }
+        .sheet(isPresented: $model.isListenTogetherPresented) {
+            if let controller = model.listenTogether {
+                ListenTogetherView(controller: controller, player: player)
+            } else {
+                ContentUnavailableView(
+                    "一起听不可用",
+                    systemImage: "person.2.slash"
+                )
+                .frame(width: 420, height: 240)
+            }
+        }
         .alert("操作失败", isPresented: libraryMessagePresented) {
             Button("好") { model.libraryMessage = nil }
         } message: {
@@ -249,6 +264,10 @@ struct RootView: View {
         model.session.map {
             SessionChangeIdentity(state: $0.state, credentialRevision: $0.credentialRevision)
         }
+    }
+
+    private var listenTogetherPhase: ListenTogetherPhase? {
+        model.listenTogether?.phase
     }
 
     private var libraryMessagePresented: Binding<Bool> {
@@ -3063,6 +3082,14 @@ private struct PlayerBar: View {
                     if let downloads = model.downloads {
                         DownloadControl(manager: downloads, song: song) { model.download(song) }
                     }
+                }
+                PlayerIconButton(
+                    symbol: "person.2.fill",
+                    label: model.listenTogether?.isConnected == true ? "一起听，已连接" : "一起听",
+                    isActive: model.listenTogether?.room != nil,
+                    isDisabled: model.currentUserID == nil || model.listenTogether == nil
+                ) {
+                    model.isListenTogetherPresented = true
                 }
                 PlayerIconButton(
                     symbol: player.volume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill",

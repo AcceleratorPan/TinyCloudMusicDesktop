@@ -1,0 +1,859 @@
+{
+  "schemaVersion" : 1,
+  "songId" : 2001,
+  "source" : "live-contract-redacted",
+  "steps" : [
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "avatarPendantShow" : true,
+          "hintText" : null,
+          "inviteUserInfo" : null,
+          "roomInfo" : {
+            "agoraChannelId" : "ID",
+            "alg" : null,
+            "chatRoomId" : "ROOM_ID",
+            "creatorId" : 1001,
+            "effectiveDurationMs" : 1800000,
+            "listeningRefer" : null,
+            "ltType" : 1,
+            "matchedReason" : null,
+            "openHeartRcmd" : false,
+            "roomCreateTime" : 1785257186329,
+            "roomId" : "ROOM_ID",
+            "roomRTCType" : null,
+            "roomType" : "<string>",
+            "roomUsers" : [
+              {
+                "avatarUrl" : "<string>",
+                "identityIcon" : null,
+                "identityName" : null,
+                "identityTag" : null,
+                "nickname" : "<string>",
+                "outerId" : null,
+                "pendantData" : null,
+                "userId" : 1001
+              }
+            ],
+            "roomVipAbGroup" : {
+              "huiyuan_ListenTogether_TSpop" : "<string>",
+              "hy-sy" : "<string>",
+              "hy-yqt1" : "<string>"
+            },
+            "unlockChatNeededMs" : null,
+            "unlockedIdentity" : null,
+            "unlockIdentityNeededMs" : null,
+            "unlockTextChatNeededMs" : null,
+            "waitMs" : 120000
+          },
+          "toastText" : null,
+          "type" : "<string>"
+        },
+        "message" : "<string>"
+      },
+      "step" : "host.room.create"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "copywriting" : null,
+          "joinable" : true,
+          "status" : "AVAILABLE",
+          "type" : "<string>"
+        },
+        "message" : "<string>"
+      },
+      "step" : "host.room.check"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "copywriting" : null,
+          "joinable" : true,
+          "status" : "AVAILABLE",
+          "type" : "<string>"
+        },
+        "message" : "<string>"
+      },
+      "step" : "member.room.check"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "avatarPendantShow" : null,
+          "hintText" : null,
+          "inviteUserInfo" : null,
+          "roomInfo" : {
+            "agoraChannelId" : "ID",
+            "alg" : null,
+            "chatRoomId" : "ROOM_ID",
+            "creatorId" : 1001,
+            "effectiveDurationMs" : 1800000,
+            "listeningRefer" : null,
+            "ltType" : 1,
+            "matchedReason" : null,
+            "openHeartRcmd" : false,
+            "roomCreateTime" : 1785257186329,
+            "roomId" : "ROOM_ID",
+            "roomRTCType" : "<string>",
+            "roomType" : "<string>",
+            "roomUsers" : [
+              {
+                "avatarUrl" : "<string>",
+                "identityIcon" : null,
+                "identityName" : null,
+                "identityTag" : null,
+                "nickname" : "<string>",
+                "outerId" : null,
+                "pendantData" : null,
+                "userId" : 1001
+              },
+              {
+                "avatarUrl" : "<string>",
+                "identityIcon" : null,
+                "identityName" : null,
+                "identityTag" : null,
+                "nickname" : "<string>",
+                "outerId" : null,
+                "pendantData" : null,
+                "userId" : 1002
+              }
+            ],
+            "roomVipAbGroup" : {
+              "huiyuan_ListenTogether_TSpop" : "<string>",
+              "hy-sy" : "<string>",
+              "hy-yqt1" : "<string>",
+              "rmPlSize" : "<string>"
+            },
+            "unlockChatNeededMs" : null,
+            "unlockedIdentity" : null,
+            "unlockIdentityNeededMs" : null,
+            "unlockTextChatNeededMs" : null,
+            "waitMs" : 120000
+          },
+          "toastText" : null,
+          "type" : "<string>"
+        },
+        "message" : "<string>"
+      },
+      "step" : "member.invitation.accept"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "anotherDeviceInfo" : {
+            "antherUserId" : 1002,
+            "appVersion" : "<string>",
+            "osType" : "<string>"
+          },
+          "anotherFollowStatus" : true,
+          "inRoom" : true,
+          "roomInfo" : {
+            "agoraChannelId" : "ID",
+            "alg" : null,
+            "chatRoomId" : "ROOM_ID",
+            "creatorId" : 1001,
+            "effectiveDurationMs" : null,
+            "listeningRefer" : null,
+            "ltType" : null,
+            "matchedReason" : null,
+            "openHeartRcmd" : false,
+            "roomCreateTime" : 1785257187000,
+            "roomId" : "ROOM_ID",
+            "roomRTCType" : "<string>",
+            "roomType" : "<string>",
+            "roomUsers" : [
+              {
+                "avatarUrl" : "<string>",
+                "identityIcon" : null,
+                "identityName" : null,
+                "identityTag" : null,
+                "nickname" : "<string>",
+                "outerId" : null,
+                "pendantData" : null,
+                "userId" : 1001
+              },
+              {
+                "avatarUrl" : "<string>",
+                "identityIcon" : null,
+                "identityName" : null,
+                "identityTag" : null,
+                "nickname" : "<string>",
+                "outerId" : null,
+                "pendantData" : null,
+                "userId" : 1002
+              }
+            ],
+            "roomVipAbGroup" : {
+              "huiyuan_ListenTogether_TSpop" : "<string>",
+              "hy-sy" : "<string>",
+              "hy-yqt1" : "<string>",
+              "rmPlSize" : "<string>"
+            },
+            "unlockChatNeededMs" : null,
+            "unlockedIdentity" : null,
+            "unlockIdentityNeededMs" : null,
+            "unlockTextChatNeededMs" : null,
+            "waitMs" : null
+          },
+          "status" : "CONNECTED"
+        },
+        "message" : "<string>"
+      },
+      "step" : "host.status.initial"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "anotherDeviceInfo" : {
+            "antherUserId" : 1001,
+            "appVersion" : "<string>",
+            "osType" : "<string>"
+          },
+          "anotherFollowStatus" : true,
+          "inRoom" : true,
+          "roomInfo" : {
+            "agoraChannelId" : "ID",
+            "alg" : null,
+            "chatRoomId" : "ROOM_ID",
+            "creatorId" : 1001,
+            "effectiveDurationMs" : null,
+            "listeningRefer" : null,
+            "ltType" : null,
+            "matchedReason" : null,
+            "openHeartRcmd" : false,
+            "roomCreateTime" : 1785257187000,
+            "roomId" : "ROOM_ID",
+            "roomRTCType" : "<string>",
+            "roomType" : "<string>",
+            "roomUsers" : [
+              {
+                "avatarUrl" : "<string>",
+                "identityIcon" : null,
+                "identityName" : null,
+                "identityTag" : null,
+                "nickname" : "<string>",
+                "outerId" : null,
+                "pendantData" : null,
+                "userId" : 1001
+              },
+              {
+                "avatarUrl" : "<string>",
+                "identityIcon" : null,
+                "identityName" : null,
+                "identityTag" : null,
+                "nickname" : "<string>",
+                "outerId" : null,
+                "pendantData" : null,
+                "userId" : 1002
+              }
+            ],
+            "roomVipAbGroup" : {
+              "huiyuan_ListenTogether_TSpop" : "<string>",
+              "hy-sy" : "<string>",
+              "hy-yqt1" : "<string>",
+              "rmPlSize" : "<string>"
+            },
+            "unlockChatNeededMs" : null,
+            "unlockedIdentity" : null,
+            "unlockIdentityNeededMs" : null,
+            "unlockTextChatNeededMs" : null,
+            "waitMs" : null
+          },
+          "status" : "CONNECTED"
+        },
+        "message" : "<string>"
+      },
+      "step" : "member.status.initial"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "message" : null,
+          "result" : true,
+          "timeSpan" : 30
+        },
+        "message" : "<string>"
+      },
+      "step" : "host.heartbeat.initial"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "message" : null,
+          "result" : true,
+          "timeSpan" : 30
+        },
+        "message" : "<string>"
+      },
+      "step" : "member.heartbeat.initial"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "message" : null,
+          "result" : true
+        },
+        "message" : "<string>"
+      },
+      "step" : "host.play.GOTO"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "message" : null,
+          "result" : true,
+          "timeSpan" : 30
+        },
+        "message" : "<string>"
+      },
+      "step" : "member.heartbeat.after-GOTO"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "anotherDeviceInfo" : {
+            "antherUserId" : 1001,
+            "appVersion" : "<string>",
+            "osType" : "<string>"
+          },
+          "anotherFollowStatus" : true,
+          "inRoom" : true,
+          "roomInfo" : {
+            "agoraChannelId" : "ID",
+            "alg" : null,
+            "chatRoomId" : "ROOM_ID",
+            "creatorId" : 1001,
+            "effectiveDurationMs" : null,
+            "listeningRefer" : null,
+            "ltType" : null,
+            "matchedReason" : null,
+            "openHeartRcmd" : false,
+            "roomCreateTime" : 1785257187000,
+            "roomId" : "ROOM_ID",
+            "roomRTCType" : "<string>",
+            "roomType" : "<string>",
+            "roomUsers" : [
+              {
+                "avatarUrl" : "<string>",
+                "identityIcon" : null,
+                "identityName" : null,
+                "identityTag" : null,
+                "nickname" : "<string>",
+                "outerId" : null,
+                "pendantData" : null,
+                "userId" : 1001
+              },
+              {
+                "avatarUrl" : "<string>",
+                "identityIcon" : null,
+                "identityName" : null,
+                "identityTag" : null,
+                "nickname" : "<string>",
+                "outerId" : null,
+                "pendantData" : null,
+                "userId" : 1002
+              }
+            ],
+            "roomVipAbGroup" : {
+              "huiyuan_ListenTogether_TSpop" : "<string>",
+              "hy-sy" : "<string>",
+              "hy-yqt1" : "<string>",
+              "rmPlSize" : "<string>"
+            },
+            "unlockChatNeededMs" : null,
+            "unlockedIdentity" : null,
+            "unlockIdentityNeededMs" : null,
+            "unlockTextChatNeededMs" : null,
+            "waitMs" : null
+          },
+          "status" : "CONNECTED"
+        },
+        "message" : "<string>"
+      },
+      "step" : "member.status.after-GOTO"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "message" : null,
+          "result" : true
+        },
+        "message" : "<string>"
+      },
+      "step" : "host.play.PLAY"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "message" : null,
+          "result" : true,
+          "timeSpan" : 30
+        },
+        "message" : "<string>"
+      },
+      "step" : "member.heartbeat.after-PLAY"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "anotherDeviceInfo" : {
+            "antherUserId" : 1001,
+            "appVersion" : "<string>",
+            "osType" : "<string>"
+          },
+          "anotherFollowStatus" : true,
+          "inRoom" : true,
+          "roomInfo" : {
+            "agoraChannelId" : "ID",
+            "alg" : null,
+            "chatRoomId" : "ROOM_ID",
+            "creatorId" : 1001,
+            "effectiveDurationMs" : null,
+            "listeningRefer" : null,
+            "ltType" : null,
+            "matchedReason" : null,
+            "openHeartRcmd" : false,
+            "roomCreateTime" : 1785257187000,
+            "roomId" : "ROOM_ID",
+            "roomRTCType" : "<string>",
+            "roomType" : "<string>",
+            "roomUsers" : [
+              {
+                "avatarUrl" : "<string>",
+                "identityIcon" : null,
+                "identityName" : null,
+                "identityTag" : null,
+                "nickname" : "<string>",
+                "outerId" : null,
+                "pendantData" : null,
+                "userId" : 1001
+              },
+              {
+                "avatarUrl" : "<string>",
+                "identityIcon" : null,
+                "identityName" : null,
+                "identityTag" : null,
+                "nickname" : "<string>",
+                "outerId" : null,
+                "pendantData" : null,
+                "userId" : 1002
+              }
+            ],
+            "roomVipAbGroup" : {
+              "huiyuan_ListenTogether_TSpop" : "<string>",
+              "hy-sy" : "<string>",
+              "hy-yqt1" : "<string>",
+              "rmPlSize" : "<string>"
+            },
+            "unlockChatNeededMs" : null,
+            "unlockedIdentity" : null,
+            "unlockIdentityNeededMs" : null,
+            "unlockTextChatNeededMs" : null,
+            "waitMs" : null
+          },
+          "status" : "CONNECTED"
+        },
+        "message" : "<string>"
+      },
+      "step" : "member.status.after-PLAY"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "message" : null,
+          "result" : true
+        },
+        "message" : "<string>"
+      },
+      "step" : "host.play.seek"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "message" : null,
+          "result" : true,
+          "timeSpan" : 30
+        },
+        "message" : "<string>"
+      },
+      "step" : "member.heartbeat.after-seek"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "anotherDeviceInfo" : {
+            "antherUserId" : 1001,
+            "appVersion" : "<string>",
+            "osType" : "<string>"
+          },
+          "anotherFollowStatus" : true,
+          "inRoom" : true,
+          "roomInfo" : {
+            "agoraChannelId" : "ID",
+            "alg" : null,
+            "chatRoomId" : "ROOM_ID",
+            "creatorId" : 1001,
+            "effectiveDurationMs" : null,
+            "listeningRefer" : null,
+            "ltType" : null,
+            "matchedReason" : null,
+            "openHeartRcmd" : false,
+            "roomCreateTime" : 1785257187000,
+            "roomId" : "ROOM_ID",
+            "roomRTCType" : "<string>",
+            "roomType" : "<string>",
+            "roomUsers" : [
+              {
+                "avatarUrl" : "<string>",
+                "identityIcon" : null,
+                "identityName" : null,
+                "identityTag" : null,
+                "nickname" : "<string>",
+                "outerId" : null,
+                "pendantData" : null,
+                "userId" : 1001
+              },
+              {
+                "avatarUrl" : "<string>",
+                "identityIcon" : null,
+                "identityName" : null,
+                "identityTag" : null,
+                "nickname" : "<string>",
+                "outerId" : null,
+                "pendantData" : null,
+                "userId" : 1002
+              }
+            ],
+            "roomVipAbGroup" : {
+              "huiyuan_ListenTogether_TSpop" : "<string>",
+              "hy-sy" : "<string>",
+              "hy-yqt1" : "<string>",
+              "rmPlSize" : "<string>"
+            },
+            "unlockChatNeededMs" : null,
+            "unlockedIdentity" : null,
+            "unlockIdentityNeededMs" : null,
+            "unlockTextChatNeededMs" : null,
+            "waitMs" : null
+          },
+          "status" : "CONNECTED"
+        },
+        "message" : "<string>"
+      },
+      "step" : "member.status.after-seek"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "message" : null,
+          "result" : true
+        },
+        "message" : "<string>"
+      },
+      "step" : "host.play.PAUSE"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "message" : null,
+          "result" : true,
+          "timeSpan" : 30
+        },
+        "message" : "<string>"
+      },
+      "step" : "member.heartbeat.after-PAUSE"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "anotherDeviceInfo" : {
+            "antherUserId" : 1001,
+            "appVersion" : "<string>",
+            "osType" : "<string>"
+          },
+          "anotherFollowStatus" : true,
+          "inRoom" : true,
+          "roomInfo" : {
+            "agoraChannelId" : "ID",
+            "alg" : null,
+            "chatRoomId" : "ROOM_ID",
+            "creatorId" : 1001,
+            "effectiveDurationMs" : null,
+            "listeningRefer" : null,
+            "ltType" : null,
+            "matchedReason" : null,
+            "openHeartRcmd" : false,
+            "roomCreateTime" : 1785257187000,
+            "roomId" : "ROOM_ID",
+            "roomRTCType" : "<string>",
+            "roomType" : "<string>",
+            "roomUsers" : [
+              {
+                "avatarUrl" : "<string>",
+                "identityIcon" : null,
+                "identityName" : null,
+                "identityTag" : null,
+                "nickname" : "<string>",
+                "outerId" : null,
+                "pendantData" : null,
+                "userId" : 1001
+              },
+              {
+                "avatarUrl" : "<string>",
+                "identityIcon" : null,
+                "identityName" : null,
+                "identityTag" : null,
+                "nickname" : "<string>",
+                "outerId" : null,
+                "pendantData" : null,
+                "userId" : 1002
+              }
+            ],
+            "roomVipAbGroup" : {
+              "huiyuan_ListenTogether_TSpop" : "<string>",
+              "hy-sy" : "<string>",
+              "hy-yqt1" : "<string>",
+              "rmPlSize" : "<string>"
+            },
+            "unlockChatNeededMs" : null,
+            "unlockedIdentity" : null,
+            "unlockIdentityNeededMs" : null,
+            "unlockTextChatNeededMs" : null,
+            "waitMs" : null
+          },
+          "status" : "CONNECTED"
+        },
+        "message" : "<string>"
+      },
+      "step" : "member.status.after-PAUSE"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "message" : "<string>",
+          "result" : true
+        },
+        "message" : "<string>"
+      },
+      "step" : "host.playlist.replace"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "message" : "<string>",
+          "result" : true
+        },
+        "message" : "<string>"
+      },
+      "step" : "host.playlist.stale-version"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "message" : "<string>",
+          "result" : true
+        },
+        "message" : "<string>"
+      },
+      "step" : "member.playlist.replace"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+
+        },
+        "message" : "<string>"
+      },
+      "step" : "host.playlist.get"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+
+        },
+        "message" : "<string>"
+      },
+      "step" : "member.playlist.get"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "anotherDeviceInfo" : {
+            "antherUserId" : 1002,
+            "appVersion" : "<string>",
+            "osType" : "<string>"
+          },
+          "anotherFollowStatus" : true,
+          "inRoom" : true,
+          "roomInfo" : {
+            "agoraChannelId" : "ID",
+            "alg" : null,
+            "chatRoomId" : "ROOM_ID",
+            "creatorId" : 1001,
+            "effectiveDurationMs" : null,
+            "listeningRefer" : null,
+            "ltType" : null,
+            "matchedReason" : null,
+            "openHeartRcmd" : false,
+            "roomCreateTime" : 1785257187000,
+            "roomId" : "ROOM_ID",
+            "roomRTCType" : "<string>",
+            "roomType" : "<string>",
+            "roomUsers" : [
+              {
+                "avatarUrl" : "<string>",
+                "identityIcon" : null,
+                "identityName" : null,
+                "identityTag" : null,
+                "nickname" : "<string>",
+                "outerId" : null,
+                "pendantData" : null,
+                "userId" : 1001
+              },
+              {
+                "avatarUrl" : "<string>",
+                "identityIcon" : null,
+                "identityName" : null,
+                "identityTag" : null,
+                "nickname" : "<string>",
+                "outerId" : null,
+                "pendantData" : null,
+                "userId" : 1002
+              }
+            ],
+            "roomVipAbGroup" : {
+              "huiyuan_ListenTogether_TSpop" : "<string>",
+              "hy-sy" : "<string>",
+              "hy-yqt1" : "<string>",
+              "rmPlSize" : "<string>"
+            },
+            "unlockChatNeededMs" : null,
+            "unlockedIdentity" : null,
+            "unlockIdentityNeededMs" : null,
+            "unlockTextChatNeededMs" : null,
+            "waitMs" : null
+          },
+          "status" : "CONNECTED"
+        },
+        "message" : "<string>"
+      },
+      "step" : "host.status.final"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "anotherDeviceInfo" : {
+            "antherUserId" : 1001,
+            "appVersion" : "<string>",
+            "osType" : "<string>"
+          },
+          "anotherFollowStatus" : true,
+          "inRoom" : true,
+          "roomInfo" : {
+            "agoraChannelId" : "ID",
+            "alg" : null,
+            "chatRoomId" : "ROOM_ID",
+            "creatorId" : 1001,
+            "effectiveDurationMs" : null,
+            "listeningRefer" : null,
+            "ltType" : null,
+            "matchedReason" : null,
+            "openHeartRcmd" : false,
+            "roomCreateTime" : 1785257187000,
+            "roomId" : "ROOM_ID",
+            "roomRTCType" : "<string>",
+            "roomType" : "<string>",
+            "roomUsers" : [
+              {
+                "avatarUrl" : "<string>",
+                "identityIcon" : null,
+                "identityName" : null,
+                "identityTag" : null,
+                "nickname" : "<string>",
+                "outerId" : null,
+                "pendantData" : null,
+                "userId" : 1001
+              },
+              {
+                "avatarUrl" : "<string>",
+                "identityIcon" : null,
+                "identityName" : null,
+                "identityTag" : null,
+                "nickname" : "<string>",
+                "outerId" : null,
+                "pendantData" : null,
+                "userId" : 1002
+              }
+            ],
+            "roomVipAbGroup" : {
+              "huiyuan_ListenTogether_TSpop" : "<string>",
+              "hy-sy" : "<string>",
+              "hy-yqt1" : "<string>",
+              "rmPlSize" : "<string>"
+            },
+            "unlockChatNeededMs" : null,
+            "unlockedIdentity" : null,
+            "unlockIdentityNeededMs" : null,
+            "unlockTextChatNeededMs" : null,
+            "waitMs" : null
+          },
+          "status" : "CONNECTED"
+        },
+        "message" : "<string>"
+      },
+      "step" : "member.status.final"
+    },
+    {
+      "response" : {
+        "code" : 200,
+        "data" : {
+          "roomType" : "<string>",
+          "shareInfo" : {
+            "acceptUid" : 1099,
+            "chatNum" : 0,
+            "creatorUid" : 1001,
+            "distance" : 0,
+            "distanceCopywriting" : null,
+            "shareUrl" : "<string>",
+            "thisDuration" : 60,
+            "thisListenCount" : 2,
+            "totalDuration" : 60,
+            "totalListenCount" : 4,
+            "unlocked" : null
+          },
+          "success" : true
+        },
+        "message" : "<string>"
+      },
+      "step" : "host.room.end"
+    }
+  ]
+}

@@ -93,7 +93,7 @@ enum WriteAPIContractCheck {
         configuration.protocolClasses = [RequestCaptureProtocol.self]
         let transport = EAPITransport(
             session: URLSession(configuration: configuration),
-            cookie: "MUSIC_U=test; __csrf=csrf",
+            cookie: "MUSIC_U=test; __csrf=csrf; os=pc; osver=old; appver=old; channel=old",
             musicU: "",
             weapiSecretKey: "0123456789abcdef"
         )
@@ -1062,13 +1062,65 @@ enum WriteAPIContractCheck {
         try await verify(
             "/eapi/listen/together/sync/playlist/get",
             signing: "/api/listen/together/sync/playlist/get",
-            call: { _ = try await service.playlist(roomID: "room-1") }
-        ) { $0.string("roomId") == "room-1" }
+            call: {
+                _ = try await service.playlist(
+                    roomID: "room-1",
+                    displaySongIDs: [42, 43],
+                    randomSongIDs: [43, 42],
+                    anchorSongID: 42
+                )
+            }
+        ) {
+            guard $0.string("roomId") == "room-1",
+                  let playlist = jsonObject($0.string("playlistParam"))
+            else { return false }
+            return playlist.string("playMode") == "RANDOM"
+                && playlist.string("anchorSongId") == "42"
+                && playlist.int("anchorPosition") == 0
+                && playlist["randomList"] as? [String] == ["43", "42"]
+                && playlist["displayList"] as? [String] == ["42", "43"]
+        }
+
+        RequestCaptureProtocol.reset()
+        do {
+            _ = try await service.realtimeCredentials()
+            preconditionFailure("Expected the local HTTP 400 response")
+        } catch EAPIError.http(400) {
+        }
+        guard let request = RequestCaptureProtocol.request(),
+              request.url?.host == "interface3.music.163.com",
+              request.url?.path == "/api/middle/im/token/get",
+              request.httpMethod == "GET",
+              request.httpBody == nil,
+              RequestCaptureProtocol.requestCount() == 1,
+              let components = request.url.flatMap({ URLComponents(url: $0, resolvingAgainstBaseURL: false) })
+        else { preconditionFailure("Listen together realtime form contract mismatch") }
+        let fields = components.queryItems ?? []
+        let cookie = request.value(forHTTPHeaderField: "Cookie") ?? ""
+        precondition(
+            fields.count == 1
+                && fields.first(where: { $0.name == "bizName" })?.value == "music_listenTogether",
+            "Listen together realtime form fields mismatch"
+        )
+        precondition(
+            cookie.contains("MUSIC_U=test; __csrf=csrf")
+                && cookie.contains("osver=15.5; os=osx; appver=3.1.10.5100; channel=netease")
+                && cookie.contains("versioncode=140; buildver=")
+                && cookie.contains("resolution=1920x1080; requestId=")
+                && !cookie.contains("os=pc")
+                && !cookie.contains("osver=old")
+                && !cookie.contains("appver=old")
+                && !cookie.contains("channel=old"),
+            "Listen together realtime cookie profile mismatch"
+        )
+
         try await verify(
             "/eapi/listen/together/end/v2",
             signing: "/api/listen/together/end/v2",
             call: { _ = try await service.endRoom(roomID: "room-1") }
-        ) { $0.string("roomId") == "room-1" }
+        ) {
+            $0.count == 1 && $0["roomId"] as? String == "room-1"
+        }
 
         RequestCaptureProtocol.reset()
         do {
@@ -1077,7 +1129,7 @@ enum WriteAPIContractCheck {
         } catch EAPIError.invalidPayload {
         }
         precondition(RequestCaptureProtocol.requestCount() == 0)
-        return 9
+        return 10
     }
 
     private static func verifyListenTogetherRequestPolicies(
@@ -1102,8 +1154,18 @@ enum WriteAPIContractCheck {
         RequestCaptureProtocol.reset(responses: [
             "/eapi/listen/together/sync/playlist/get": (200, Data(#"{"code":200}"#.utf8))
         ])
-        _ = try await service.playlist(roomID: "room-1")
-        _ = try await service.playlist(roomID: "room-1")
+        _ = try await service.playlist(
+            roomID: "room-1",
+            displaySongIDs: [],
+            randomSongIDs: [],
+            anchorSongID: nil
+        )
+        _ = try await service.playlist(
+            roomID: "room-1",
+            displaySongIDs: [],
+            randomSongIDs: [],
+            anchorSongID: nil
+        )
         precondition(RequestCaptureProtocol.requestCount() == 2, "Realtime EAPI reads must not be cached")
 
         RequestCaptureProtocol.reset(responses: [

@@ -1174,6 +1174,33 @@ struct EAPITransport: Sendable {
         )
     }
 
+    func requestQuery(
+        path: String,
+        fields: [(String, String)],
+        host: String = "https://interface.music.163.com"
+    ) async throws -> Data {
+        guard path.hasPrefix("/"), !path.hasPrefix("//") else { throw EAPIError.invalidPayload }
+        var components = URLComponents()
+        components.queryItems = fields.map { URLQueryItem(name: $0.0, value: $0.1) }
+        guard let query = components.percentEncodedQuery else { throw EAPIError.invalidPayload }
+        let credentials = credentials()
+        return try await performHTTPRequest(
+            EAPIEndpoint("\(path)?\(query)", signing: path, host: host, responseEncoding: .json),
+            body: Data(),
+            cookie: credentials.cookie,
+            musicU: "",
+            vip: false,
+            macOSClient: true,
+            iPhoneClient: false,
+            retryable: false,
+            session: authenticationSession,
+            cookieStorage: authenticationCookieStorage,
+            cookieHeaderOverride: nil,
+            userAgentOverride: "",
+            method: "GET"
+        ).data
+    }
+
     func request(
         _ endpoint: EAPIEndpoint,
         json: Data,
@@ -1555,7 +1582,8 @@ struct EAPITransport: Sendable {
         cookieStorage: HTTPCookieStorage?,
         cookieHeaderOverride: String?,
         userAgentOverride: String?,
-        additionalHeaders: [String: String] = [:]
+        additionalHeaders: [String: String] = [:],
+        method: String = "POST"
     ) async throws -> EAPIHTTPResponse {
         var lastError: Error = EAPIError.invalidResponse
         let attemptCount = retryable ? 3 : 1
@@ -1571,12 +1599,14 @@ struct EAPITransport: Sendable {
             }
 
             var request = URLRequest(url: endpoint.physicalURL, timeoutInterval: 15)
-            request.httpMethod = "POST"
-            request.httpBody = body
-            request.setValue(
-                "application/x-www-form-urlencoded;charset=utf-8",
-                forHTTPHeaderField: "Content-Type"
-            )
+            request.httpMethod = method
+            if method == "POST" {
+                request.httpBody = body
+                request.setValue(
+                    "application/x-www-form-urlencoded;charset=utf-8",
+                    forHTTPHeaderField: "Content-Type"
+                )
+            }
             request.setValue(
                 userAgentOverride ?? (macOSClient
                     ? "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"

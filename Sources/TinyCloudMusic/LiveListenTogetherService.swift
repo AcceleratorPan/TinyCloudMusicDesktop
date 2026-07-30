@@ -11,8 +11,16 @@ struct LiveListenTogetherService: Sendable {
         try await call("/api/listen/together/room/create", payload: ["refer": "songplay_more"])
     }
 
+    func createRoom(currentUserID: Int64) async throws -> ListenTogetherRoom {
+        try ListenTogetherResponseDecoder.room(from: await createRoom(), currentUserID: currentUserID)
+    }
+
     func checkRoom(roomID: String) async throws -> Data {
         try await call("/api/listen/together/room/check", payload: ["roomId": try validatedRoomID(roomID)])
+    }
+
+    func checkInvitation(_ invitation: ListenTogetherInvitation) async throws -> ListenTogetherRoomCheck {
+        try ListenTogetherResponseDecoder.roomCheck(from: await checkRoom(roomID: invitation.roomID))
     }
 
     func acceptInvitation(roomID: String, inviterID: Int64) async throws -> Data {
@@ -20,6 +28,16 @@ struct LiveListenTogetherService: Sendable {
         return try await call(
             "/api/listen/together/play/invitation/accept",
             payload: ["refer": "inbox_invite", "roomId": try validatedRoomID(roomID), "inviterId": inviterID]
+        )
+    }
+
+    func acceptInvitation(
+        _ invitation: ListenTogetherInvitation,
+        currentUserID: Int64
+    ) async throws -> ListenTogetherRoom {
+        try ListenTogetherResponseDecoder.room(
+            from: await acceptInvitation(roomID: invitation.roomID, inviterID: invitation.inviterID),
+            currentUserID: currentUserID
         )
     }
 
@@ -31,6 +49,10 @@ struct LiveListenTogetherService: Sendable {
         )
         _ = try decodedJSONObject(data)
         return data
+    }
+
+    func status(currentUserID: Int64) async throws -> ListenTogetherStatus {
+        try ListenTogetherResponseDecoder.status(from: await status(), currentUserID: currentUserID)
     }
 
     func heartbeat(
@@ -51,6 +73,22 @@ struct LiveListenTogetherService: Sendable {
         )
     }
 
+    func heartbeatState(
+        roomID: String,
+        songID: Int64,
+        playStatus: ListenTogetherPlayStatus,
+        progress: Int64
+    ) async throws -> ListenTogetherHeartbeat {
+        try ListenTogetherResponseDecoder.heartbeat(
+            from: await heartbeat(
+                roomID: roomID,
+                songID: songID,
+                playStatus: playStatus,
+                progress: progress
+            )
+        )
+    }
+
     func reportPlayCommand(roomID: String, command: ListenTogetherPlayCommand) async throws -> Data {
         let commandInfo: [String: Any] = [
             "commandType": command.commandType.rawValue,
@@ -66,6 +104,12 @@ struct LiveListenTogetherService: Sendable {
         )
     }
 
+    func reportPlayCommandConfirmed(roomID: String, command: ListenTogetherPlayCommand) async throws -> Bool {
+        try ListenTogetherResponseDecoder.succeeded(
+            from: await reportPlayCommand(roomID: roomID, command: command)
+        )
+    }
+
     func reportPlaylistCommand(
         roomID: String,
         command: ListenTogetherPlaylistCommand
@@ -73,6 +117,7 @@ struct LiveListenTogetherService: Sendable {
         let playlist: [String: Any] = [
             "commandType": command.commandType.rawValue,
             "version": [["userId": command.userID, "version": command.version]],
+            "playMode": command.playMode.rawValue,
             "anchorSongId": command.anchorSongID.map(String.init) ?? "",
             "anchorPosition": command.anchorPosition,
             "randomList": command.randomList.map(String.init),
@@ -84,15 +129,90 @@ struct LiveListenTogetherService: Sendable {
         )
     }
 
-    func playlist(roomID: String) async throws -> Data {
-        try await call(
+    func reportPlaylistCommandConfirmed(
+        roomID: String,
+        command: ListenTogetherPlaylistCommand
+    ) async throws -> Bool {
+        try ListenTogetherResponseDecoder.succeeded(
+            from: await reportPlaylistCommand(roomID: roomID, command: command)
+        )
+    }
+
+    func playlist(
+        roomID: String,
+        displaySongIDs: [Int64],
+        randomSongIDs: [Int64],
+        anchorSongID: Int64?
+    ) async throws -> Data {
+        let anchorPosition = anchorSongID.flatMap(displaySongIDs.firstIndex(of:)) ?? -1
+        let playlistParam: [String: Any] = [
+            "playMode": (randomSongIDs == displaySongIDs
+                ? ListenTogetherPlayMode.orderLoop
+                : ListenTogetherPlayMode.random).rawValue,
+            "anchorSongId": anchorSongID.map(String.init) ?? "",
+            "anchorPosition": anchorPosition,
+            "randomList": randomSongIDs.map(String.init),
+            "displayList": displaySongIDs.map(String.init)
+        ]
+        return try await call(
             "/api/listen/together/sync/playlist/get",
+            payload: [
+                "roomId": try validatedRoomID(roomID),
+                "playlistParam": try jsonString(playlistParam)
+            ]
+        )
+    }
+
+    func authoritativePlaylist(
+        roomID: String,
+        displaySongIDs: [Int64],
+        randomSongIDs: [Int64],
+        anchorSongID: Int64?
+    ) async throws -> ListenTogetherPlaylist? {
+        try ListenTogetherResponseDecoder.playlist(
+            from: await playlist(
+                roomID: roomID,
+                displaySongIDs: displaySongIDs,
+                randomSongIDs: randomSongIDs,
+                anchorSongID: anchorSongID
+            )
+        )
+    }
+
+    func authoritativeState(
+        roomID: String,
+        displaySongIDs: [Int64],
+        randomSongIDs: [Int64],
+        anchorSongID: Int64?
+    ) async throws -> ListenTogetherAuthoritativeState? {
+        try ListenTogetherResponseDecoder.authoritativeState(
+            from: await playlist(
+                roomID: roomID,
+                displaySongIDs: displaySongIDs,
+                randomSongIDs: randomSongIDs,
+                anchorSongID: anchorSongID
+            )
+        )
+    }
+
+    func realtimeCredentials() async throws -> ListenTogetherRealtimeCredentials {
+        let data = try await transport.requestQuery(
+            path: "/api/middle/im/token/get",
+            fields: [("bizName", "music_listenTogether")],
+            host: "https://interface3.music.163.com"
+        )
+        return try ListenTogetherResponseDecoder.realtimeCredentials(from: data)
+    }
+
+    func endRoom(roomID: String) async throws -> Data {
+        try await call(
+            "/api/listen/together/end/v2",
             payload: ["roomId": try validatedRoomID(roomID)]
         )
     }
 
-    func endRoom(roomID: String) async throws -> Data {
-        try await call("/api/listen/together/end/v2", payload: ["roomId": try validatedRoomID(roomID)])
+    func endRoomConfirmed(roomID: String) async throws -> Bool {
+        try ListenTogetherResponseDecoder.succeeded(from: await endRoom(roomID: roomID))
     }
 
     private func call(_ logicalPath: String, payload: [String: Any]) async throws -> Data {

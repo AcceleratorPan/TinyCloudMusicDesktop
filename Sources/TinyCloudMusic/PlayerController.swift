@@ -9,9 +9,52 @@ enum PlaybackState: Equatable {
     case failed(songID: Int64, message: String)
 }
 
+enum PlayerControlTrigger: Equatable, Sendable {
+    case user
+    case automaticEnd
+    case playbackFailure
+    case crossfade
+}
+
+enum PlayerSongTransition: Equatable, Sendable {
+    case goTo
+    case next
+    case previous
+}
+
+enum PlayerPlayIntent: Equatable, Sendable {
+    case play(songID: Int64, progress: TimeInterval)
+    case pause(songID: Int64, progress: TimeInterval)
+    case seek(songID: Int64, progress: TimeInterval, playing: Bool)
+    case transition(
+        PlayerSongTransition,
+        formerSongID: Int64?,
+        targetSongID: Int64,
+        progress: TimeInterval,
+        playing: Bool
+    )
+}
+
+struct PlayerQueueOrder: Equatable, Sendable {
+    let displaySongIDs: [Int64]
+    let randomSongIDs: [Int64]
+    let anchorSongID: Int64?
+}
+
+struct PlayerControlIntent: Equatable, Sendable {
+    let trigger: PlayerControlTrigger
+    let play: PlayerPlayIntent?
+    let queue: PlayerQueueOrder?
+}
+
 @MainActor
 @Observable
 final class PlayerController {
+    typealias ControlInterceptor = @MainActor @Sendable (
+        _ intent: PlayerControlIntent,
+        _ commit: @escaping @MainActor @Sendable () -> Void
+    ) -> Bool
+
     private static let maximumStreamAttempts = 3
     private static let maximumCrossfadeDuration: TimeInterval = 12
     private static let prefetchWindow: TimeInterval = 10
@@ -49,6 +92,8 @@ final class PlayerController {
     private(set) var playbackReportRevision = 0
     private(set) var lastPlaybackReportWasPodcast = false
     private(set) var playbackReportErrorMessage: String?
+    private(set) var isControlInteractionLocked = false
+    private(set) var isSharedControlActive = false
 
     @ObservationIgnored private let repository: any MusicRepository
     @ObservationIgnored private var cache: TrackCache
@@ -102,6 +147,23 @@ final class PlayerController {
     @ObservationIgnored private var itemDurationObservation: NSKeyValueObservation?
     @ObservationIgnored private var itemEndObserver: NSObjectProtocol?
     @ObservationIgnored private var itemFailureObserver: NSObjectProtocol?
+    @ObservationIgnored var controlInterceptor: ControlInterceptor? {
+        didSet {
+            isSharedControlActive = controlInterceptor != nil
+            if isSharedControlActive {
+                if isHeartModeEnabled { stopHeartMode() }
+                repeatMode = .off
+                resetTransitionPreparation()
+            } else {
+                pendingAutomaticControlGeneration = nil
+                pendingAutomaticControlTrigger = nil
+                crossfadeTriggered = false
+            }
+        }
+    }
+    @ObservationIgnored private var authoritativeApplyDepth = 0
+    @ObservationIgnored private var pendingAutomaticControlGeneration: Int?
+    @ObservationIgnored private var pendingAutomaticControlTrigger: PlayerControlTrigger?
 
     init(
         repository: any MusicRepository,
@@ -126,6 +188,10 @@ final class PlayerController {
     func setCrossfadeDuration(_ seconds: TimeInterval) {
         crossfadeDuration = min(max(seconds, 0), Self.maximumCrossfadeDuration)
         if crossfadeDuration == 0, fadeProgress != nil { finishCrossfade() }
+    }
+
+    func setControlInteractionLocked(_ locked: Bool) {
+        isControlInteractionLocked = locked
     }
 
     isolated deinit {
@@ -197,6 +263,54 @@ final class PlayerController {
         return lyrics[currentLyricIndex]
     }
 
+    var currentQueueOrder: PlayerQueueOrder {
+        let displaySongIDs = queue.map(\.id)
+        return PlayerQueueOrder(
+            displaySongIDs: displaySongIDs,
+            randomSongIDs: randomSongIDs(for: displaySongIDs),
+            anchorSongID: currentSongID
+        )
+    }
+
+    func applyAuthoritatively<Result>(_ body: () throws -> Result) rethrows -> Result {
+        authoritativeApplyDepth += 1
+        defer { authoritativeApplyDepth -= 1 }
+        return try body()
+    }
+
+    @discardableResult
+    func replaceQueueAuthoritatively(_ order: PlayerQueueOrder) -> Bool {
+        guard Self.isValidQueueOrder(order) else { return false }
+        let anchorSongID = order.anchorSongID
+            ?? currentSongID.flatMap { order.displaySongIDs.contains($0) ? $0 : nil }
+            ?? order.displaySongIDs.first
+        guard let anchorSongID,
+              let anchorIndex = order.displaySongIDs.firstIndex(of: anchorSongID)
+        else { return false }
+
+        let knownSongs = queue.compactMap(\.song)
+        return applyAuthoritatively {
+            if isHeartModeEnabled {
+                stopHeartMode(restoringQueue: false)
+            } else {
+                restoreQueueMode()
+            }
+            heartModeErrorMessage = nil
+            isLinearQueueMode = false
+            savedQueueMode = nil
+            installQueue(
+                songIDs: order.displaySongIDs,
+                knownSongs: knownSongs,
+                currentIndex: anchorIndex
+            )
+            installPlaybackOrder(
+                order,
+                shuffleEnabled: order.randomSongIDs != order.displaySongIDs
+            )
+            return true
+        }
+    }
+
     func play(
         _ song: Song,
         in visibleSongs: [Song],
@@ -208,17 +322,10 @@ final class PlayerController {
             visibleSongIDs: visibleSongs.map(\.id),
             allSongIDs: allSongIDs
         ) else { return }
-        if isHeartModeEnabled {
-            stopHeartMode(restoringQueue: false)
-        } else {
-            restoreQueueMode()
-        }
-        heartModeErrorMessage = nil
         let songIDs = plan.songIDs
         let index = plan.startIndex
         let newContext = PlaybackContext(songIDs: songIDs, startIndex: index)
         let sourceChanged = sourcePlaylistID != playlistID
-        sourcePlaylistID = playlistID
         let action: PlaybackSelectionAction = if sourceChanged, currentSong?.id == song.id {
             .switchQueue(resume: !isPlaying)
         } else {
@@ -230,31 +337,73 @@ final class PlayerController {
                 newContext: newContext
             )
         }
-
-        switch action {
-        case .keepPlaying:
-            mergeKnownSongs(visibleSongs)
-            return
+        let shuffleEnabled = savedQueueMode?.shuffle ?? isShuffleEnabled
+        let queueOrder = PlayerQueueOrder(
+            displaySongIDs: songIDs,
+            randomSongIDs: shuffleEnabled
+                ? Self.shuffledSongIDs(currentSongID: song.id, displaySongIDs: songIDs)
+                : songIDs,
+            anchorSongID: song.id
+        )
+        let playIntent: PlayerPlayIntent? = switch action {
+        case .keepPlaying: nil
         case .resume:
-            mergeKnownSongs(visibleSongs)
-            resume()
+            .play(songID: song.id, progress: resumeProgress)
         case let .switchQueue(shouldResume):
-            installQueue(songIDs: songIDs, knownSongs: visibleSongs, currentIndex: index)
-            rebuildShuffleOrder(keeping: index)
-            if shouldResume { resume() }
+            shouldResume ? .play(songID: song.id, progress: resumeProgress) : nil
         case .replaceTrackAtZero:
-            installQueue(songIDs: songIDs, knownSongs: visibleSongs, currentIndex: index)
-            activate(index: index)
+            .transition(
+                .goTo,
+                formerSongID: currentSongID,
+                targetSongID: song.id,
+                progress: 0,
+                playing: true
+            )
         }
+        let queueIntent: PlayerQueueOrder? = switch action {
+        case .switchQueue, .replaceTrackAtZero: queueOrder
+        case .keepPlaying, .resume: nil
+        }
+        let commit: @MainActor @Sendable () -> Void = { [weak self] in
+            guard let self else { return }
+            self.playLocally(
+                song: song,
+                visibleSongs: visibleSongs,
+                playlistID: playlistID,
+                songIDs: songIDs,
+                index: index,
+                action: action,
+                queueOrder: queueOrder,
+                shuffleEnabled: shuffleEnabled
+            )
+        }
+        guard playIntent != nil || queueIntent != nil else {
+            commit()
+            return
+        }
+        requestControl(
+            PlayerControlIntent(trigger: .user, play: playIntent, queue: queueIntent),
+            commit: commit
+        )
     }
 
     func appendToQueue(_ songs: [Song]) {
         var ids = Set(queue.map(\.id))
         let additions = songs.filter { ids.insert($0.id).inserted }
         guard !additions.isEmpty else { return }
-        queue.append(contentsOf: additions.map { PlaybackQueueItem(id: $0.id, song: $0) })
-        if let currentIndex {
-            context = PlaybackContext(songIDs: queue.map(\.id), startIndex: currentIndex)
+        let displaySongIDs = queue.map(\.id) + additions.map(\.id)
+        let randomSongIDs = isShuffleEnabled
+            ? currentQueueOrder.randomSongIDs + additions.map(\.id)
+            : displaySongIDs
+        let order = PlayerQueueOrder(
+            displaySongIDs: displaySongIDs,
+            randomSongIDs: randomSongIDs,
+            anchorSongID: currentSongID
+        )
+        requestControl(
+            PlayerControlIntent(trigger: .user, play: nil, queue: order)
+        ) { [weak self] in
+            self?.appendToQueueLocally(additions, order: order)
         }
     }
 
@@ -264,15 +413,20 @@ final class PlayerController {
               let currentIndex,
               removalIndex != currentIndex
         else { return false }
-        let currentSongID = queue[currentIndex].id
-        queue.remove(at: removalIndex)
-        self.currentIndex = queue.firstIndex { $0.id == currentSongID }
-        if let currentIndex = self.currentIndex {
-            context = PlaybackContext(songIDs: queue.map(\.id), startIndex: currentIndex)
+        let anchorSongID = queue[currentIndex].id
+        let displaySongIDs = queue.map(\.id).filter { $0 != songID }
+        let order = PlayerQueueOrder(
+            displaySongIDs: displaySongIDs,
+            randomSongIDs: isShuffleEnabled
+                ? currentQueueOrder.randomSongIDs.filter { $0 != songID }
+                : displaySongIDs,
+            anchorSongID: anchorSongID
+        )
+        return requestControl(
+            PlayerControlIntent(trigger: .user, play: nil, queue: order)
+        ) { [weak self] in
+            self?.removeFromQueueLocally(songID, order: order)
         }
-        rebuildShuffleOrder(keeping: self.currentIndex)
-        resetTransitionPreparation()
-        return true
     }
 
     func useLinearQueueMode() {
@@ -288,25 +442,52 @@ final class PlayerController {
 
     func playQueuedSong(_ songID: Int64) {
         guard let index = queue.firstIndex(where: { $0.id == songID }) else { return }
-        if currentIndex == index {
-            if !isPlaying { resume() }
+        if currentIndex == index, activeSongID == songID {
+            if !wantsPlayback { setPlayback(true) }
             return
         }
-        activate(index: index)
+        requestSongTransition(to: index, trigger: .user)
     }
 
     func togglePlayback() {
-        wantsPlayback ? pause() : resume()
+        setPlayback(!wantsPlayback)
+    }
+
+    func setPlayback(_ shouldPlay: Bool) {
+        guard let songID = currentSongID, shouldPlay != wantsPlayback else { return }
+        let playIntent: PlayerPlayIntent
+        if shouldPlay, case .failed = state {
+            playIntent = .transition(
+                .goTo,
+                formerSongID: songID,
+                targetSongID: songID,
+                progress: 0,
+                playing: true
+            )
+        } else if shouldPlay {
+            playIntent = .play(songID: songID, progress: resumeProgress)
+        } else {
+            playIntent = .pause(songID: songID, progress: position)
+        }
+        requestControl(
+            PlayerControlIntent(trigger: .user, play: playIntent, queue: nil)
+        ) { [weak self] in
+            if shouldPlay {
+                self?.resumeLocally()
+            } else {
+                self?.pauseLocally()
+            }
+        }
     }
 
     func pauseForVideo() {
-        if wantsPlayback { pause() }
+        if wantsPlayback { setPlayback(false) }
     }
 
     func previous() {
         guard let currentIndex else { return }
         if position > 3 {
-            seek(to: 0)
+            requestSeek(to: 0, trigger: .user)
             return
         }
 
@@ -322,17 +503,18 @@ final class PlayerController {
         }
 
         if let target, target != currentIndex {
-            activate(index: target, preservingShuffleOrder: true)
+            requestSongTransition(to: target, trigger: .user, transition: .previous)
         } else {
-            seek(to: 0)
+            requestSeek(to: 0, trigger: .user)
         }
     }
 
     func next() {
-        advance(automatic: false)
+        advance(trigger: .user)
     }
 
     func toggleHeartMode() {
+        guard !isSharedControlActive else { return }
         if isHeartModeEnabled {
             stopHeartMode()
             return
@@ -351,13 +533,30 @@ final class PlayerController {
 
     func toggleShuffle() {
         guard !isLinearQueueMode else { return }
-        isShuffleEnabled.toggle()
-        rebuildShuffleOrder(keeping: currentIndex)
-        resetTransitionPreparation()
+        let enabled = !isShuffleEnabled
+        let displaySongIDs = queue.map(\.id)
+        guard let currentSongID, !displaySongIDs.isEmpty else {
+            isShuffleEnabled = enabled
+            rebuildShuffleOrder(keeping: currentIndex)
+            resetTransitionPreparation()
+            return
+        }
+        let order = PlayerQueueOrder(
+            displaySongIDs: displaySongIDs,
+            randomSongIDs: enabled
+                ? Self.shuffledSongIDs(currentSongID: currentSongID, displaySongIDs: displaySongIDs)
+                : displaySongIDs,
+            anchorSongID: currentSongID
+        )
+        requestControl(
+            PlayerControlIntent(trigger: .user, play: nil, queue: order)
+        ) { [weak self] in
+            self?.installPlaybackOrder(order, shuffleEnabled: enabled)
+        }
     }
 
     func cycleRepeatMode() {
-        guard !isLinearQueueMode else { return }
+        guard !isLinearQueueMode, !isSharedControlActive else { return }
         repeatMode = repeatMode.next
         resetTransitionPreparation()
     }
@@ -367,12 +566,22 @@ final class PlayerController {
     }
 
     func retryPlayback() {
-        guard let currentIndex else { return }
-        activate(
-            index: currentIndex,
-            preservingShuffleOrder: true,
-            preservingPlaybackQualityOverride: true
-        )
+        guard let currentIndex, let songID = currentSongID else { return }
+        requestControl(
+            PlayerControlIntent(
+                trigger: .user,
+                play: .transition(
+                    .goTo,
+                    formerSongID: songID,
+                    targetSongID: songID,
+                    progress: 0,
+                    playing: true
+                ),
+                queue: nil
+            )
+        ) { [weak self] in
+            self?.retryPlaybackLocally(index: currentIndex)
+        }
     }
 
     func retryLyrics() {
@@ -455,6 +664,107 @@ final class PlayerController {
     func seek(to seconds: TimeInterval) {
         guard currentSong != nil else { return }
         let target = min(max(0, seconds), duration)
+        requestSeek(to: target, trigger: .user)
+    }
+
+    @discardableResult
+    private func requestControl(
+        _ intent: PlayerControlIntent,
+        commit: @escaping @MainActor @Sendable () -> Void
+    ) -> Bool {
+        guard beginControlRequest(trigger: intent.trigger) else { return false }
+        guard authoritativeApplyDepth == 0, let controlInterceptor else {
+            commit()
+            return true
+        }
+        return controlInterceptor(intent, commit)
+    }
+
+    private func playLocally(
+        song: Song,
+        visibleSongs: [Song],
+        playlistID: Int64?,
+        songIDs: [Int64],
+        index: Int,
+        action: PlaybackSelectionAction,
+        queueOrder: PlayerQueueOrder,
+        shuffleEnabled: Bool
+    ) {
+        if isHeartModeEnabled {
+            stopHeartMode(restoringQueue: false)
+        } else {
+            restoreQueueMode()
+        }
+        heartModeErrorMessage = nil
+        sourcePlaylistID = playlistID
+
+        switch action {
+        case .keepPlaying:
+            mergeKnownSongs(visibleSongs)
+        case .resume:
+            mergeKnownSongs(visibleSongs)
+            resumeLocally()
+        case let .switchQueue(shouldResume):
+            installQueue(songIDs: songIDs, knownSongs: visibleSongs, currentIndex: index)
+            installPlaybackOrder(queueOrder, shuffleEnabled: shuffleEnabled)
+            if shouldResume { resumeLocally() }
+        case .replaceTrackAtZero:
+            installQueue(songIDs: songIDs, knownSongs: visibleSongs, currentIndex: index)
+            installPlaybackOrder(queueOrder, shuffleEnabled: shuffleEnabled)
+            activate(index: index, preservingShuffleOrder: true)
+        }
+    }
+
+    private func appendToQueueLocally(_ additions: [Song], order: PlayerQueueOrder) {
+        queue.append(contentsOf: additions.map { PlaybackQueueItem(id: $0.id, song: $0) })
+        if let currentIndex {
+            context = PlaybackContext(songIDs: queue.map(\.id), startIndex: currentIndex)
+        }
+        installPlaybackOrder(order, shuffleEnabled: isShuffleEnabled)
+    }
+
+    private func removeFromQueueLocally(_ songID: Int64, order: PlayerQueueOrder) {
+        guard let removalIndex = queue.firstIndex(where: { $0.id == songID }),
+              let anchorSongID = order.anchorSongID
+        else { return }
+        queue.remove(at: removalIndex)
+        currentIndex = queue.firstIndex { $0.id == anchorSongID }
+        if let currentIndex {
+            context = PlaybackContext(songIDs: queue.map(\.id), startIndex: currentIndex)
+        }
+        installPlaybackOrder(order, shuffleEnabled: isShuffleEnabled)
+    }
+
+    private func requestSeek(to seconds: TimeInterval, trigger: PlayerControlTrigger) {
+        guard let songID = currentSongID else { return }
+        let target = min(max(0, seconds), duration)
+        requestControl(
+            PlayerControlIntent(
+                trigger: trigger,
+                play: .seek(songID: songID, progress: target, playing: wantsPlayback),
+                queue: nil
+            )
+        ) { [weak self] in
+            self?.seekLocally(to: target)
+        }
+    }
+
+    private func requestRestartCurrentTrack(trigger: PlayerControlTrigger) {
+        guard let songID = currentSongID else { return }
+        requestControl(
+            PlayerControlIntent(
+                trigger: trigger,
+                play: .seek(songID: songID, progress: 0, playing: true),
+                queue: nil
+            )
+        ) { [weak self] in
+            self?.restartCurrentTrackLocally()
+        }
+    }
+
+    private func seekLocally(to seconds: TimeInterval) {
+        guard currentSong != nil else { return }
+        let target = min(max(0, seconds), duration)
         position = target
         updateCurrentLyricIndex()
         guard activeSongID == currentSong?.id, avPlayer.currentItem?.status == .readyToPlay else {
@@ -466,6 +776,51 @@ final class PlayerController {
             toleranceBefore: .zero,
             toleranceAfter: .zero
         )
+    }
+
+    @discardableResult
+    private func requestSongTransition(
+        to index: Int,
+        trigger: PlayerControlTrigger,
+        transition: PlayerSongTransition = .goTo
+    ) -> Bool {
+        guard queue.indices.contains(index) else { return false }
+        let targetSongID = queue[index].id
+        return requestControl(
+            PlayerControlIntent(
+                trigger: trigger,
+                play: .transition(
+                    transition,
+                    formerSongID: activeSongID ?? currentSongID,
+                    targetSongID: targetSongID,
+                    progress: 0,
+                    playing: true
+                ),
+                queue: nil
+            )
+        ) { [weak self] in
+            self?.activate(index: index, preservingShuffleOrder: true)
+        }
+    }
+
+    private func retryPlaybackLocally(index: Int) {
+        activate(
+            index: index,
+            preservingShuffleOrder: true,
+            preservingPlaybackQualityOverride: true
+        )
+    }
+
+    private var resumeProgress: TimeInterval {
+        duration > 0 && position >= duration - 0.1 ? 0 : position
+    }
+
+    private func beginControlRequest(trigger: PlayerControlTrigger) -> Bool {
+        guard trigger != .user, authoritativeApplyDepth == 0 else { return true }
+        guard pendingAutomaticControlGeneration != playbackGeneration else { return false }
+        pendingAutomaticControlGeneration = playbackGeneration
+        pendingAutomaticControlTrigger = trigger
+        return true
     }
 
     private func activate(
@@ -571,6 +926,49 @@ final class PlayerController {
         self.currentIndex = currentIndex
         context = PlaybackContext(songIDs: songIDs, startIndex: currentIndex)
         hydrateQueue()
+    }
+
+    private func installPlaybackOrder(_ order: PlayerQueueOrder, shuffleEnabled: Bool) {
+        guard Self.isValidQueueOrder(order), order.displaySongIDs == queue.map(\.id) else { return }
+        let indexes = Dictionary(
+            uniqueKeysWithValues: order.displaySongIDs.enumerated().map { ($0.element, $0.offset) }
+        )
+        isShuffleEnabled = shuffleEnabled
+        if shuffleEnabled {
+            shuffleOrder = order.randomSongIDs.compactMap { indexes[$0] }
+            shuffleCursor = currentIndex.flatMap { shuffleOrder.firstIndex(of: $0) } ?? 0
+        } else {
+            shuffleOrder = []
+            shuffleCursor = 0
+        }
+        resetTransitionPreparation()
+    }
+
+    private func randomSongIDs(for displaySongIDs: [Int64]) -> [Int64] {
+        guard isShuffleEnabled else { return displaySongIDs }
+        var seen: Set<Int64> = []
+        var values = shuffleOrder.compactMap { index -> Int64? in
+            guard queue.indices.contains(index) else { return nil }
+            let songID = queue[index].id
+            return seen.insert(songID).inserted ? songID : nil
+        }
+        values.append(contentsOf: displaySongIDs.filter { seen.insert($0).inserted })
+        return values
+    }
+
+    private static func shuffledSongIDs(currentSongID: Int64, displaySongIDs: [Int64]) -> [Int64] {
+        guard displaySongIDs.contains(currentSongID) else { return displaySongIDs }
+        return [currentSongID] + displaySongIDs.filter { $0 != currentSongID }.shuffled()
+    }
+
+    private static func isValidQueueOrder(_ order: PlayerQueueOrder) -> Bool {
+        let displaySet = Set(order.displaySongIDs)
+        return !order.displaySongIDs.isEmpty
+            && displaySet.count == order.displaySongIDs.count
+            && order.randomSongIDs.count == order.displaySongIDs.count
+            && Set(order.randomSongIDs) == displaySet
+            && order.displaySongIDs.allSatisfy { $0 > 0 }
+            && (order.anchorSongID.map(displaySet.contains) ?? true)
     }
 
     private func restoreQueueMode() {
@@ -736,7 +1134,7 @@ final class PlayerController {
                 self.queue[index].song = song
                 self.songResolutionTask = nil
                 self.activate(index: index, preservingShuffleOrder: preservingShuffleOrder)
-                if !shouldPlay { self.pause() }
+                if !shouldPlay { self.pauseLocally() }
             } catch is CancellationError {
             } catch {
                 guard let self,
@@ -751,7 +1149,7 @@ final class PlayerController {
         }
     }
 
-    private func pause() {
+    private func pauseLocally() {
         guard let songID = currentSongID else { return }
         wantsPlayback = false
         stopPlaybackTiming()
@@ -761,7 +1159,7 @@ final class PlayerController {
         state = .paused(songID: songID)
     }
 
-    private func resume() {
+    private func resumeLocally() {
         guard let songID = currentSongID else { return }
         guard let song = currentSong else {
             wantsPlayback = true
@@ -772,7 +1170,7 @@ final class PlayerController {
             return
         }
         if case .failed = state {
-            retryPlayback()
+            retryPlaybackLocally(index: currentIndex ?? 0)
             return
         }
         wantsPlayback = true
@@ -785,7 +1183,7 @@ final class PlayerController {
             state = .preparing(songID: song.id)
         } else if avPlayer.currentItem != nil {
             if duration > 0, position >= duration - 0.1 {
-                seek(to: 0)
+                seekLocally(to: 0)
             }
             state = .preparing(songID: song.id)
             avPlayer.play()
@@ -1261,6 +1659,10 @@ final class PlayerController {
               avPlayer.currentItem != nil,
               activeSongID == currentSong?.id
         else { return }
+        if pendingAutomaticControlTrigger == .automaticEnd, seconds < 1 {
+            pendingAutomaticControlGeneration = nil
+            pendingAutomaticControlTrigger = nil
+        }
         position = seconds
         updateCurrentLyricIndex()
         reportPodcastPlaybackIfNeeded(at: seconds)
@@ -1288,7 +1690,7 @@ final class PlayerController {
                crossfadeDuration: crossfadeDuration
         ) {
             crossfadeTriggered = true
-            activate(index: nextIndex, preservingShuffleOrder: true)
+            requestSongTransition(to: nextIndex, trigger: .crossfade, transition: .next)
         }
     }
 
@@ -1349,7 +1751,7 @@ final class PlayerController {
             updateDuration(avPlayer.currentItem?.duration.seconds ?? 0, generation: generation, songID: songID)
             if let pendingSeek {
                 self.pendingSeek = nil
-                seek(to: pendingSeek)
+                seekLocally(to: pendingSeek)
             }
             if wantsPlayback {
                 avPlayer.play()
@@ -1417,22 +1819,32 @@ final class PlayerController {
         position = duration
         updateCurrentLyricIndex()
         submitPlaybackIfNeeded()
-        advance(automatic: true)
+        guard !crossfadeTriggered else { return }
+        advance(trigger: .automaticEnd)
     }
 
     private func failAndAdvance(generation: Int, songID: Int64, message: String) {
         guard isCurrent(generation: generation, songID: songID), let currentIndex else { return }
         submitPlaybackIfNeeded()
         finishCrossfade()
+        wantsPlayback = false
+        avPlayer.pause()
+        state = .failed(songID: songID, message: message)
+        guard !isSharedControlActive else { return }
         let target = isShuffleEnabled
             ? (shuffleCursor + 1 < shuffleOrder.count ? shuffleOrder[shuffleCursor + 1] : nil)
             : (currentIndex + 1 < queue.count ? currentIndex + 1 : nil)
         if let target {
-            activate(index: target, preservingShuffleOrder: true)
+            requestSongTransition(to: target, trigger: .playbackFailure, transition: .next)
         } else {
-            wantsPlayback = false
-            avPlayer.pause()
-            state = .failed(songID: songID, message: message)
+            requestControl(
+                PlayerControlIntent(
+                    trigger: .playbackFailure,
+                    play: .pause(songID: songID, progress: position),
+                    queue: nil
+                ),
+                commit: {}
+            )
         }
     }
 
@@ -1444,39 +1856,98 @@ final class PlayerController {
         playbackAvailability = .unavailable(reason: error.reason)
         alternativeSongs = error.alternatives
         state = .failed(songID: songID, message: error.reason)
+        guard !isSharedControlActive else { return }
+        requestControl(
+            PlayerControlIntent(
+                trigger: .playbackFailure,
+                play: .pause(songID: songID, progress: position),
+                queue: nil
+            ),
+            commit: {}
+        )
     }
 
-    private func advance(automatic: Bool) {
+    private func advance(trigger: PlayerControlTrigger) {
         guard let currentIndex else { return }
 
-        if automatic, repeatMode == .one {
-            restartCurrentTrack()
+        if trigger == .automaticEnd, repeatMode == .one {
+            requestRestartCurrentTrack(trigger: trigger)
             return
         }
 
         if let target = upcomingIndex() {
             if target == currentIndex {
-                restartCurrentTrack()
+                requestRestartCurrentTrack(trigger: trigger)
             } else {
-                activate(index: target, preservingShuffleOrder: true)
+                requestSongTransition(to: target, trigger: trigger, transition: .next)
             }
             return
         }
 
         if isShuffleEnabled, repeatMode == .all {
-            rebuildShuffleOrder(keeping: currentIndex)
-            if shuffleOrder.count > 1 {
-                activate(index: shuffleOrder[1], preservingShuffleOrder: true)
-            } else {
-                restartCurrentTrack()
+            let displaySongIDs = queue.map(\.id)
+            let randomSongIDs = Self.shuffledSongIDs(
+                currentSongID: queue[currentIndex].id,
+                displaySongIDs: displaySongIDs
+            )
+            guard randomSongIDs.count > 1,
+                  let target = queue.firstIndex(where: { $0.id == randomSongIDs[1] })
+            else {
+                requestRestartCurrentTrack(trigger: trigger)
+                return
+            }
+            let order = PlayerQueueOrder(
+                displaySongIDs: displaySongIDs,
+                randomSongIDs: randomSongIDs,
+                anchorSongID: queue[target].id
+            )
+            requestControl(
+                PlayerControlIntent(
+                    trigger: trigger,
+                    play: .transition(
+                        .next,
+                        formerSongID: currentSongID,
+                        targetSongID: queue[target].id,
+                        progress: 0,
+                        playing: true
+                    ),
+                    queue: order
+                )
+            ) { [weak self] in
+                guard let self else { return }
+                self.installPlaybackOrder(order, shuffleEnabled: true)
+                self.activate(index: target, preservingShuffleOrder: true)
             }
             return
         }
 
-        wantsPlayback = false
-        submitPlaybackIfNeeded()
-        avPlayer.pause()
-        state = .idle
+        guard let songID = currentSongID else { return }
+        requestControl(
+            PlayerControlIntent(
+                trigger: trigger,
+                play: .pause(songID: songID, progress: position),
+                queue: nil
+            )
+        ) { [weak self] in
+            guard let self else { return }
+            self.wantsPlayback = false
+            self.submitPlaybackIfNeeded()
+            self.avPlayer.pause()
+            self.state = .idle
+        }
+    }
+
+    private func restartCurrentTrackLocally() {
+        guard let song = currentSong else { return }
+        position = 0
+        updateCurrentLyricIndex()
+        avPlayer.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
+        if wantsPlayback {
+            state = .preparing(songID: song.id)
+            avPlayer.play()
+        } else {
+            state = .paused(songID: song.id)
+        }
     }
 
     @discardableResult
@@ -1590,19 +2061,6 @@ final class PlayerController {
             repeatMode: repeatMode,
             automatic: false
         )
-    }
-
-    private func restartCurrentTrack() {
-        guard let song = currentSong else { return }
-        position = 0
-        updateCurrentLyricIndex()
-        avPlayer.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
-        if wantsPlayback {
-            state = .preparing(songID: song.id)
-            avPlayer.play()
-        } else {
-            state = .paused(songID: song.id)
-        }
     }
 
     private func rebuildShuffleOrder(keeping index: Int?) {

@@ -60,6 +60,11 @@ private actor MutablePlaylistRepository: MusicRepository {
 }
 
 @MainActor
+private final class PlayerIntentRecorder {
+    var intents: [PlayerControlIntent] = []
+}
+
+@MainActor
 private func waitForPlaylistTrackCount(
     _ expected: Int,
     route: Route,
@@ -314,6 +319,73 @@ struct CoreTests {
         #expect(!player.isShuffleEnabled && player.repeatMode == .off)
         player.play(songs[2], in: Array(songs.prefix(3)))
         #expect(player.isShuffleEnabled && player.repeatMode == .all)
+    }
+
+    @Test("Shared playback disables local-only heart and repeat modes")
+    @MainActor
+    func sharedPlaybackModes() async throws {
+        let repository = FixtureMusicRepository()
+        guard case let .playlist(_, songs, _, _) = try await repository.detail(for: .playlist(301)),
+              let song = songs.first
+        else {
+            Issue.record("Fixture playlist is empty")
+            return
+        }
+        let player = PlayerController(repository: repository, crossfadeDuration: 0)
+        player.play(song, in: songs)
+        player.cycleRepeatMode()
+        player.toggleHeartMode()
+
+        player.controlInterceptor = { _, commit in
+            commit()
+            return true
+        }
+
+        #expect(player.isSharedControlActive)
+        #expect(!player.isHeartModeEnabled)
+        #expect(player.repeatMode == .off)
+        player.toggleHeartMode()
+        player.cycleRepeatMode()
+        #expect(!player.isHeartModeEnabled)
+        #expect(player.repeatMode == .off)
+
+        player.controlInterceptor = nil
+        #expect(!player.isSharedControlActive)
+    }
+
+    @Test("Previous and next preserve their shared-playback command types")
+    @MainActor
+    func sharedPlaybackTransitionTypes() async throws {
+        let repository = FixtureMusicRepository()
+        guard case let .playlist(_, songs, _, _) = try await repository.detail(for: .playlist(301)),
+              songs.count >= 3
+        else {
+            Issue.record("Fixture playlist is too small")
+            return
+        }
+        let player = PlayerController(repository: repository, crossfadeDuration: 0)
+        player.play(songs[1], in: songs)
+        let recorder = PlayerIntentRecorder()
+        player.controlInterceptor = { intent, commit in
+            recorder.intents.append(intent)
+            commit()
+            return true
+        }
+
+        player.next()
+        player.previous()
+
+        #expect(recorder.intents.count == 2)
+        if case let .transition(kind, _, _, _, _) = recorder.intents.first?.play {
+            #expect(kind == .next)
+        } else {
+            Issue.record("Next did not produce a transition intent")
+        }
+        if case let .transition(kind, _, _, _, _) = recorder.intents.last?.play {
+            #expect(kind == .previous)
+        } else {
+            Issue.record("Previous did not produce a transition intent")
+        }
     }
 
     @Test("Navigation rejects adjacent duplicates without flattening real history")
