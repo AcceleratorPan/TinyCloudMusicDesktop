@@ -292,8 +292,6 @@ final class SessionController {
     func logout() async -> String? {
         let operation = beginOperation()
         let previous = credentials
-        await beforeLogout?()
-        guard isCurrent(operation) else { return nil }
 
         do {
             if let previous, !previous.musicU.isEmpty {
@@ -312,6 +310,8 @@ final class SessionController {
         }
 
         await transport.invalidateAllCachedResponses()
+        guard isCurrent(operation) else { return nil }
+        await beforeLogout?()
         guard isCurrent(operation) else { return nil }
         var warning: String?
         if let previous, !previous.cookie.isEmpty, !NeteaseCookieHeader.isGuest(previous.cookie) {

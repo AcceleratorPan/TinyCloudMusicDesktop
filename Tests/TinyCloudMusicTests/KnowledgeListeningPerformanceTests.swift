@@ -1,7 +1,9 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import ImageIO
 import PDFKit
+import SwiftUI
 import Testing
 @testable import TinyCloudMusic
 
@@ -46,6 +48,9 @@ private final class MusicSheetFixtureProtocol: URLProtocol, @unchecked Sendable 
     }
 
     static var requestCount: Int { lock.withLock { requests.count } }
+    static func requestCount(path: String) -> Int {
+        lock.withLock { requests.count(where: { $0.url?.path == path }) }
+    }
     static var cancellationCount: Int { lock.withLock { stopCount } }
 
     static func releaseAll() {
@@ -529,6 +534,16 @@ struct KnowledgeListeningPerformanceTests {
         #expect(loop.nextCursor == nil)
         #expect(duplicate.nextCursor == nil)
         #expect(empty.nextCursor == nil)
+    }
+
+    @MainActor
+    @Test("Style resource tasks re-enter after initial and load-more cancellation")
+    func styleResourceTaskReentry() async throws {
+        try await verifyStyleTaskReentry(firstSongResponse: nil, requestsBeforeSwitch: 1)
+        try await verifyStyleTaskReentry(
+            firstSongResponse: Data(#"{"code":200,"data":{"cursor":"next","songs":[{"id":1,"name":"Song","ar":[{"id":2,"name":"Artist"}],"al":{"id":3,"name":"Album"},"dt":1000}]}}"#.utf8),
+            requestsBeforeSwitch: 2
+        )
     }
 
     @Test("Song knowledge is concurrent, ordered, partial-success, and cancellation-safe")
@@ -1617,6 +1632,101 @@ private func styleSong(_ id: Int64) -> MusicStyleResource {
         ),
         duration: .seconds(1)
     ))
+}
+
+@MainActor
+private func verifyStyleTaskReentry(
+    firstSongResponse: Data?,
+    requestsBeforeSwitch: Int
+) async throws {
+    let sequence = MusicStyleResponseSequence()
+    let empty = Data(#"{"code":200,"data":{}}"#.utf8)
+    MusicSheetFixtureProtocol.reset { request, _ in
+        switch request.url?.path {
+        case "/weapi/style-tag/home/song":
+            let index = sequence.next()
+            if index == 1, let firstSongResponse { return .init(body: firstSongResponse) }
+            return .init(body: empty, blocked: true)
+        case "/weapi/style-tag/home/album":
+            return .init(body: empty)
+        default:
+            return .init(body: empty)
+        }
+    }
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [MusicSheetFixtureProtocol.self]
+    let session = URLSession(configuration: configuration)
+    let cacheRoot = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    let player = PlayerController(
+        repository: FixtureMusicRepository(),
+        cacheRoot: cacheRoot,
+        crossfadeDuration: 0
+    )
+    let hosting = NSHostingView(rootView: MusicStyleDetailView(
+        styleID: 1,
+        styleName: "Style",
+        library: LiveMusicKnowledgeLibrary(transport: EAPITransport(session: session)),
+        player: player,
+        onOpenRoute: { _ in }
+    ))
+    let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
+        styleMask: [.titled],
+        backing: .buffered,
+        defer: false
+    )
+    window.isReleasedWhenClosed = false
+    window.contentView = hosting
+    window.orderFrontRegardless()
+    hosting.layoutSubtreeIfNeeded()
+    defer {
+        MusicSheetFixtureProtocol.releaseAll()
+        window.close()
+        session.invalidateAndCancel()
+        try? FileManager.default.removeItem(at: cacheRoot)
+    }
+
+    #expect(await eventually {
+        MusicSheetFixtureProtocol.requestCount(path: "/weapi/style-tag/home/song") == requestsBeforeSwitch
+    })
+    let picker = try #require(musicKnowledgeSubview(NSSegmentedControl.self, in: hosting))
+    try selectMusicStyleSegment(1, in: picker)
+    #expect(await eventually {
+        MusicSheetFixtureProtocol.requestCount(path: "/weapi/style-tag/home/album") == 1
+    })
+    try selectMusicStyleSegment(0, in: picker)
+    #expect(await eventually {
+        MusicSheetFixtureProtocol.requestCount(path: "/weapi/style-tag/home/song") == requestsBeforeSwitch + 1
+    })
+}
+
+private final class MusicStyleResponseSequence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func next() -> Int {
+        lock.withLock {
+            count += 1
+            return count
+        }
+    }
+}
+
+@MainActor
+private func selectMusicStyleSegment(_ segment: Int, in control: NSSegmentedControl) throws {
+    let target = try #require(control.target)
+    let action = try #require(control.action)
+    control.selectedSegment = segment
+    #expect(NSApp.sendAction(action, to: target, from: control))
+}
+
+@MainActor
+private func musicKnowledgeSubview<View: NSView>(_ type: View.Type, in root: NSView) -> View? {
+    if let match = root as? View { return match }
+    for child in root.subviews {
+        if let match = musicKnowledgeSubview(type, in: child) { return match }
+    }
+    return nil
 }
 
 private func expectPixelFailure(width: Int, height: Int) {

@@ -413,7 +413,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             terminationCleanupTask = Task { @MainActor [weak self] in
                 async let downloadCleanup: Void? = downloads?.pauseAll()
                 async let uploadCleanup: Void? = uploads?.pauseAll()
-                async let listenTogetherCleanup: Void? = listenTogether?.shutdown()
+                async let listenTogetherCleanup: Void? = listenTogether?.prepareForLogout()
                 _ = await (downloadCleanup, uploadCleanup, listenTogetherCleanup)
                 self?.terminationCleanupTask = nil
             }
@@ -424,6 +424,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self?.terminationTask = nil
             guard completed else {
                 self?.terminationConfirmed = false
+                listenTogether?.updateAccount(self?.model?.currentUserID)
                 self?.presentPersistenceFailure(["退出清理在 10 秒内未完成，已取消退出；进度保存仍在继续。"])
                 sender.reply(toApplicationShouldTerminate: false)
                 return
@@ -431,6 +432,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let failures = [downloads?.persistenceError, uploads?.persistenceError].compactMap { $0 }
             guard failures.isEmpty else {
                 self?.terminationConfirmed = false
+                listenTogether?.updateAccount(self?.model?.currentUserID)
                 self?.presentPersistenceFailure(failures)
                 sender.reply(toApplicationShouldTerminate: false)
                 return

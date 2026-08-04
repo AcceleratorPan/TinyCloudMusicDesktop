@@ -191,7 +191,6 @@ struct MusicStyleDetailView: View {
     @State private var detailError: String?
     @State private var selectedKind = MusicStyleResourceKind.songs
     @State private var pages: [MusicStyleResourceKind: MusicStylePage] = [:]
-    @State private var loadingKinds = Set<MusicStyleResourceKind>()
     @State private var errors: [MusicStyleResourceKind: String] = [:]
     @State private var reloads: [MusicStyleResourceKind: Int] = [:]
     @State private var loadMoreRetries: [MusicStyleResourceKind: Int] = [:]
@@ -326,32 +325,30 @@ struct MusicStyleDetailView: View {
 
     @MainActor
     private func loadInitialPage(_ kind: MusicStyleResourceKind) async {
-        guard pages[kind] == nil, !loadingKinds.contains(kind) else { return }
-        loadingKinds.insert(kind)
+        guard pages[kind] == nil else { return }
         errors[kind] = nil
-        defer { loadingKinds.remove(kind) }
         do {
-            pages[kind] = try await library.stylePage(id: styleID, kind: kind)
+            let page = try await library.stylePage(id: styleID, kind: kind)
+            try Task.checkCancellation()
+            pages[kind] = page
         } catch is CancellationError {
         } catch {
+            guard !Task.isCancelled else { return }
             errors[kind] = error.localizedDescription
         }
     }
 
     @MainActor
     private func loadMore(_ kind: MusicStyleResourceKind) async {
-        guard let page = pages[kind], let cursor = page.nextCursor,
-              !loadingKinds.contains(kind)
-        else { return }
-        loadingKinds.insert(kind)
+        guard let page = pages[kind], let cursor = page.nextCursor else { return }
         errors[kind] = nil
-        defer { loadingKinds.remove(kind) }
         do {
             let next = try await library.stylePage(id: styleID, kind: kind, cursor: cursor)
             try Task.checkCancellation()
             pages[kind] = page.appending(next)
         } catch is CancellationError {
         } catch {
+            guard !Task.isCancelled else { return }
             errors[kind] = error.localizedDescription
         }
     }

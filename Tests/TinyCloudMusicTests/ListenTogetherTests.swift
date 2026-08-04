@@ -616,6 +616,80 @@ struct ListenTogetherControllerLifecycleTests {
         #expect(!controller.requiresShutdown)
     }
 
+    @Test("Cancelled termination can rebind after reversible cleanup completes")
+    func completedTerminationCleanupCanRebind() async {
+        ListenTogetherControllerProtocol.reset([
+            "/weapi/listen/together/status/get": .init(Self.inRoom),
+            "/api/middle/im/token/get": .init(Self.credentials),
+            "/eapi/listen/together/sync/playlist/get": .init(Self.authoritativePaused),
+            "/eapi/listen/together/heartbeat": .init(Self.heartbeat),
+            "/eapi/listen/together/end/v2": .init(Self.succeeded)
+        ])
+        let realtime = ListenTogetherRealtimeStub()
+        let controller = makeController(realtime: realtime)
+        controller.updateAccount(42)
+        await wait {
+            if case .recoveryAvailable = controller.phase { return true }
+            return false
+        }
+        controller.recover()
+        await wait { controller.isConnected }
+
+        await controller.prepareForLogout()
+        #expect(controller.currentUserID == nil)
+        #expect(realtime.shutdownCount == 0)
+
+        controller.updateAccount(42)
+        await wait {
+            if case .recoveryAvailable = controller.phase { return true }
+            return false
+        }
+        controller.recover()
+        await wait { controller.isConnected }
+        #expect(realtime.connectCount == 2)
+        #expect(realtime.shutdownCount == 0)
+        await controller.shutdown()
+    }
+
+    @Test("Cancelled termination supersedes blocked cleanup and reconnects")
+    func timedOutTerminationCleanupCanRebind() async {
+        ListenTogetherControllerProtocol.reset([
+            "/weapi/listen/together/status/get": .init(Self.inRoom),
+            "/api/middle/im/token/get": .init(Self.credentials),
+            "/eapi/listen/together/sync/playlist/get": .init(Self.authoritativePaused),
+            "/eapi/listen/together/heartbeat": .init(Self.heartbeat),
+            "/eapi/listen/together/end/v2": .init(Self.succeeded)
+        ])
+        let gate = NonCooperativeRequestGate()
+        let realtime = ListenTogetherRealtimeStub()
+        let controller = makeController(realtime: realtime, requestGate: gate)
+        controller.updateAccount(42)
+        await wait {
+            if case .recoveryAvailable = controller.phase { return true }
+            return false
+        }
+        controller.recover()
+        await wait { controller.isConnected }
+
+        await gate.arm()
+        let cleanup = Task { @MainActor in await controller.prepareForLogout() }
+        #expect(await gate.waitUntilEntered(1))
+
+        controller.updateAccount(42)
+        #expect(await gate.waitUntilCancelled(1))
+        await gate.release(1)
+        await cleanup.value
+        await wait {
+            if case .recoveryAvailable = controller.phase { return true }
+            return false
+        }
+        controller.recover()
+        await wait { controller.isConnected }
+        #expect(realtime.connectCount == 2)
+        #expect(realtime.shutdownCount == 0)
+        await controller.shutdown()
+    }
+
     @Test("Recovery connects before authority and preserves a message received during reconciliation")
     func recoveryBuffersRealtimeMessages() async throws {
         ListenTogetherControllerProtocol.reset([

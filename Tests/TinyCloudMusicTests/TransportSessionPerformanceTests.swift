@@ -1589,6 +1589,43 @@ struct TransportSessionPerformanceTests {
         #expect(session.credentialRevision == snapshot.load().revision)
     }
 
+    @Test("Logout commits local guest state before waiting for owner cleanup")
+    func logoutCommitsBeforeOwnerCleanup() async throws {
+        let store = CredentialStore(service: "TinyCloudMusicTests.\(UUID())")
+        defer { try? store.delete() }
+        let account = try fakeCredentials("logout-order")
+        try store.save(account)
+        let snapshot = CredentialSnapshot(.authenticated(account))
+        let cleanupGate = AsyncGate()
+        let deviceID = Self.deviceID
+        TransportFixtureProtocol.reset { _, _ in .init(body: #"{"code":200}"#) }
+        let session = SessionController(
+            store: store,
+            credentialSnapshot: snapshot,
+            transport: fixtureTransport(snapshot: snapshot),
+            validator: { _ in true },
+            vipValidator: { _ in true },
+            guestRegistrar: {
+                NeteaseAuthenticationContext(cookie: "MUSIC_A=guest", deviceID: deviceID)
+            }
+        )
+        session.beforeLogout = { await cleanupGate.wait() }
+
+        let logout = Task { await session.logout() }
+        #expect(await eventually { await cleanupGate.hasEntered() })
+
+        #expect(session.state == .guest)
+        #expect(session.credentials?.cookie.isEmpty == true)
+        #expect(session.credentials?.musicU == account.musicU)
+        #expect(snapshot.load().revision == 1)
+        #expect(try store.load() == session.credentials)
+        #expect(TransportFixtureProtocol.requestCount(path: "/eapi/logout") == 0)
+
+        await cleanupGate.release()
+        _ = await logout.value
+        #expect(TransportFixtureProtocol.requestCount(path: "/eapi/logout") == 1)
+    }
+
     @Test("Restore device migration advances the shared snapshot timeline only")
     func restoreDeviceMigration() async throws {
         let store = CredentialStore(service: "TinyCloudMusicTests.\(UUID())")

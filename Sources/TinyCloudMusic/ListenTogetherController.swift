@@ -124,7 +124,9 @@ final class ListenTogetherController {
         let expectedCredentialRevision = service.credentialRevision
         if currentUserID == userID,
            credentialRevision == expectedCredentialRevision,
-           room != nil {
+           room != nil,
+           logoutTask == nil,
+           !roomOperationsBlocked {
             return
         }
         accountRevision += 1
