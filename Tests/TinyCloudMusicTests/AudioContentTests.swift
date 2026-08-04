@@ -76,10 +76,29 @@ private func verifyAudioPagination() throws {
     )
     let cursor = BroadcastCursor(lastID: "7", score: "1")
     let page = BroadcastChannelPage(channels: [channel], nextCursor: cursor, hasMore: true)
+    let invalidRows: [[String: Any]] = [[:]]
+    let undecodableEpisodes = AudioContentDecoder.episodePage(
+        ["programs": invalidRows, "more": true],
+        podcastID: 2,
+        offset: 0,
+        limit: 1,
+        decodeSong: { _ in nil }
+    )
+    let undecodablePodcasts = AudioContentDecoder.podcastPage(
+        ["djRadios": invalidRows, "hasMore": true],
+        offset: 0,
+        limit: 1
+    )
     guard first.appending(repeated).episodes.count == 1,
           !first.appending(repeated).hasMore,
           page.appending(page).channels.count == 1,
-          !page.appending(page).hasMore
+          !page.appending(page).hasMore,
+          undecodableEpisodes.episodes.isEmpty,
+          undecodableEpisodes.nextOffset == 1,
+          !undecodableEpisodes.hasMore,
+          undecodablePodcasts.podcasts.isEmpty,
+          undecodablePodcasts.nextOffset == 1,
+          !undecodablePodcasts.hasMore
     else { throw AudioContentCheckError.failed }
 }
 
@@ -159,5 +178,60 @@ struct AudioContentTests {
 
     @Test("Broadcast streams require an official HTTPS CDN")
     func streamPolicy() throws { try verifyBroadcastStreamPolicy() }
+
+    @Test("Podcast subscription overrides project only server-provided rows")
+    func podcastSubscriptionProjection() {
+        let unsubscribed = podcast(id: 1, subscribed: false)
+        let subscribed = podcast(id: 2, subscribed: true)
+        let overrides: [Int64: Bool] = [1: true]
+
+        let detail = PodcastSubscriptionProjection.podcast(unsubscribed, override: overrides[1])
+        let discovery = PodcastSubscriptionProjection.podcasts(
+            [unsubscribed, subscribed],
+            subscribedOnly: false,
+            override: { overrides[$0] }
+        )
+        let subscriptions = PodcastSubscriptionProjection.page(
+            PodcastPage(podcasts: [subscribed], nextOffset: 2, hasMore: true),
+            override: { overrides[$0] }
+        )
+
+        #expect(detail.isSubscribed)
+        #expect(discovery.map(\.isSubscribed) == [true, true])
+        #expect(subscriptions.podcasts.map(\.id) == [2])
+        #expect(subscriptions.podcasts.allSatisfy { $0.isSubscribed })
+        #expect(subscriptions.nextOffset == 2)
+        #expect(subscriptions.hasMore)
+        #expect(!PodcastSubscriptionProjection.podcast(unsubscribed, override: nil).isSubscribed)
+    }
+
+    @Test("Podcast unsubscription removes one loaded row and preserves order and pagination")
+    func podcastUnsubscriptionProjection() {
+        let page = PodcastPage(
+            podcasts: [
+                podcast(id: 1, subscribed: true),
+                podcast(id: 2, subscribed: true),
+                podcast(id: 3, subscribed: true)
+            ],
+            nextOffset: 40,
+            hasMore: true
+        )
+        let projected = PodcastSubscriptionProjection.page(page) { $0 == 2 ? false : nil }
+
+        #expect(projected.podcasts.map(\.id) == [1, 3])
+        #expect(projected.nextOffset == 40)
+        #expect(projected.hasMore)
+    }
+
+    private func podcast(id: Int64, subscribed: Bool) -> Podcast {
+        Podcast(
+            id: id,
+            name: "Podcast \(id)",
+            hostName: "Host",
+            coverURL: nil,
+            categoryName: "Category",
+            isSubscribed: subscribed
+        )
+    }
 }
 #endif

@@ -347,9 +347,14 @@ private func verifyRecentPlaybackState() throws {
 }
 
 private func verifyRecentPlaybackLimit() async throws {
+    let library = LiveMusicLibrary()
+    let credentialRevision = library.transport.credentialSnapshotValue().revision
     for limit in [0, 101] {
         do {
-            _ = try await LiveMusicLibrary().recentlyPlayedPodcasts(limit: limit)
+            _ = try await library.recentlyPlayedPodcasts(
+                limit: limit,
+                expectedCredentialRevision: credentialRevision
+            )
             throw LiveMusicLibraryCheckError.failed
         } catch EAPIError.invalidPayload {
         }

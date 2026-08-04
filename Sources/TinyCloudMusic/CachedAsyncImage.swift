@@ -30,12 +30,21 @@ final class ArtworkPipeline {
     private(set) var generation = 0
     private(set) var failureRefreshGeneration = 0
     private(set) var cacheDirectory: URL
+    private var cacheRoot: URL
 
     private init() {
         let root = Self.defaultCacheRoot
         let result = Self.makePipeline(cacheRoot: root)
         pipeline = result.pipeline
         cacheDirectory = result.cacheDirectory
+        cacheRoot = root
+    }
+
+    init(sessionConfiguration: URLSessionConfiguration, cacheRoot: URL) {
+        let root = cacheRoot.standardizedFileURL
+        pipeline = Self.makePipeline(dataCache: nil, sessionConfiguration: sessionConfiguration)
+        cacheDirectory = Self.artworkDirectory(in: root)
+        self.cacheRoot = root
     }
 
     func configure(cacheRoot: URL) {
@@ -47,12 +56,26 @@ final class ArtworkPipeline {
         let result = Self.makePipeline(cacheRoot: requestedRoot)
         pipeline = result.pipeline
         cacheDirectory = result.cacheDirectory
-        generation &+= 1
+        self.cacheRoot = requestedRoot
+        generation += 1
         oldPipeline.invalidate()
     }
 
     func retryFailedImages() {
-        failureRefreshGeneration &+= 1
+        failureRefreshGeneration += 1
+    }
+
+    func clearCache() async {
+        let oldPipeline = pipeline
+        let dataCache = oldPipeline.configuration.dataCache as? DataCache
+        oldPipeline.invalidate()
+        oldPipeline.cache.removeAll()
+        await Task.detached(priority: .utility) { dataCache?.flush() }.value
+
+        let result = Self.makePipeline(cacheRoot: cacheRoot)
+        pipeline = result.pipeline
+        cacheDirectory = result.cacheDirectory
+        generation += 1
     }
 
     func loadImage(for request: ImageRequest, maximumRetryCount: Int = 2) async throws -> PlatformImage {
@@ -193,8 +216,11 @@ final class ArtworkPipeline {
         return cache
     }
 
-    private static func makePipeline(dataCache: DataCache?) -> ImagePipeline {
-        let session = URLSessionConfiguration.default
+    private static func makePipeline(
+        dataCache: DataCache?,
+        sessionConfiguration: URLSessionConfiguration = .default
+    ) -> ImagePipeline {
+        let session = sessionConfiguration
         session.urlCache = nil
         session.requestCachePolicy = .reloadIgnoringLocalCacheData
         session.httpShouldSetCookies = false
@@ -225,6 +251,7 @@ final class ArtworkPipeline {
 struct CachedAsyncImage<Content: View>: View {
     let url: URL?
     let onSuccess: (CGSize) -> Void
+    let artworkPipeline: ArtworkPipeline
     @ViewBuilder let content: (CachedAsyncImagePhase) -> Content
 
     @Environment(\.displayScale) private var displayScale
@@ -232,13 +259,17 @@ struct CachedAsyncImage<Content: View>: View {
     @State private var requestNonce = 0
     @State private var lastFailureWasTransient = false
     @State private var retryTask: Task<Void, Never>?
+    @State private var retryTaskID: UUID?
+    @State private var isVisible = false
 
     init(
         url: URL?,
+        pipeline: ArtworkPipeline = .shared,
         onSuccess: @escaping (CGSize) -> Void = { _ in },
         @ViewBuilder content: @escaping (CachedAsyncImagePhase) -> Content
     ) {
         self.url = url
+        artworkPipeline = pipeline
         self.onSuccess = onSuccess
         self.content = content
     }
@@ -247,25 +278,33 @@ struct CachedAsyncImage<Content: View>: View {
         GeometryReader { proxy in
             image(size: proxy.size)
         }
-        .onChange(of: ArtworkPipeline.shared.failureRefreshGeneration) { _, _ in
+        .onChange(of: artworkPipeline.failureRefreshGeneration) { _, _ in
             guard lastFailureWasTransient else { return }
             retryTask?.cancel()
             retryTask = nil
+            retryTaskID = nil
             retryCount = 0
-            requestNonce &+= 1
-            lastFailureWasTransient = false
+            if isVisible {
+                requestNonce += 1
+                lastFailureWasTransient = false
+            }
         }
         .onChange(of: url) { _, _ in resetRetryState() }
-        .onAppear { scheduleRetryIfNeeded() }
+        .onAppear {
+            isVisible = true
+            scheduleRetryIfNeeded()
+        }
         .onDisappear {
+            isVisible = false
             retryTask?.cancel()
             retryTask = nil
+            retryTaskID = nil
         }
     }
 
     @ViewBuilder
     private func image(size: CGSize) -> some View {
-        let controller = ArtworkPipeline.shared
+        let controller = artworkPipeline
         let pixelEdge = ArtworkPipeline.bucketedEdge(for: size) * max(1, displayScale)
         if let request = ArtworkPipeline.request(for: url, size: size, displayScale: displayScale) {
             LazyImage(request: request) { state in
@@ -279,7 +318,7 @@ struct CachedAsyncImage<Content: View>: View {
             }
             .pipeline(controller.pipeline)
             .onCompletion(handleCompletion)
-            .onDisappear(.lowerPriority)
+            .onDisappear(.cancel)
             // NukeUI 13 omits thumbnail from LazyImageContext equality.
             .id("\(url?.absoluteString ?? ""):\(pixelEdge):\(controller.generation):\(requestNonce)")
         } else {
@@ -292,6 +331,7 @@ struct CachedAsyncImage<Content: View>: View {
         case let .success(response):
             retryTask?.cancel()
             retryTask = nil
+            retryTaskID = nil
             retryCount = 0
             lastFailureWasTransient = false
             onSuccess(response.image.size)
@@ -303,26 +343,34 @@ struct CachedAsyncImage<Content: View>: View {
     }
 
     private func scheduleRetryIfNeeded() {
-        guard lastFailureWasTransient, retryCount < 2, retryTask == nil else { return }
+        guard isVisible, lastFailureWasTransient, retryCount < 2, retryTask == nil else { return }
         let delay = Duration.milliseconds(400 << retryCount)
+        let retryURL = url
+        let taskID = UUID()
+        retryTaskID = taskID
         retryTask = Task { @MainActor in
+            defer {
+                if retryTaskID == taskID {
+                    retryTask = nil
+                    retryTaskID = nil
+                }
+            }
             do {
                 try await Task.sleep(for: delay)
                 try Task.checkCancellation()
-                retryTask = nil
+                guard isVisible, url == retryURL else { return }
                 retryCount += 1
-                requestNonce &+= 1
-            } catch {
-                retryTask = nil
-            }
+                requestNonce += 1
+            } catch {}
         }
     }
 
     private func resetRetryState() {
         retryTask?.cancel()
         retryTask = nil
+        retryTaskID = nil
         retryCount = 0
-        requestNonce &+= 1
+        requestNonce += 1
         lastFailureWasTransient = false
     }
 }

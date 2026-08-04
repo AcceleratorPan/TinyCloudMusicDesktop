@@ -4,33 +4,33 @@ struct ArtistExtrasView: View {
     let artistID: Int64
     let extras: LiveMusicExtras
     let library: LiveMusicLibrary
+    @Bindable var model: AppModel
     let knowledgeSection: AnyView?
     let onOpenRoute: (Route) -> Void
-    let onFollowChanged: (Bool) -> Void
     let songList: AnyView
 
     @State private var phase: DetailExtrasPhase<ArtistExtrasSnapshot> = .loading
     @State private var selectedSection = ArtistDetailSection.songs
     @State private var reloadID = 0
-    @State private var isUpdatingFollow = false
-    @State private var followError: String?
-    @State private var followTask: Task<Void, Never>?
+    @State private var loadedSections: Set<ArtistDetailSection> = []
+    @State private var snapshot: ArtistExtrasSnapshot?
+    @State private var loadedAccountIdentity: String?
 
     init(
         artistID: Int64,
         extras: LiveMusicExtras,
         library: LiveMusicLibrary,
+        model: AppModel,
         knowledgeSection: AnyView?,
         onOpenRoute: @escaping (Route) -> Void,
-        onFollowChanged: @escaping (Bool) -> Void,
         songList: AnyView
     ) {
         self.artistID = artistID
         self.extras = extras
         self.library = library
+        self.model = model
         self.knowledgeSection = knowledgeSection
         self.onOpenRoute = onOpenRoute
-        self.onFollowChanged = onFollowChanged
         self.songList = songList
     }
 
@@ -50,12 +50,6 @@ struct ArtistExtrasView: View {
 
             if selectedSection == .songs, case let .loaded(snapshot) = phase {
                 followControls(snapshot)
-            }
-
-            if selectedSection == .songs, let followError {
-                Label(followError, systemImage: "exclamationmark.triangle")
-                    .font(.callout)
-                    .foregroundStyle(.red)
             }
 
             switch selectedSection {
@@ -119,12 +113,26 @@ struct ArtistExtrasView: View {
                 }
             }
         }
-        .task(id: "\(artistID):\(reloadID)") { await load() }
+        .task(id: "\(artistID):\(selectedSection):\(accountIdentity):\(reloadID)") {
+            await loadSelectedSection()
+        }
         .onChange(of: artistID) { _, _ in
             selectedSection = .songs
-            followTask?.cancel()
+            loadedSections.removeAll()
+            snapshot = nil
+            loadedAccountIdentity = nil
+            phase = .loading
         }
-        .onDisappear { followTask?.cancel() })
+        .onChange(of: accountIdentity) { _, _ in
+            loadedSections.removeAll()
+            snapshot = nil
+            loadedAccountIdentity = nil
+            phase = .loading
+        })
+    }
+
+    private var accountIdentity: String {
+        "\(model.currentUserID ?? 0):\(library.transport.credentialSnapshotValue().revision)"
     }
 
     private var visibleSections: [ArtistDetailSection] {
@@ -132,86 +140,147 @@ struct ArtistExtrasView: View {
     }
 
     private func followControls(_ snapshot: ArtistExtrasSnapshot) -> some View {
-        HStack(spacing: 12) {
+        let status = displayedFollowStatus(snapshot.followStatus)
+        let pending = model.pendingMutations.contains(.artistFollow(artistID))
+        return HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("关注状态")
                     .font(.headline)
-                Text(followSummary(snapshot.followStatus))
+                Text(followSummary(status))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             Spacer()
             Button {
-                updateFollow(snapshot)
+                model.setArtistFollowed(artistID, followed: !status.isFollowed)
             } label: {
-                if isUpdatingFollow {
+                if pending {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
                         Text("更新中")
                     }
                 } else {
                     Label(
-                        snapshot.followStatus.isFollowed ? "取消关注" : "关注歌手",
-                        systemImage: snapshot.followStatus.isFollowed ? "person.badge.minus" : "person.badge.plus"
+                        status.isFollowed ? "取消关注" : "关注歌手",
+                        systemImage: status.isFollowed ? "person.badge.minus" : "person.badge.plus"
                     )
                 }
             }
             .buttonStyle(.bordered)
-            .disabled(isUpdatingFollow)
+            .disabled(pending)
             .frame(minHeight: 44)
-            .accessibilityHint(snapshot.followStatus.isFollowed ? "取消关注这位歌手" : "关注这位歌手")
+            .accessibilityHint(status.isFollowed ? "取消关注这位歌手" : "关注这位歌手")
         }
     }
 
     @MainActor
-    private func load() async {
+    private func loadSelectedSection() async {
+        guard selectedSection != .knowledge else { return }
+        if loadedAccountIdentity == accountIdentity,
+           loadedSections.contains(selectedSection),
+           let snapshot {
+            phase = .loaded(snapshot)
+            return
+        }
+        let section = selectedSection
+        let currentSnapshot = loadedAccountIdentity == accountIdentity ? snapshot : nil
+        let accountID = model.currentUserID
+        let credentialRevision = library.transport.credentialSnapshotValue().revision
         phase = .loading
-        followError = nil
         do {
-            async let albums = extras.artistAlbums(artistID: artistID)
-            async let followStatus = extras.artistFollowStatus(artistID: artistID)
-            async let similarArtists = library.similarArtists(to: artistID)
-            let result = try await (albums, followStatus, similarArtists)
-            try Task.checkCancellation()
-            phase = .loaded(
-                ArtistExtrasSnapshot(
-                    albums: result.0.albums,
-                    followStatus: result.1,
-                    similarArtists: result.2
+            let snapshot: ArtistExtrasSnapshot
+            switch section {
+            case .songs:
+                let status = try await extras.artistFollowStatus(
+                    artistID: artistID,
+                    expectedCredentialRevision: credentialRevision
                 )
-            )
+                snapshot = ArtistExtrasSnapshot(albums: [], followStatus: status, similarArtists: [])
+            case .albums:
+                if let current = currentSnapshot {
+                    let albums = try await extras.artistAlbums(
+                        artistID: artistID,
+                        expectedCredentialRevision: credentialRevision
+                    )
+                    snapshot = ArtistExtrasSnapshot(
+                        albums: albums.albums,
+                        followStatus: current.followStatus,
+                        similarArtists: current.similarArtists
+                    )
+                } else {
+                    async let albums = extras.artistAlbums(
+                        artistID: artistID,
+                        expectedCredentialRevision: credentialRevision
+                    )
+                    async let status = extras.artistFollowStatus(
+                        artistID: artistID,
+                        expectedCredentialRevision: credentialRevision
+                    )
+                    let result = try await (albums, status)
+                    snapshot = ArtistExtrasSnapshot(
+                        albums: result.0.albums,
+                        followStatus: result.1,
+                        similarArtists: []
+                    )
+                }
+            case .similarArtists:
+                if let current = currentSnapshot {
+                    let artists = try await library.similarArtists(
+                        to: artistID,
+                        expectedCredentialRevision: credentialRevision
+                    )
+                    snapshot = ArtistExtrasSnapshot(
+                        albums: current.albums,
+                        followStatus: current.followStatus,
+                        similarArtists: artists
+                    )
+                } else {
+                    async let artists = library.similarArtists(
+                        to: artistID,
+                        expectedCredentialRevision: credentialRevision
+                    )
+                    async let status = extras.artistFollowStatus(
+                        artistID: artistID,
+                        expectedCredentialRevision: credentialRevision
+                    )
+                    let result = try await (artists, status)
+                    snapshot = ArtistExtrasSnapshot(
+                        albums: [],
+                        followStatus: result.1,
+                        similarArtists: result.0
+                    )
+                }
+            case .knowledge:
+                return
+            }
+            try Task.checkCancellation()
+            guard selectedSection == section,
+                  model.currentUserID == accountID,
+                  library.transport.credentialSnapshotValue().revision == credentialRevision
+            else { return }
+            self.snapshot = snapshot
+            loadedAccountIdentity = accountIdentity
+            phase = .loaded(snapshot)
+            loadedSections.insert(section)
         } catch is CancellationError {
         } catch {
+            guard selectedSection == section,
+                  model.currentUserID == accountID,
+                  library.transport.credentialSnapshotValue().revision == credentialRevision
+            else { return }
             phase = .failed(error.localizedDescription)
         }
     }
 
-    private func updateFollow(_ snapshot: ArtistExtrasSnapshot) {
-        let target = !snapshot.followStatus.isFollowed
-        followError = nil
-        isUpdatingFollow = true
-        followTask?.cancel()
-        followTask = Task { @MainActor in
-            do {
-                try await library.setArtistFollowed(artistID, followed: target)
-                try Task.checkCancellation()
-                guard case var .loaded(current) = phase else {
-                    isUpdatingFollow = false
-                    return
-                }
-                current.followStatus = MusicArtistFollowStatus(
-                    isFollowed: target,
-                    followerCount: max(0, current.followStatus.followerCount + (target ? 1 : -1)),
-                    followDay: target ? current.followStatus.followDay : ""
-                )
-                phase = .loaded(current)
-                onFollowChanged(target)
-            } catch is CancellationError {
-            } catch {
-                followError = error.localizedDescription
-            }
-            isUpdatingFollow = false
+    private func displayedFollowStatus(_ status: MusicArtistFollowStatus) -> MusicArtistFollowStatus {
+        guard let followed = model.artistFollowOverrides[artistID], followed != status.isFollowed else {
+            return status
         }
+        return MusicArtistFollowStatus(
+            isFollowed: followed,
+            followerCount: max(0, status.followerCount + (followed ? 1 : -1)),
+            followDay: followed ? status.followDay : ""
+        )
     }
 
     private func followSummary(_ status: MusicArtistFollowStatus) -> String {
@@ -253,6 +322,7 @@ struct ArtistSongList: View {
     @State private var isLoading = false
     @State private var loadError: String?
     @State private var loadedTotalSongCount: Int?
+    @State private var loadedAccountIdentity: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -277,10 +347,35 @@ struct ArtistSongList: View {
                 allSongContent
             }
         }
-        .task(id: "\(artistID):\(scope)") {
-            guard scope == .all, allSongs.isEmpty else { return }
+        .task(id: "\(artistID):\(scope):\(accountIdentity)") {
+            guard scope == .all,
+                  allSongs.isEmpty || loadedAccountIdentity != accountIdentity
+            else { return }
             await loadMore()
         }
+        .onChange(of: artistID) { _, _ in
+            scope = .hot
+            allSongs = []
+            nextOffset = 0
+            hasMore = true
+            isLoading = false
+            loadError = nil
+            loadedTotalSongCount = nil
+            loadedAccountIdentity = nil
+        }
+        .onChange(of: accountIdentity) { _, _ in
+            allSongs = []
+            nextOffset = 0
+            hasMore = true
+            isLoading = false
+            loadError = nil
+            loadedTotalSongCount = nil
+            loadedAccountIdentity = nil
+        }
+    }
+
+    private var accountIdentity: String {
+        "\(model.currentUserID ?? 0):\(extras.transport.credentialSnapshotValue().revision)"
     }
 
     @ViewBuilder
@@ -309,20 +404,47 @@ struct ArtistSongList: View {
 
     @MainActor
     private func loadMore() async {
+        if loadedAccountIdentity != accountIdentity {
+            allSongs = []
+            nextOffset = 0
+            hasMore = true
+            isLoading = false
+            loadError = nil
+            loadedTotalSongCount = nil
+        }
         guard !isLoading, hasMore else { return }
+        let accountID = model.currentUserID
+        let credentialRevision = extras.transport.credentialSnapshotValue().revision
         isLoading = true
         loadError = nil
-        defer { isLoading = false }
+        defer {
+            if model.currentUserID == accountID,
+               extras.transport.credentialSnapshotValue().revision == credentialRevision {
+                isLoading = false
+            }
+        }
         do {
+            let requestOffset = nextOffset
             let page = try await extras.artistSongs(
                 artistID: artistID,
-                offset: nextOffset,
-                limit: Self.pageSize
+                offset: requestOffset,
+                limit: Self.pageSize,
+                expectedCredentialRevision: credentialRevision
             )
             try Task.checkCancellation()
-            allSongs += page.songs
-            nextOffset = page.offset + Self.pageSize
-            hasMore = page.hasMore && !page.songs.isEmpty
+            guard model.currentUserID == accountID,
+                  extras.transport.credentialSnapshotValue().revision == credentialRevision
+            else { return }
+            var seen = Set(allSongs.map(\.id))
+            var pageSeen = Set<Int64>()
+            let uniquePage = page.songs.filter { pageSeen.insert($0.id).inserted }
+            let additions = uniquePage.filter { seen.insert($0.id).inserted }
+            allSongs += additions
+            loadedAccountIdentity = accountIdentity
+            let candidate = page.offset + Self.pageSize
+            let progressed = candidate > requestOffset && !additions.isEmpty
+            nextOffset = max(requestOffset, candidate)
+            hasMore = page.hasMore && !page.songs.isEmpty && progressed
             if let total = page.total {
                 loadedTotalSongCount = total
             } else if !hasMore {
@@ -330,6 +452,9 @@ struct ArtistSongList: View {
             }
         } catch is CancellationError {
         } catch {
+            guard model.currentUserID == accountID,
+                  extras.transport.credentialSnapshotValue().revision == credentialRevision
+            else { return }
             loadError = error.localizedDescription
         }
     }
@@ -430,7 +555,7 @@ struct UserRelationsView: View {
                 }
             }
         }
-        .task(id: "\(userID):\(reloadID)") { await load() })
+        .task(id: "\(userID):\(section.rawValue):\(reloadID)") { await load() })
     }
 
     private func relations(_ snapshot: UserRelationsSnapshot) -> AnyView {
@@ -480,11 +605,33 @@ struct UserRelationsView: View {
     private func load() async {
         phase = .loading
         do {
-            async let users = library.followingUsers(userID: userID)
-            async let artists = library.followedArtists(userID: userID)
-            let result = try await (users, artists)
+            let snapshot: UserRelationsSnapshot
+            switch section {
+            case .users:
+                snapshot = UserRelationsSnapshot(
+                    users: try await library.followingUsers(
+                        userID: userID,
+                        onUpdate: { users in
+                            guard !Task.isCancelled else { return }
+                            phase = .loaded(UserRelationsSnapshot(users: users, artists: []))
+                        }
+                    ),
+                    artists: []
+                )
+            case .artists:
+                snapshot = UserRelationsSnapshot(
+                    users: [],
+                    artists: try await library.followedArtists(
+                        userID: userID,
+                        onUpdate: { artists in
+                            guard !Task.isCancelled else { return }
+                            phase = .loaded(UserRelationsSnapshot(users: [], artists: artists))
+                        }
+                    )
+                )
+            }
             try Task.checkCancellation()
-            phase = .loaded(UserRelationsSnapshot(users: result.0, artists: result.1))
+            phase = .loaded(snapshot)
         } catch is CancellationError {
         } catch {
             phase = .failed(error.localizedDescription)
@@ -492,7 +639,7 @@ struct UserRelationsView: View {
     }
 }
 
-enum UserRelationSection {
+enum UserRelationSection: String {
     case users
     case artists
 }

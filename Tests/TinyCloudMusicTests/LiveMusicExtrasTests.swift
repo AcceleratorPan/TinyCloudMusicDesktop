@@ -10,12 +10,18 @@ private final class ArtistSongsProtocol: URLProtocol, @unchecked Sendable {
 
     override func startLoading() {
         let isArtistSongs = request.url?.path == "/eapi/v1/artist/songs"
-        let body = isArtistSongs
-            ? #"{"code":200,"songs":[{"id":1,"name":"Song","ar":[{"id":2,"name":"Artist"}],"al":{"id":3,"name":"Album"},"dt":120000}],"more":true,"total":321}"#
-            : #"{"code":404}"#
+        let isAvailablePlaylists = request.url?.path == "/eapi/user/playlist/v1s"
+        let body = if isArtistSongs {
+            #"{"code":200,"songs":[{"id":1,"name":"Song","ar":[{"id":2,"name":"Artist"}],"al":{"id":3,"name":"Album"},"dt":120000}],"more":true,"total":321}"#
+        } else if isAvailablePlaylists {
+            #"{"code":200,"playlist":[{"name":"invalid"},{"id":7,"name":"valid","containsTracks":false}],"more":true}"#
+        } else {
+            #"{"code":404}"#
+        }
+        let isSuccess = isArtistSongs || isAvailablePlaylists
         let response = HTTPURLResponse(
             url: request.url!,
-            statusCode: isArtistSongs ? 200 : 404,
+            statusCode: isSuccess ? 200 : 404,
             httpVersion: nil,
             headerFields: ["Content-Type": "application/json"]
         )!
@@ -125,12 +131,37 @@ struct LiveMusicExtrasTests {
             musicU: ""
         )
 
-        let page = try await LiveMusicExtras(transport: transport).artistSongs(artistID: 2)
+        let page = try await LiveMusicExtras(transport: transport).artistSongs(
+            artistID: 2,
+            expectedCredentialRevision: transport.credentialSnapshotValue().revision
+        )
 
         #expect(page.songs.map(\.id) == [1])
         #expect(page.offset == 0)
         #expect(page.hasMore)
         #expect(page.total == 321)
+    }
+
+    @Test("Available-playlist offset advances by raw rows when one row is malformed")
+    func availablePlaylistOffset() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ArtistSongsProtocol.self]
+        let transport = EAPITransport(
+            session: URLSession(configuration: configuration),
+            cookie: "",
+            musicU: ""
+        )
+
+        let page = try await LiveMusicExtras(transport: transport).availablePlaylists(
+            userID: 1,
+            trackID: 2,
+            offset: 20,
+            expectedCredentialRevision: transport.credentialSnapshotValue().revision
+        )
+
+        #expect(page.playlists.map(\.id) == [7])
+        #expect(page.offset == 22)
+        #expect(page.hasMore)
     }
 }
 #endif

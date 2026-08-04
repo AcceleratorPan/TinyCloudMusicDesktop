@@ -63,9 +63,14 @@ struct LiveMusicKnowledgeLibrary: Sendable {
         }
     }
 
-    func preferredStyleIDs() async throws -> [Int64] {
+    func preferredStyleIDs(expectedCredentialRevision: UInt64) async throws -> [Int64] {
         MusicKnowledgeDecoder.preferredStyleIDs(
-            try await weapi("/weapi/tag/my/preference/get", payload: [:], cache: .library)
+            try await weapi(
+                "/weapi/tag/my/preference/get",
+                payload: [:],
+                cache: .library,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
         )
     }
 
@@ -89,26 +94,47 @@ struct LiveMusicKnowledgeLibrary: Sendable {
 
     func knowledge(for resource: MusicKnowledgeResource) async throws -> [MusicKnowledgeBlock] {
         if case let .song(id) = resource {
-            var blocks: [MusicKnowledgeBlock] = []
-            var firstError: (any Error)?
-            do {
-                blocks += try await songWiki(songID: id)
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                firstError = error
-            }
-            do {
-                blocks += try await briefKnowledge(for: resource)
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                if blocks.isEmpty { throw firstError ?? error }
-            }
-            return blocks
+            return try await Self.combinedSongKnowledge(
+                wiki: { try await songWiki(songID: id) },
+                brief: { try await briefKnowledge(for: resource) }
+            )
         }
 
         return try await briefKnowledge(for: resource)
+    }
+
+    static func combinedSongKnowledge(
+        wiki: @escaping @Sendable () async throws -> [MusicKnowledgeBlock],
+        brief: @escaping @Sendable () async throws -> [MusicKnowledgeBlock]
+    ) async throws -> [MusicKnowledgeBlock] {
+        try await withThrowingTaskGroup(of: MusicKnowledgePartResult.self) { group in
+            group.addTask { .wiki(await musicKnowledgeResult(wiki)) }
+            group.addTask { .brief(await musicKnowledgeResult(brief)) }
+
+            var wikiResult: Result<[MusicKnowledgeBlock], any Error>?
+            var briefResult: Result<[MusicKnowledgeBlock], any Error>?
+            while let part = try await group.next() {
+                try Task.checkCancellation()
+                switch part {
+                case let .wiki(result): wikiResult = result
+                case let .brief(result): briefResult = result
+                }
+                if part.isCancellation {
+                    group.cancelAll()
+                    throw CancellationError()
+                }
+            }
+
+            if case let .failure(error)? = wikiResult,
+               case .failure(_)? = briefResult {
+                throw error
+            }
+            let wikiBlocks: [MusicKnowledgeBlock]
+            if case let .success(blocks)? = wikiResult { wikiBlocks = blocks } else { wikiBlocks = [] }
+            let briefBlocks: [MusicKnowledgeBlock]
+            if case let .success(blocks)? = briefResult { briefBlocks = blocks } else { briefBlocks = [] }
+            return wikiBlocks + briefBlocks
+        }
     }
 
     func songWiki(songID: Int64) async throws -> [MusicKnowledgeBlock] {
@@ -139,14 +165,16 @@ struct LiveMusicKnowledgeLibrary: Sendable {
     private func weapi(
         _ path: String,
         payload: [String: Any],
-        cache: EAPIReadCache
+        cache: EAPIReadCache,
+        expectedCredentialRevision: UInt64? = nil
     ) async throws -> [String: Any] {
-        try decodedJSONObject(try await transport.requestWEAPI(
+        try await transport.requestWEAPIJSONObject(
             path: path,
             payload: payload,
             cache: cache,
+            expectedCredentialRevision: expectedCredentialRevision,
             invalidatesAccountCache: false
-        ))
+        )
     }
 
     private func eapi(
@@ -155,10 +183,32 @@ struct LiveMusicKnowledgeLibrary: Sendable {
         payload: [String: Any],
         cache: EAPIReadCache = .detail
     ) async throws -> [String: Any] {
-        try decodedJSONObject(try await transport.request(
+        try await transport.requestJSONObject(
             EAPIEndpoint(physicalPath, signing: logicalPath, host: Self.interfaceHost),
             json: compactJSON(payload),
             cache: cache
-        ))
+        )
+    }
+}
+
+private enum MusicKnowledgePartResult: Sendable {
+    case wiki(Result<[MusicKnowledgeBlock], any Error>)
+    case brief(Result<[MusicKnowledgeBlock], any Error>)
+
+    var isCancellation: Bool {
+        switch self {
+        case let .wiki(.failure(error)), let .brief(.failure(error)): error is CancellationError
+        case .wiki(.success), .brief(.success): false
+        }
+    }
+}
+
+private func musicKnowledgeResult<Value: Sendable>(
+    _ operation: @escaping @Sendable () async throws -> Value
+) async -> Result<Value, any Error> {
+    do {
+        return .success(try await operation())
+    } catch {
+        return .failure(error)
     }
 }

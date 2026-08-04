@@ -129,10 +129,13 @@ enum PlaylistCoverProcessor {
 struct PlaylistImageUpload: Sendable {
     let transport: EAPITransport
 
-    func updateCover(playlistID: Int64, cover: ProcessedPlaylistCover) async throws {
+    func updateCover(
+        playlistID: Int64,
+        cover: ProcessedPlaylistCover,
+        expectedCredentialRevision: UInt64
+    ) async throws {
         try Task.checkCancellation()
-        let allocationRoot = try object(
-            try await transport.requestWEAPI(
+        let allocationRoot = try await transport.requestWEAPIJSONObject(
                 path: "/weapi/nos/token/alloc",
                 payload: [
                     "bucket": "yyimgs",
@@ -143,14 +146,15 @@ struct PlaylistImageUpload: Sendable {
                     "return_body": #"{"code":200,"size":"$(ObjectSize)"}"#,
                     "type": "other"
                 ],
+                expectedCredentialRevision: expectedCredentialRevision,
                 invalidatesAccountCache: false
-            )
         )
-        try requireSuccess(allocationRoot)
+        try validate(expectedCredentialRevision)
+        try requireUploadSuccess(allocationRoot)
         let result = allocationRoot.object("result")
         let objectKey = result.string("objectKey")
         let token = result.string("token")
-        let coverImageID = stringValue(result["docId"] ?? result["resourceId"])
+        let coverImageID = uploadString(result["docId"] ?? result["resourceId"])
         guard !objectKey.isEmpty, !token.isEmpty, !coverImageID.isEmpty else {
             throw EAPIError.missingData("result.objectKey/token/docId")
         }
@@ -171,34 +175,26 @@ struct PlaylistImageUpload: Sendable {
         request.httpBody = cover.jpegData
         request.setValue(token, forHTTPHeaderField: "x-nos-token")
         request.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
-        _ = try await transport.requestRaw(request)
-        try Task.checkCancellation()
-
-        let updateRoot = try object(
-            try await transport.requestWEAPI(
-                path: "/weapi/playlist/cover/update",
-                payload: ["id": playlistID, "coverImgId": coverImageID]
-            )
+        _ = try await transport.requestRaw(
+            request,
+            expectedCredentialRevision: expectedCredentialRevision
         )
-        try requireSuccess(updateRoot)
+        try validate(expectedCredentialRevision)
+
+        let updateRoot = try await transport.requestWEAPIJSONObject(
+                path: "/weapi/playlist/cover/update",
+                payload: ["id": playlistID, "coverImgId": coverImageID],
+                expectedCredentialRevision: expectedCredentialRevision,
+                invalidatesAccountCache: false
+        )
+        try validate(expectedCredentialRevision)
+        try requireUploadSuccess(updateRoot)
     }
 
-    private func object(_ data: Data) throws -> [String: Any] {
-        guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw EAPIError.invalidResponse
+    private func validate(_ expectedCredentialRevision: UInt64) throws {
+        let actual = transport.credentialSnapshotValue().revision
+        guard actual == expectedCredentialRevision else {
+            throw CredentialRevisionMismatch(expected: expectedCredentialRevision, actual: actual)
         }
-        return value
-    }
-
-    private func requireSuccess(_ root: [String: Any]) throws {
-        let code = root.int("code")
-        guard (200..<300).contains(code) else {
-            throw EAPIError.service(code: code, message: root.string("message"))
-        }
-    }
-
-    private func stringValue(_ value: Any?) -> String {
-        if let value = value as? String { return value }
-        return (value as? NSNumber)?.stringValue ?? ""
     }
 }

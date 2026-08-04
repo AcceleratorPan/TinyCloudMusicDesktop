@@ -80,11 +80,13 @@ struct QRLoginLifecycleTests {
     func refreshMerge() async throws {
         let store = CredentialStore(service: "TinyCloudMusicTests.\(UUID())")
         defer { try? store.delete() }
-        try store.save(try SessionCredentials(
+        let credentials = try SessionCredentials(
             cookie: "keep=value=1; token=old",
             musicU: "vip-token",
             deviceID: Self.deviceID
-        ))
+        )
+        try store.save(credentials)
+        let snapshot = CredentialSnapshot(.authenticated(credentials))
         AuthenticationProtocol.reset([
             "/eapi/login/token/refresh": .init(
                 status: 200,
@@ -94,7 +96,8 @@ struct QRLoginLifecycleTests {
         ])
         let controller = SessionController(
             store: store,
-            transport: transport(),
+            credentialSnapshot: snapshot,
+            transport: transport(snapshot: snapshot),
             validator: { $0.cookie == "keep=value=1; token=new=value" },
             vipValidator: { _ in true }
         )
@@ -111,17 +114,20 @@ struct QRLoginLifecycleTests {
     func logoutFailureClearsLocally() async throws {
         let store = CredentialStore(service: "TinyCloudMusicTests.\(UUID())")
         defer { try? store.delete() }
-        try store.save(try SessionCredentials(
+        let credentials = try SessionCredentials(
             cookie: "MUSIC_U=session",
             musicU: "vip-token",
             deviceID: Self.deviceID
-        ))
+        )
+        try store.save(credentials)
+        let snapshot = CredentialSnapshot(.authenticated(credentials))
         AuthenticationProtocol.reset([
             "/eapi/logout": .init(status: 500, headers: [:], body: Data(#"{"code":500}"#.utf8))
         ])
         let controller = SessionController(
             store: store,
-            transport: transport(),
+            credentialSnapshot: snapshot,
+            transport: transport(snapshot: snapshot),
             validator: { _ in true },
             vipValidator: { _ in true }
         )
@@ -140,11 +146,14 @@ struct QRLoginLifecycleTests {
     func successfulAndRejectedAuthorization() async throws {
         let successStore = CredentialStore(service: "TinyCloudMusicTests.\(UUID())")
         defer { try? successStore.delete() }
-        try successStore.save(guestCredentials())
+        let successCredentials = try guestCredentials()
+        try successStore.save(successCredentials)
+        let successSnapshot = CredentialSnapshot(.authenticated(successCredentials))
         AuthenticationProtocol.reset(qrStubs(status: 803, setCookie: true))
         let successSession = SessionController(
             store: successStore,
-            transport: transport(),
+            credentialSnapshot: successSnapshot,
+            transport: transport(snapshot: successSnapshot),
             validator: { !$0.cookie.isEmpty },
             vipValidator: { _ in true }
         )
@@ -156,11 +165,14 @@ struct QRLoginLifecycleTests {
 
         let rejectedStore = CredentialStore(service: "TinyCloudMusicTests.\(UUID())")
         defer { try? rejectedStore.delete() }
-        try rejectedStore.save(guestCredentials())
+        let rejectedCredentials = try guestCredentials()
+        try rejectedStore.save(rejectedCredentials)
+        let rejectedSnapshot = CredentialSnapshot(.authenticated(rejectedCredentials))
         AuthenticationProtocol.reset(qrStubs(status: 803, setCookie: true))
         let rejectedSession = SessionController(
             store: rejectedStore,
-            transport: transport(),
+            credentialSnapshot: rejectedSnapshot,
+            transport: transport(snapshot: rejectedSnapshot),
             validator: { _ in false },
             vipValidator: { _ in true }
         )
@@ -175,11 +187,14 @@ struct QRLoginLifecycleTests {
     func cancellation() async throws {
         let store = CredentialStore(service: "TinyCloudMusicTests.\(UUID())")
         defer { try? store.delete() }
-        try store.save(guestCredentials())
+        let credentials = try guestCredentials()
+        try store.save(credentials)
+        let snapshot = CredentialSnapshot(.authenticated(credentials))
         AuthenticationProtocol.reset(qrStubs(status: 801, setCookie: false))
         let session = SessionController(
             store: store,
-            transport: transport(),
+            credentialSnapshot: snapshot,
+            transport: transport(snapshot: snapshot),
             validator: { _ in true },
             vipValidator: { _ in true }
         )
@@ -191,10 +206,40 @@ struct QRLoginLifecycleTests {
         #expect(!controller.isPolling)
     }
 
-    private func transport() -> EAPITransport {
+    @Test("A newer login invalidates the old QR flow before another poll starts")
+    func staleFlowDoesNotPoll() async throws {
+        let store = CredentialStore(service: "TinyCloudMusicTests.\(UUID())")
+        defer { try? store.delete() }
+        let credentials = try guestCredentials()
+        try store.save(credentials)
+        let snapshot = CredentialSnapshot(.authenticated(credentials))
+        AuthenticationProtocol.reset(qrStubs(status: 801, setCookie: false))
+        let session = SessionController(
+            store: store,
+            credentialSnapshot: snapshot,
+            transport: transport(snapshot: snapshot),
+            validator: { !$0.cookie.isEmpty },
+            vipValidator: { _ in true }
+        )
+
+        let key = try await session.requestQRLoginKey()
+        #expect(await session.save(cookie: "MUSIC_U=new-session"))
+        do {
+            _ = try await session.checkQRLogin(key: key)
+            Issue.record("The superseded QR flow polled again")
+        } catch let error as SessionOperationError {
+            #expect(error == .superseded)
+        }
+        #expect(AuthenticationProtocol.requestCount(for: "/eapi/login/qrcode/client/login") == 0)
+    }
+
+    private func transport(snapshot: CredentialSnapshot) -> EAPITransport {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [AuthenticationProtocol.self]
-        return EAPITransport(session: URLSession(configuration: configuration), cookie: "", musicU: "")
+        return EAPITransport(
+            session: URLSession(configuration: configuration),
+            credentialSnapshot: snapshot
+        )
     }
 
     private func guestCredentials() throws -> SessionCredentials {

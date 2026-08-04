@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 enum MusicDownloadState: Equatable, Sendable {
     case queued
@@ -26,6 +27,43 @@ struct MusicDownloadRequest: Equatable, Sendable {
     let includeLyrics: Bool
     let source: MusicDownloadSource
     let expectedBytes: Int64?
+    let expectedCredentialRevision: UInt64?
+
+    init(
+        songID: Int64,
+        songName: String,
+        artists: String,
+        destination: URL,
+        quality: AudioQuality,
+        includeLyrics: Bool,
+        source: MusicDownloadSource,
+        expectedBytes: Int64?,
+        expectedCredentialRevision: UInt64? = nil
+    ) {
+        self.songID = songID
+        self.songName = songName
+        self.artists = artists
+        self.destination = destination
+        self.quality = quality
+        self.includeLyrics = includeLyrics
+        self.source = source
+        self.expectedBytes = expectedBytes
+        self.expectedCredentialRevision = expectedCredentialRevision
+    }
+
+    func bindingCloudCredentialRevision(_ revision: UInt64) -> Self {
+        Self(
+            songID: songID,
+            songName: songName,
+            artists: artists,
+            destination: destination,
+            quality: quality,
+            includeLyrics: includeLyrics,
+            source: source,
+            expectedBytes: expectedBytes,
+            expectedCredentialRevision: revision
+        )
+    }
 }
 
 enum MusicDownloadSource: Equatable, Sendable {
@@ -66,6 +104,16 @@ struct MusicDownloadTargets: Sendable {
 }
 
 enum MusicDownloadFiles {
+    private struct ManagedIdentity: Codable {
+        let version: Int
+        let songID: Int64
+        let source: String
+        let quality: AudioQuality
+        let verifiedBytes: Int64
+    }
+
+    private static let managedIdentityAttribute = "com.tinycloudmusic.download.identity"
+
     private static let invalidCharacters = CharacterSet(charactersIn: "\\/:*?\"<>|")
         .union(.controlCharacters)
 
@@ -122,6 +170,102 @@ enum MusicDownloadFiles {
         )
     }
 
+    static func managedDownload(
+        for request: MusicDownloadRequest,
+        fileManager: FileManager = .default
+    ) -> MusicDownloadResult? {
+        let hasSecurityScope = request.destination.startAccessingSecurityScopedResource()
+        defer { if hasSecurityScope { request.destination.stopAccessingSecurityScopedResource() } }
+        let expectedSource = sourceIdentity(for: request)
+        let audioExtensions = managedAudioExtensions(for: request)
+        for stem in managedDownloadStems(for: request) {
+            var index = 1
+            while true {
+                let suffix = index == 1 ? "" : " (\(index))"
+                let base = stem + suffix
+                let lyricURL = request.destination.appending(path: base).appendingPathExtension("lrc")
+                var hasCandidate = fileManager.fileExists(atPath: lyricURL.path)
+                for audioExtension in audioExtensions {
+                    let audioURL = request.destination.appending(path: base).appendingPathExtension(audioExtension)
+                    guard fileManager.fileExists(atPath: audioURL.path) else { continue }
+                    hasCandidate = true
+                    guard let identity = managedIdentity(at: audioURL),
+                          identity.version == 1,
+                          identity.songID == request.songID,
+                          identity.source == expectedSource,
+                          identity.quality == request.quality,
+                          (try? validatedAudioFileSize(at: audioURL)) == identity.verifiedBytes
+                    else { continue }
+                    return MusicDownloadResult(
+                        audioURL: audioURL,
+                        lyricURL: fileManager.fileExists(atPath: lyricURL.path) ? lyricURL : nil
+                    )
+                }
+                guard hasCandidate else { break }
+                index += 1
+            }
+        }
+        return nil
+    }
+
+    static func writeManagedIdentity(
+        for request: MusicDownloadRequest,
+        audioURL: URL,
+        fileManager: FileManager = .default
+    ) throws {
+        let size = try validatedAudioFileSize(at: audioURL)
+        let identity = ManagedIdentity(
+            version: 1,
+            songID: request.songID,
+            source: sourceIdentity(for: request),
+            quality: request.quality,
+            verifiedBytes: size
+        )
+        let data = try PropertyListEncoder().encode(identity)
+        let result = data.withUnsafeBytes { bytes in
+            audioURL.path.withCString { path in
+                managedIdentityAttribute.withCString { name in
+                    setxattr(path, name, bytes.baseAddress, bytes.count, 0, 0)
+                }
+            }
+        }
+        if result != 0 {
+            let code = errno
+            guard code == ENOTSUP || code == EOPNOTSUPP else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+            }
+        }
+        try? fileManager.removeItem(at: legacyManagedIdentityURL(for: audioURL))
+    }
+
+    static func removeManagedIdentity(for audioURL: URL, fileManager: FileManager = .default) {
+        audioURL.path.withCString { path in
+            managedIdentityAttribute.withCString { name in
+                _ = removexattr(path, name, 0)
+            }
+        }
+        try? fileManager.removeItem(at: legacyManagedIdentityURL(for: audioURL))
+    }
+
+    static func downloadStem(for request: MusicDownloadRequest, level: String?) -> String {
+        let prefix = request.artists.isEmpty ? request.songName : "\(request.artists) - \(request.songName)"
+        let label = level.map { "【\(qualityLabel($0))】" } ?? ""
+        let cleaned = sanitizedFileName(label + prefix)
+        var usedBytes = 0
+        let shortened = cleaned.prefix { character in
+            let count = String(character).utf8.count
+            guard usedBytes + count <= 180 else { return false }
+            usedBytes += count
+            return true
+        }
+        return shortened.isEmpty ? "歌曲" : String(shortened)
+    }
+
+    static func sanitizedAudioExtension(_ value: String) -> String {
+        let result = value.lowercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
+        return result.isEmpty ? "mp3" : String(result.prefix(10))
+    }
+
     static func stageDownloadedFile(
         _ source: URL,
         at partURL: URL,
@@ -152,7 +296,13 @@ enum MusicDownloadFiles {
         }
     }
 
-    static func cachedLyrics(for request: MusicDownloadRequest, cacheRoot: URL) -> String? {
+    static func cachedLyrics(
+        for request: MusicDownloadRequest,
+        cacheRoot: URL,
+        context: MusicDownloadCacheContext? = nil,
+        generation: MusicDownloadCacheGeneration? = nil
+    ) -> String? {
+        if let context, let generation, !generation.isCurrent(context) { return nil }
         let root = lyricCacheURL(for: request, cacheRoot: cacheRoot)
         let hasSecurityScope = cacheRoot.startAccessingSecurityScopedResource()
         defer { if hasSecurityScope { cacheRoot.stopAccessingSecurityScopedResource() } }
@@ -164,13 +314,38 @@ enum MusicDownloadFiles {
         return lyrics
     }
 
-    static func cacheLyrics(_ lyrics: String, for request: MusicDownloadRequest, cacheRoot: URL) throws {
+    static func cacheLyrics(
+        _ lyrics: String,
+        for request: MusicDownloadRequest,
+        cacheRoot: URL,
+        context: MusicDownloadCacheContext? = nil,
+        generation: MusicDownloadCacheGeneration? = nil,
+        activity: MusicDownloadCacheActivity? = nil
+    ) throws {
         guard !lyrics.isEmpty else { return }
         let url = lyricCacheURL(for: request, cacheRoot: cacheRoot)
+        if let context, let generation {
+            activity?.begin()
+            defer { activity?.end() }
+            guard generation.isCurrent(context) else { return }
+        }
         let hasSecurityScope = cacheRoot.startAccessingSecurityScopedResource()
         defer { if hasSecurityScope { cacheRoot.stopAccessingSecurityScopedResource() } }
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data(lyrics.utf8).write(to: url, options: .atomic)
+        guard let context, let generation else {
+            try Data(lyrics.utf8).write(to: url, options: .atomic)
+            return
+        }
+        let part = url.appendingPathExtension("\(UUID().uuidString).part")
+        defer { try? FileManager.default.removeItem(at: part) }
+        try Data(lyrics.utf8).write(to: part, options: .atomic)
+        _ = try generation.withCurrent(context) {
+            if FileManager.default.fileExists(atPath: url.path) {
+                _ = try FileManager.default.replaceItemAt(url, withItemAt: part)
+            } else {
+                try FileManager.default.moveItem(at: part, to: url)
+            }
+        }
     }
 
     static func stageData(
@@ -239,6 +414,81 @@ enum MusicDownloadFiles {
             .appending(path: source, directoryHint: .isDirectory)
             .appending(path: "\(request.songID).lrc", directoryHint: .notDirectory)
     }
+
+    private static func sourceIdentity(for request: MusicDownloadRequest) -> String {
+        switch request.source {
+        case .catalog: "catalog"
+        case let .cloud(userID, fileName): "cloud:\(userID):\(fileName)"
+        }
+    }
+
+    private static func managedIdentity(at audioURL: URL) -> ManagedIdentity? {
+        let size = audioURL.path.withCString { path in
+            managedIdentityAttribute.withCString { name in
+                getxattr(path, name, nil, 0, 0, 0)
+            }
+        }
+        guard size > 0, size <= 65_536 else { return nil }
+        var data = Data(count: size)
+        let read = data.withUnsafeMutableBytes { bytes in
+            audioURL.path.withCString { path in
+                managedIdentityAttribute.withCString { name in
+                    getxattr(path, name, bytes.baseAddress, bytes.count, 0, 0)
+                }
+            }
+        }
+        guard read == size else { return nil }
+        return try? PropertyListDecoder().decode(ManagedIdentity.self, from: data)
+    }
+
+    private static func managedDownloadStems(for request: MusicDownloadRequest) -> [String] {
+        let levels: [String?] = switch request.source {
+        case .cloud: [nil]
+        case .catalog:
+            switch request.quality {
+            case .standard: ["standard"]
+            case .lossless: ["lossless"]
+            case .best: SongQualityDetail.orderedLevels.reversed().map(Optional.some)
+            }
+        }
+        return levels.reduce(into: []) { result, level in
+            let stem = downloadStem(for: request, level: level)
+            if !result.contains(stem) { result.append(stem) }
+        }
+    }
+
+    private static func managedAudioExtensions(for request: MusicDownloadRequest) -> [String] {
+        var result = ["mp3", "flac", "m4a"]
+        if case let .cloud(_, fileName) = request.source {
+            let value = sanitizedAudioExtension(URL(fileURLWithPath: fileName).pathExtension)
+            if !result.contains(value) { result.insert(value, at: 0) }
+        }
+        return result
+    }
+
+    static func qualityLabel(_ level: String) -> String {
+        switch level {
+        case "standard": "标准"
+        case "higher": "较高"
+        case "exhigh": "极高"
+        case "lossless": "无损"
+        case "hires": "Hi-Res"
+        case "jyeffect": "高清环绕声"
+        case "sky": "沉浸环绕声"
+        case "jymaster": "超清母带"
+        case "dolby": "杜比全景声"
+        default: level
+        }
+    }
+
+    private static func legacyManagedIdentityURL(for audioURL: URL) -> URL {
+        let key = Data(audioURL.lastPathComponent.utf8).base64EncodedString()
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "=", with: "")
+        return audioURL.deletingLastPathComponent()
+            .appending(path: ".TinyCloudMusic.\(key).plist", directoryHint: .notDirectory)
+    }
 }
 
 struct MusicDownloadProgressThrottle {
@@ -267,5 +517,72 @@ struct MusicDownloadProgressThrottle {
         lastProgress = value
         lastUpdateTime = now
         return value
+    }
+}
+
+final class MusicDownloadProgressReporter: @unchecked Sendable {
+    private let weight: Double
+    private let output: @Sendable (Double) -> Void
+    private let lock = NSLock()
+    private var throttle: MusicDownloadProgressThrottle
+    private var expectedBytes: Int64?
+    private var latestValue: Double?
+    private var lastOutput: Double?
+
+    init(
+        weight: Double = 1,
+        minimumInterval: TimeInterval = 0.1,
+        output: @escaping @Sendable (Double) -> Void
+    ) {
+        self.weight = min(max(weight, 0), 1)
+        self.output = output
+        throttle = MusicDownloadProgressThrottle(minimumInterval: minimumInterval)
+    }
+
+    func setExpectedBytes(_ value: Int64?) {
+        lock.withLock { expectedBytes = value }
+    }
+
+    func update(
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64,
+        responseExpectedContentLength: Int64
+    ) {
+        let value = lock.withLock { () -> Double? in
+            let expected = expectedBytes ?? (responseExpectedContentLength > 0
+                ? responseExpectedContentLength
+                : totalBytesExpectedToWrite)
+            if expected > 0 {
+                latestValue = min(max(Double(totalBytesWritten) / Double(expected), 0), 1) * weight
+            }
+            guard let value = throttle.update(
+                totalBytesWritten: totalBytesWritten,
+                totalBytesExpectedToWrite: totalBytesExpectedToWrite,
+                responseExpectedContentLength: expectedBytes ?? responseExpectedContentLength
+            ) else { return nil }
+            let weighted = value * weight
+            lastOutput = weighted
+            return weighted
+        }
+        if let value { output(value) }
+    }
+
+    func flush() {
+        let value = lock.withLock { () -> Double? in
+            guard let latestValue, lastOutput.map({ latestValue > $0 }) ?? true else { return nil }
+            lastOutput = latestValue
+            return latestValue
+        }
+        if let value { output(value) }
+    }
+
+    func finish() {
+        let value = lock.withLock { () -> Double? in
+            guard lastOutput != 1 else { return nil }
+            latestValue = 1
+            lastOutput = 1
+            return 1
+        }
+        if let value { output(value) }
     }
 }

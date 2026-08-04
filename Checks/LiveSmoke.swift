@@ -13,7 +13,10 @@ enum LiveSmoke {
         }
 
         let lyric = try await repository.lyrics(for: song.id)
-        let home = try await repository.homeSection(id: "PAGE_RECOMMEND_SPECIAL_CLOUD_VILLAGE_PLAYLIST")
+        let home = try await repository.homeSection(
+            id: "PAGE_RECOMMEND_SPECIAL_CLOUD_VILLAGE_PLAYLIST",
+            expectedCredentialRevision: repository.currentCredentialRevision
+        )
         let candidates = page.items.compactMap { item -> Song? in
             guard case let .song(song) = item else { return nil }
             return song

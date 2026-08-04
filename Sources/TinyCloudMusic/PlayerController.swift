@@ -41,6 +41,13 @@ struct PlayerQueueOrder: Equatable, Sendable {
     let anchorSongID: Int64?
 }
 
+struct PlayerQueueIdentity: Equatable, Sendable {
+    let displaySongIDs: [Int64]
+    let randomSongIDs: [Int64]
+    let sourcePlaylistID: Int64?
+    let sessionID: UUID?
+}
+
 struct PlayerControlIntent: Equatable, Sendable {
     let trigger: PlayerControlTrigger
     let play: PlayerPlayIntent?
@@ -50,12 +57,18 @@ struct PlayerControlIntent: Equatable, Sendable {
 @MainActor
 @Observable
 final class PlayerController {
+    private static let maximumPendingPlaybackReports = 8
+    private static let maximumVisibleQueueResolutionCount = 20
     typealias ControlInterceptor = @MainActor @Sendable (
         _ intent: PlayerControlIntent,
         _ commit: @escaping @MainActor @Sendable () -> Void
     ) -> Bool
 
-    private static let maximumStreamAttempts = 3
+    private struct PinnedCacheReference {
+        let cache: TrackCache
+        var count: Int
+    }
+
     private static let maximumCrossfadeDuration: TimeInterval = 12
     private static let prefetchWindow: TimeInterval = 10
     private static let heartModeReplenishThreshold = 3
@@ -89,8 +102,8 @@ final class PlayerController {
     private(set) var isLoadingHeartMode = false
     private(set) var heartModeErrorMessage: String?
     private(set) var sourcePlaylistID: Int64?
-    private(set) var playbackReportRevision = 0
-    private(set) var lastPlaybackReportWasPodcast = false
+    private(set) var queueIdentity: PlayerQueueIdentity?
+    private(set) var playbackHistoryEvent: PlaybackHistoryEvent?
     private(set) var playbackReportErrorMessage: String?
     private(set) var isControlInteractionLocked = false
     private(set) var isSharedControlActive = false
@@ -105,11 +118,17 @@ final class PlayerController {
     @ObservationIgnored private var wantsPlayback = false
     @ObservationIgnored private var pendingSeek: TimeInterval?
     @ObservationIgnored private var loadTask: Task<Void, Never>?
-    @ObservationIgnored private var cacheTask: Task<Void, Never>?
+    @ObservationIgnored private var loadTaskID: UUID?
     @ObservationIgnored private var prefetchTask: Task<Void, Never>?
-    @ObservationIgnored private var queueHydrationTask: Task<Void, Never>?
+    @ObservationIgnored private var prefetchTaskID: UUID?
     @ObservationIgnored private var songResolutionTask: Task<Void, Never>?
+    @ObservationIgnored private var songResolutionTaskID: UUID?
+    @ObservationIgnored private var visibleQueueResolutionTask: Task<Void, Never>?
+    @ObservationIgnored private var visibleQueueResolutionTaskID: UUID?
+    @ObservationIgnored private var visibleQueueResolutionIDs: Set<Int64> = []
+    @ObservationIgnored private var pendingVisibleQueueSongID: Int64?
     @ObservationIgnored private var lyricTask: Task<Void, Never>?
+    @ObservationIgnored private var lyricTaskID: UUID?
     @ObservationIgnored private var heartModeTask: Task<Void, Never>?
     @ObservationIgnored private var heartModeSeedSongID: Int64?
     @ObservationIgnored private var heartModeHasRecommendations = false
@@ -128,7 +147,12 @@ final class PlayerController {
     @ObservationIgnored private var timedPlaybackSongID: Int64?
     @ObservationIgnored private var timedPlaybackSourceID: Int64?
     @ObservationIgnored private var timedPlaybackTotalSeconds: Int?
+    @ObservationIgnored private var timedPlaybackCredentialRevision: UInt64?
     @ObservationIgnored private var playbackStartReportTask: Task<Bool, Never>?
+    @ObservationIgnored private var playbackReportTasks: [UUID: Task<Bool, Never>] = [:]
+    @ObservationIgnored private var playbackReportOrder: [UUID] = []
+    @ObservationIgnored private var accountCredentialRevision: UInt64 = 0
+    @ObservationIgnored private var playbackHistorySequence: UInt64 = 0
     @ObservationIgnored private var playbackTimingStartedAt: ContinuousClock.Instant?
     @ObservationIgnored private var listenedDuration: Duration = .zero
     @ObservationIgnored private var lastAudibleVolume = 0.78
@@ -140,6 +164,10 @@ final class PlayerController {
     @ObservationIgnored private var prefetchedSongID: Int64?
     @ObservationIgnored private var prefetchedSourceURL: URL?
     @ObservationIgnored private var prefetchedAvailability: PlaybackAvailability?
+    @ObservationIgnored private var cacheGeneration = 0
+    @ObservationIgnored private var cacheConfigurationTask: Task<Void, Never>?
+    @ObservationIgnored private var pinnedCaches: [String: PinnedCacheReference] = [:]
+    @ObservationIgnored private var queueSessionID: UUID?
     @ObservationIgnored private var timeObserver: Any?
     @ObservationIgnored private var playerStateObservation: NSKeyValueObservation?
     @ObservationIgnored private var standbyStatusObservation: NSKeyValueObservation?
@@ -180,9 +208,71 @@ final class PlayerController {
     }
 
     func configure(playbackQuality: AudioQuality, cacheRoot: URL) {
+        let pendingIndex = loadTask == nil ? nil : currentIndex
+        let previousConfiguration = cacheConfigurationTask
+        previousConfiguration?.cancel()
+        let prefetch = prefetchTask
+        prefetch?.cancel()
+        qualitySwitchTask?.cancel()
+        qualitySwitchTask = nil
+        qualitySwitchRevision += 1
+        isSwitchingPlaybackQuality = false
+        qualityBeforeSwitch = nil
         self.playbackQuality = playbackQuality
         selectedPlaybackLevel = nil
-        cache = Self.makeCache(root: cacheRoot)
+        cacheGeneration += 1
+        let cacheGeneration = cacheGeneration
+        resetTransitionPreparation()
+        if previousConfiguration == nil, prefetch == nil {
+            cache = Self.makeCache(root: cacheRoot)
+            if let pendingIndex {
+                activate(index: pendingIndex, preservingShuffleOrder: true)
+            }
+            return
+        }
+        cacheConfigurationTask = Task { @MainActor [weak self] in
+            _ = await previousConfiguration?.result
+            _ = await prefetch?.result
+            guard !Task.isCancelled,
+                  let self,
+                  self.cacheGeneration == cacheGeneration
+            else { return }
+            self.resetTransitionPreparation()
+            self.cache = Self.makeCache(root: cacheRoot)
+            self.cacheConfigurationTask = nil
+            if let pendingIndex,
+               self.currentIndex == pendingIndex {
+                self.activate(index: pendingIndex, preservingShuffleOrder: true)
+            }
+        }
+    }
+
+    func clearCache() async throws {
+        _ = await cacheConfigurationTask?.result
+        let task = prefetchTask
+        task?.cancel()
+        _ = await task?.result
+        resetTransitionPreparation()
+
+        var caches = [ObjectIdentifier(cache): cache]
+        for reference in pinnedCaches.values {
+            caches[ObjectIdentifier(reference.cache)] = reference.cache
+        }
+        for cache in caches.values {
+            try await cache.clear()
+        }
+    }
+
+    func setAccountCredentialRevision(_ revision: UInt64) {
+        guard revision != accountCredentialRevision else { return }
+        accountCredentialRevision = revision
+        cancelPlaybackReports()
+        playbackTimingStartedAt = nil
+        listenedDuration = .zero
+        timedPlaybackSongID = nil
+        timedPlaybackSourceID = nil
+        timedPlaybackTotalSeconds = nil
+        timedPlaybackCredentialRevision = nil
     }
 
     func setCrossfadeDuration(_ seconds: TimeInterval) {
@@ -196,14 +286,20 @@ final class PlayerController {
 
     isolated deinit {
         loadTask?.cancel()
-        cacheTask?.cancel()
         prefetchTask?.cancel()
-        queueHydrationTask?.cancel()
+        cacheConfigurationTask?.cancel()
         songResolutionTask?.cancel()
+        visibleQueueResolutionTask?.cancel()
         lyricTask?.cancel()
         heartModeTask?.cancel()
         qualitySwitchTask?.cancel()
         fadeTask?.cancel()
+        playbackReportTasks.values.forEach { $0.cancel() }
+        for (path, reference) in pinnedCaches {
+            for _ in 0..<reference.count {
+                Task { await reference.cache.unpin(URL(fileURLWithPath: path)) }
+            }
+        }
         playerStateObservation?.invalidate()
         standbyStatusObservation?.invalidate()
         itemStatusObservation?.invalidate()
@@ -238,6 +334,10 @@ final class PlayerController {
     }
 
     var isPlaybackRequested: Bool { wantsPlayback }
+
+    var hasCurrentPlayerItem: Bool { avPlayer.currentItem != nil }
+
+    var hasPendingPrefetch: Bool { prefetchTask != nil }
 
     var canGoPrevious: Bool { currentSong != nil }
 
@@ -298,6 +398,8 @@ final class PlayerController {
             heartModeErrorMessage = nil
             isLinearQueueMode = false
             savedQueueMode = nil
+            sourcePlaylistID = nil
+            queueSessionID = nil
             installQueue(
                 songIDs: order.displaySongIDs,
                 knownSongs: knownSongs,
@@ -315,7 +417,8 @@ final class PlayerController {
         _ song: Song,
         in visibleSongs: [Song],
         allSongIDs: [Int64]? = nil,
-        playlistID: Int64? = nil
+        playlistID: Int64? = nil,
+        queueSessionID: UUID? = nil
     ) {
         guard let plan = PlaybackQueuePlan.make(
             selectedSongID: song.id,
@@ -325,8 +428,25 @@ final class PlayerController {
         let songIDs = plan.songIDs
         let index = plan.startIndex
         let newContext = PlaybackContext(songIDs: songIDs, startIndex: index)
-        let sourceChanged = sourcePlaylistID != playlistID
-        let action: PlaybackSelectionAction = if sourceChanged, currentSong?.id == song.id {
+        let sameQueueSource = queueIdentity?.displaySongIDs == songIDs
+            && queueIdentity?.sourcePlaylistID == playlistID
+            && queueIdentity?.sessionID == queueSessionID
+        let shuffleEnabled = savedQueueMode?.shuffle ?? isShuffleEnabled
+        let randomSongIDs = if sameQueueSource, let queueIdentity {
+            queueIdentity.randomSongIDs
+        } else if shuffleEnabled {
+            Self.shuffledSongIDs(currentSongID: song.id, displaySongIDs: songIDs)
+        } else {
+            songIDs
+        }
+        let identity = PlayerQueueIdentity(
+            displaySongIDs: songIDs,
+            randomSongIDs: randomSongIDs,
+            sourcePlaylistID: playlistID,
+            sessionID: queueSessionID
+        )
+        let isSameQueue = queueIdentity == identity
+        let action: PlaybackSelectionAction = if !isSameQueue, currentSong?.id == song.id {
             .switchQueue(resume: !isPlaying)
         } else {
             PlaybackSelectionAction.decide(
@@ -337,12 +457,9 @@ final class PlayerController {
                 newContext: newContext
             )
         }
-        let shuffleEnabled = savedQueueMode?.shuffle ?? isShuffleEnabled
         let queueOrder = PlayerQueueOrder(
             displaySongIDs: songIDs,
-            randomSongIDs: shuffleEnabled
-                ? Self.shuffledSongIDs(currentSongID: song.id, displaySongIDs: songIDs)
-                : songIDs,
+            randomSongIDs: randomSongIDs,
             anchorSongID: song.id
         )
         let playIntent: PlayerPlayIntent? = switch action {
@@ -360,21 +477,20 @@ final class PlayerController {
                 playing: true
             )
         }
-        let queueIntent: PlayerQueueOrder? = switch action {
-        case .switchQueue, .replaceTrackAtZero: queueOrder
-        case .keepPlaying, .resume: nil
-        }
+        let queueIntent = isSameQueue ? nil : queueOrder
         let commit: @MainActor @Sendable () -> Void = { [weak self] in
             guard let self else { return }
             self.playLocally(
                 song: song,
                 visibleSongs: visibleSongs,
                 playlistID: playlistID,
+                queueSessionID: queueSessionID,
                 songIDs: songIDs,
                 index: index,
                 action: action,
                 queueOrder: queueOrder,
-                shuffleEnabled: shuffleEnabled
+                shuffleEnabled: shuffleEnabled,
+                isSameQueue: isSameQueue
             )
         }
         guard playIntent != nil || queueIntent != nil else {
@@ -437,6 +553,7 @@ final class PlayerController {
         isShuffleEnabled = false
         repeatMode = .off
         rebuildShuffleOrder(keeping: currentIndex)
+        updateQueueIdentity()
         resetTransitionPreparation()
     }
 
@@ -447,6 +564,15 @@ final class PlayerController {
             return
         }
         requestSongTransition(to: index, trigger: .user)
+    }
+
+    func resolveQueueSongs(visibleAround songID: Int64) {
+        guard let index = queue.firstIndex(where: { $0.id == songID }),
+              queue[index].song == nil,
+              !visibleQueueResolutionIDs.contains(songID)
+        else { return }
+        pendingVisibleQueueSongID = songID
+        startVisibleQueueResolutionIfNeeded()
     }
 
     func togglePlayback() {
@@ -538,6 +664,7 @@ final class PlayerController {
         guard let currentSongID, !displaySongIDs.isEmpty else {
             isShuffleEnabled = enabled
             rebuildShuffleOrder(keeping: currentIndex)
+            updateQueueIdentity()
             resetTransitionPreparation()
             return
         }
@@ -609,27 +736,50 @@ final class PlayerController {
         qualitySwitchTask?.cancel()
         qualitySwitchRevision += 1
         let revision = qualitySwitchRevision
+        let cacheGeneration = cacheGeneration
         qualityBeforeSwitch = previousSelection
         isSwitchingPlaybackQuality = true
         let cache = cache
         qualitySwitchTask = Task { @MainActor [weak self, repository] in
+            var pinnedURL: URL?
             do {
-                let source = if let ready = cache.readyFile(for: songID, quality: quality.id) {
-                    PlaybackSource(url: ready, availability: .playable(level: quality.id))
+                let source: PlaybackSource
+                if let ready = await cache.readyPinnedFile(for: songID, quality: quality.id) {
+                    pinnedURL = ready
+                    source = PlaybackSource(url: ready, availability: .playable(level: quality.id))
                 } else {
-                    try await repository.playbackSource(for: songID, level: quality.id)
+                    source = try await repository.playbackSource(for: songID, level: quality.id)
                 }
                 try Task.checkCancellation()
                 let level = source.availability.level ?? quality.id
-                let sourceURL = cache.readyFile(for: songID, quality: level) ?? source.url
+                let sourceURL: URL
+                if let pinnedURL {
+                    sourceURL = pinnedURL
+                } else if let ready = await cache.readyPinnedFile(for: songID, quality: level) {
+                    sourceURL = ready
+                    pinnedURL = ready
+                } else {
+                    sourceURL = source.url
+                    if sourceURL.isFileURL, await cache.pin(sourceURL) {
+                        pinnedURL = sourceURL
+                    } else if sourceURL.isFileURL, cache.manages(sourceURL) {
+                        throw URLError(.fileDoesNotExist)
+                    }
+                }
+                try Task.checkCancellation()
                 guard let self,
+                      self.cacheGeneration == cacheGeneration,
                       self.qualitySwitchRevision == revision,
                       self.currentSongID == songID
-                else { return }
+                else {
+                    if let pinnedURL { await cache.unpin(pinnedURL) }
+                    return
+                }
 
                 self.qualitySwitchTask = nil
                 self.selectedPlaybackLevel = level
                 self.finishCrossfade()
+                if pinnedURL != nil { self.registerPinned(sourceURL, cache: cache) }
                 self.prepareCrossfade(
                     Self.makePlayerItem(for: sourceURL),
                     generation: self.playbackGeneration,
@@ -639,15 +789,10 @@ final class PlayerController {
                     playbackAvailability: source.availability,
                     qualityRevision: revision
                 )
-
-                let isTrial = if case .trial = source.availability { true } else { false }
-                if !sourceURL.isFileURL && !isTrial {
-                    self.cacheTask = Task {
-                        _ = try? await cache.cache(songID: songID, quality: level, from: sourceURL)
-                    }
-                }
             } catch is CancellationError {
+                if let pinnedURL { await cache.unpin(pinnedURL) }
             } catch {
+                if let pinnedURL { await cache.unpin(pinnedURL) }
                 guard let self,
                       self.qualitySwitchRevision == revision,
                       self.currentSongID == songID
@@ -684,11 +829,13 @@ final class PlayerController {
         song: Song,
         visibleSongs: [Song],
         playlistID: Int64?,
+        queueSessionID: UUID?,
         songIDs: [Int64],
         index: Int,
         action: PlaybackSelectionAction,
         queueOrder: PlayerQueueOrder,
-        shuffleEnabled: Bool
+        shuffleEnabled: Bool,
+        isSameQueue: Bool
     ) {
         if isHeartModeEnabled {
             stopHeartMode(restoringQueue: false)
@@ -697,6 +844,7 @@ final class PlayerController {
         }
         heartModeErrorMessage = nil
         sourcePlaylistID = playlistID
+        self.queueSessionID = queueSessionID
 
         switch action {
         case .keepPlaying:
@@ -709,8 +857,12 @@ final class PlayerController {
             installPlaybackOrder(queueOrder, shuffleEnabled: shuffleEnabled)
             if shouldResume { resumeLocally() }
         case .replaceTrackAtZero:
-            installQueue(songIDs: songIDs, knownSongs: visibleSongs, currentIndex: index)
-            installPlaybackOrder(queueOrder, shuffleEnabled: shuffleEnabled)
+            if isSameQueue {
+                mergeKnownSongs(visibleSongs)
+            } else {
+                installQueue(songIDs: songIDs, knownSongs: visibleSongs, currentIndex: index)
+                installPlaybackOrder(queueOrder, shuffleEnabled: shuffleEnabled)
+            }
             activate(index: index, preservingShuffleOrder: true)
         }
     }
@@ -845,7 +997,13 @@ final class PlayerController {
             selectedPlaybackLevel = nil
         }
         guard let song = item.song else {
-            resolveAndActivate(songID: item.id, index: index, preservingShuffleOrder: true)
+            let generation = beginTransition(index: index, songID: item.id, crossfade: false)
+            resolveAndActivate(
+                songID: item.id,
+                index: index,
+                generation: generation,
+                preservingShuffleOrder: true
+            )
             return
         }
         let shouldCrossfade = crossfadeDuration > 0
@@ -856,34 +1014,48 @@ final class PlayerController {
         let usesPrefetch = prefetchedSongID == song.id
         let prefetchedURL = usesPrefetch ? prefetchedSourceURL : nil
         let prefetchedAvailability = usesPrefetch ? self.prefetchedAvailability : nil
-        let cacheAlreadyRunning = usesPrefetch && prefetchTask != nil
+        let generation = beginTransition(index: index, songID: song.id, crossfade: shouldCrossfade)
 
+        loadTrack(
+            generation: generation,
+            songID: song.id,
+            prefetchedURL: prefetchedURL,
+            prefetchedAvailability: prefetchedAvailability,
+            crossfade: shouldCrossfade
+        )
+        loadLyrics(generation: generation, songID: song.id)
+        replenishHeartModeIfNeeded()
+    }
+
+    private func beginTransition(index: Int, songID: Int64, crossfade: Bool) -> Int {
         playbackGeneration += 1
         let generation = playbackGeneration
-
         loadTask?.cancel()
-        cacheTask?.cancel()
+        loadTask = nil
+        loadTaskID = nil
+        songResolutionTask?.cancel()
+        songResolutionTask = nil
+        songResolutionTaskID = nil
         qualitySwitchTask?.cancel()
         qualitySwitchTask = nil
         qualitySwitchRevision += 1
-        if usesPrefetch {
-            cacheTask = prefetchTask
-        } else {
-            prefetchTask?.cancel()
-        }
+        prefetchTask?.cancel()
         prefetchTask = nil
+        prefetchTaskID = nil
         prefetchedSongID = nil
         prefetchedSourceURL = nil
-        self.prefetchedAvailability = nil
+        prefetchedAvailability = nil
         lyricTask?.cancel()
+        lyricTask = nil
+        lyricTaskID = nil
         standbyStatusObservation?.invalidate()
         standbyStatusObservation = nil
         standbyPlayer.pause()
-        standbyPlayer.replaceCurrentItem(with: nil)
+        releaseCurrentItem(from: standbyPlayer)
         removeItemObservers()
-        if !shouldCrossfade {
+        if !crossfade {
             avPlayer.pause()
-            avPlayer.replaceCurrentItem(with: nil)
+            releaseCurrentItem(from: avPlayer)
             activeSongID = nil
         }
 
@@ -904,28 +1076,19 @@ final class PlayerController {
         wantsPlayback = true
         prefetchTriggered = false
         crossfadeTriggered = false
-        state = .preparing(songID: song.id)
-
-        loadTrack(
-            generation: generation,
-            songID: song.id,
-            prefetchedURL: prefetchedURL,
-            prefetchedAvailability: prefetchedAvailability,
-            cacheAlreadyRunning: cacheAlreadyRunning,
-            crossfade: shouldCrossfade
-        )
-        loadLyrics(generation: generation, songID: song.id)
-        replenishHeartModeIfNeeded()
+        state = .preparing(songID: songID)
+        return generation
     }
 
     private func installQueue(songIDs: [Int64], knownSongs: [Song], currentIndex: Int) {
-        queueHydrationTask?.cancel()
         songResolutionTask?.cancel()
+        songResolutionTask = nil
+        songResolutionTaskID = nil
+        cancelVisibleQueueResolution()
         let knownByID = Dictionary(knownSongs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         queue = songIDs.map { PlaybackQueueItem(id: $0, song: knownByID[$0]) }
         self.currentIndex = currentIndex
         context = PlaybackContext(songIDs: songIDs, startIndex: currentIndex)
-        hydrateQueue()
     }
 
     private func installPlaybackOrder(_ order: PlayerQueueOrder, shuffleEnabled: Bool) {
@@ -941,7 +1104,22 @@ final class PlayerController {
             shuffleOrder = []
             shuffleCursor = 0
         }
+        updateQueueIdentity()
         resetTransitionPreparation()
+    }
+
+    private func updateQueueIdentity() {
+        let displaySongIDs = queue.map(\.id)
+        guard !displaySongIDs.isEmpty else {
+            queueIdentity = nil
+            return
+        }
+        queueIdentity = PlayerQueueIdentity(
+            displaySongIDs: displaySongIDs,
+            randomSongIDs: randomSongIDs(for: displaySongIDs),
+            sourcePlaylistID: sourcePlaylistID,
+            sessionID: queueSessionID
+        )
     }
 
     private func randomSongIDs(for displaySongIDs: [Int64]) -> [Int64] {
@@ -978,6 +1156,7 @@ final class PlayerController {
         isLinearQueueMode = false
         self.savedQueueMode = nil
         rebuildShuffleOrder(keeping: currentIndex)
+        updateQueueIdentity()
         resetTransitionPreparation()
     }
 
@@ -1003,7 +1182,6 @@ final class PlayerController {
             queue = originalQueue
             currentIndex = index
             context = PlaybackContext(songIDs: originalQueue.map(\.id), startIndex: index)
-            hydrateQueue()
             restoreQueueMode()
             if shouldRestart { activate(index: index) }
             return
@@ -1059,6 +1237,7 @@ final class PlayerController {
         guard !additions.isEmpty else { return false }
         queue = retained + additions.map { PlaybackQueueItem(id: $0.id, song: $0) }
         context = PlaybackContext(songIDs: queue.map(\.id), startIndex: currentIndex)
+        updateQueueIdentity()
         heartModeHasRecommendations = true
         resetTransitionPreparation()
         return true
@@ -1087,63 +1266,121 @@ final class PlayerController {
             guard let song = songsByID[queue[index].id] else { continue }
             queue[index].song = song
         }
-        if queueHydrationTask == nil { hydrateQueue() }
     }
 
-    private func hydrateQueue() {
-        let songIDs = queue.map(\.id)
-        let missingIDs = queue.compactMap { $0.song == nil ? $0.id : nil }
-        guard !missingIDs.isEmpty else { return }
+    private func startVisibleQueueResolutionIfNeeded() {
+        guard visibleQueueResolutionTask == nil,
+              let songID = pendingVisibleQueueSongID
+        else { return }
+        pendingVisibleQueueSongID = nil
+        guard let index = queue.firstIndex(where: { $0.id == songID }),
+              queue[index].song == nil
+        else { return }
 
-        queueHydrationTask = Task { @MainActor [weak self, repository] in
-            do {
-                let songs = try await repository.songs(ids: missingIDs)
-                try Task.checkCancellation()
-                guard let self, self.queue.map(\.id) == songIDs else { return }
-                self.mergeKnownSongs(songs)
-                self.queueHydrationTask = nil
-            } catch is CancellationError {
-            } catch {
-                guard let self, self.queue.map(\.id) == songIDs else { return }
-                self.queueHydrationTask = nil
+        let limit = Self.maximumVisibleQueueResolutionCount
+        let lowerBound = min(max(0, index - limit / 2), max(0, queue.count - limit))
+        let upperBound = min(queue.count, lowerBound + limit)
+        let ids = queue[lowerBound..<upperBound].compactMap { item in
+            item.song == nil ? item.id : nil
+        }
+        guard !ids.isEmpty else { return }
+
+        let taskID = UUID()
+        visibleQueueResolutionTaskID = taskID
+        visibleQueueResolutionIDs = Set(ids)
+        visibleQueueResolutionTask = Task { @MainActor [weak self, repository] in
+            defer {
+                if let self, self.visibleQueueResolutionTaskID == taskID {
+                    self.visibleQueueResolutionTask = nil
+                    self.visibleQueueResolutionTaskID = nil
+                    self.visibleQueueResolutionIDs = []
+                    self.startVisibleQueueResolutionIfNeeded()
+                }
             }
+            do {
+                let songs = try await Self.fetchQueueSongs(ids, repository: repository)
+                try Task.checkCancellation()
+                guard let self, self.visibleQueueResolutionTaskID == taskID else { return }
+                self.mergeKnownSongs(songs)
+            } catch {}
         }
     }
 
-    private func resolveAndActivate(songID: Int64, index: Int, preservingShuffleOrder: Bool) {
-        songResolutionTask?.cancel()
-        currentIndex = index
-        context = PlaybackContext(songIDs: queue.map(\.id), startIndex: index)
-        position = 0
-        mediaDuration = 0
-        wantsPlayback = true
-        state = .preparing(songID: songID)
+    private func cancelVisibleQueueResolution() {
+        visibleQueueResolutionTask?.cancel()
+        visibleQueueResolutionTask = nil
+        visibleQueueResolutionTaskID = nil
+        visibleQueueResolutionIDs = []
+        pendingVisibleQueueSongID = nil
+    }
 
+    private static func fetchQueueSongs(
+        _ ids: [Int64],
+        repository: any MusicRepository
+    ) async throws -> [Song] {
+        try await repository.songs(ids: Array(ids.prefix(maximumVisibleQueueResolutionCount)))
+    }
+
+    private func resolveAndActivate(
+        songID: Int64,
+        index: Int,
+        generation: Int,
+        preservingShuffleOrder: Bool
+    ) {
+        songResolutionTask?.cancel()
+        let taskID = UUID()
+        songResolutionTaskID = taskID
         songResolutionTask = Task { @MainActor [weak self, repository] in
+            var settled = false
+            defer {
+                if let self, self.songResolutionTaskID == taskID {
+                    self.songResolutionTask = nil
+                    self.songResolutionTaskID = nil
+                    if !settled,
+                       self.playbackGeneration == generation,
+                       self.currentSongID == songID,
+                       case .preparing = self.state {
+                        self.wantsPlayback = false
+                        self.isLoadingLyrics = false
+                        self.state = .failed(songID: songID, message: "歌曲信息加载已取消")
+                    }
+                }
+            }
             do {
-                guard let song = try await repository.songs(ids: [songID]).first else {
+                guard let song = try await Self.fetchQueueSongs([songID], repository: repository).first else {
                     throw AppError.unavailable("无法加载歌曲信息")
                 }
                 try Task.checkCancellation()
                 guard let self,
+                      self.playbackGeneration == generation,
                       self.currentIndex == index,
                       self.queue.indices.contains(index),
                       self.queue[index].id == songID
-                else { return }
+                else {
+                    settled = true
+                    return
+                }
                 let shouldPlay = self.wantsPlayback
                 self.queue[index].song = song
                 self.songResolutionTask = nil
+                self.songResolutionTaskID = nil
+                settled = true
                 self.activate(index: index, preservingShuffleOrder: preservingShuffleOrder)
                 if !shouldPlay { self.pauseLocally() }
             } catch is CancellationError {
             } catch {
                 guard let self,
+                      self.playbackGeneration == generation,
                       self.currentIndex == index,
                       self.queue.indices.contains(index),
                       self.queue[index].id == songID
-                else { return }
-                self.songResolutionTask = nil
+                else {
+                    settled = true
+                    return
+                }
+                settled = true
                 self.wantsPlayback = false
+                self.isLoadingLyrics = false
                 self.state = .failed(songID: songID, message: error.localizedDescription)
             }
         }
@@ -1165,7 +1402,13 @@ final class PlayerController {
             wantsPlayback = true
             state = .preparing(songID: songID)
             if songResolutionTask == nil, let currentIndex {
-                resolveAndActivate(songID: songID, index: currentIndex, preservingShuffleOrder: true)
+                let generation = beginTransition(index: currentIndex, songID: songID, crossfade: false)
+                resolveAndActivate(
+                    songID: songID,
+                    index: currentIndex,
+                    generation: generation,
+                    preservingShuffleOrder: true
+                )
             }
             return
         }
@@ -1199,77 +1442,109 @@ final class PlayerController {
         songID: Int64,
         prefetchedURL: URL? = nil,
         prefetchedAvailability: PlaybackAvailability? = nil,
-        cacheAlreadyRunning: Bool = false,
         crossfade: Bool = false
     ) {
         let quality = playbackQuality
         let selectedLevel = selectedPlaybackLevel
         let expectedLevel = selectedLevel ?? (quality == .best ? nil : quality.cacheComponent)
+        let cacheGeneration = cacheGeneration
+        let taskID = UUID()
+        loadTaskID = taskID
         loadTask = Task { @MainActor [weak self, repository, cache] in
-            var lastError: Error?
-            var sourceURL = prefetchedURL
-                ?? expectedLevel.flatMap { cache.readyFile(for: songID, quality: $0) }
-            var availability = prefetchedAvailability
-                ?? (sourceURL == nil ? nil : expectedLevel.map { .playable(level: $0) })
-            var cacheLevel = availability?.level ?? expectedLevel
-
-            if sourceURL == nil {
-                for _ in 0..<Self.maximumStreamAttempts {
-                    do {
-                        let source = if let selectedLevel {
-                            try await repository.playbackSource(for: songID, level: selectedLevel)
-                        } else {
-                            try await repository.playbackSource(for: songID, quality: quality)
-                        }
-                        availability = source.availability
-                        cacheLevel = source.availability.level ?? expectedLevel
-                        sourceURL = cacheLevel.flatMap { cache.readyFile(for: songID, quality: $0) } ?? source.url
-                        break
-                    } catch is CancellationError {
-                        return
-                    } catch let error as PlaybackUnavailableError {
-                        lastError = error
-                        break
-                    } catch {
-                        lastError = error
+            var settled = false
+            defer {
+                if let self, self.loadTaskID == taskID {
+                    self.loadTask = nil
+                    self.loadTaskID = nil
+                    if !settled,
+                       self.isCurrent(generation: generation, songID: songID),
+                       case .preparing = self.state {
+                        self.wantsPlayback = false
+                        self.isLoadingLyrics = false
+                        self.state = .failed(songID: songID, message: "播放加载已取消")
                     }
                 }
             }
+            var sourceURL = prefetchedURL
+            var pinned = false
+            if let prefetchedURL = sourceURL,
+               prefetchedURL.isFileURL,
+               cache.manages(prefetchedURL) {
+                sourceURL = await cache.readyPinnedFile(
+                    for: songID,
+                    quality: prefetchedAvailability?.level ?? expectedLevel ?? "standard"
+                )
+                pinned = sourceURL != nil
+            } else if sourceURL == nil, let expectedLevel {
+                sourceURL = await cache.readyPinnedFile(for: songID, quality: expectedLevel)
+                pinned = sourceURL != nil
+            }
+            var availability = prefetchedAvailability
+                ?? (sourceURL == nil ? nil : expectedLevel.map { .playable(level: $0) })
 
             do {
-                try Task.checkCancellation()
-                guard let sourceURL,
-                      let self,
-                      self.isCurrent(generation: generation, songID: songID)
-                else {
-                    if Task.isCancelled { return }
-                    throw lastError ?? URLError(.badURL)
-                }
-
-                self.loadTask = nil
-                self.playbackAvailability = availability
-                self.prepare(sourceURL, generation: generation, songID: songID, crossfade: crossfade)
-                let isTrial = if case .trial? = availability { true } else { false }
-                if let cacheLevel, !sourceURL.isFileURL && !cacheAlreadyRunning && !isTrial {
-                    self.cacheTask = Task {
-                        _ = try? await cache.cache(songID: songID, quality: cacheLevel, from: sourceURL)
+                if sourceURL == nil {
+                    let source = if let selectedLevel {
+                        try await repository.playbackSource(for: songID, level: selectedLevel)
+                    } else {
+                        try await repository.playbackSource(for: songID, quality: quality)
                     }
+                    availability = source.availability
+                    if let level = source.availability.level ?? expectedLevel,
+                       let ready = await cache.readyPinnedFile(for: songID, quality: level) {
+                        sourceURL = ready
+                        pinned = true
+                    } else {
+                        sourceURL = source.url
+                    }
+                }
+                try Task.checkCancellation()
+                guard let sourceURL else { throw URLError(.badURL) }
+                if sourceURL.isFileURL, !pinned {
+                    pinned = await cache.pin(sourceURL)
+                    if !pinned, cache.manages(sourceURL) {
+                        throw URLError(.fileDoesNotExist)
+                    }
+                }
+                do {
+                    try Task.checkCancellation()
+                    guard let self,
+                          self.cacheGeneration == cacheGeneration,
+                          self.isCurrent(generation: generation, songID: songID)
+                    else {
+                        if pinned { await cache.unpin(sourceURL) }
+                        settled = true
+                        return
+                    }
+                    if pinned { self.registerPinned(sourceURL, cache: cache) }
+                    self.playbackAvailability = availability
+                    self.prepare(sourceURL, generation: generation, songID: songID, crossfade: crossfade)
+                    settled = true
+                } catch {
+                    if pinned { await cache.unpin(sourceURL) }
+                    throw error
                 }
             } catch is CancellationError {
             } catch let error as PlaybackUnavailableError {
                 guard !Task.isCancelled,
                       let self,
                       self.isCurrent(generation: generation, songID: songID)
-                else { return }
-                self.loadTask = nil
+                else {
+                    settled = true
+                    return
+                }
+                settled = true
                 self.failUnavailable(generation: generation, songID: songID, error: error)
             } catch {
-                guard let self, self.isCurrent(generation: generation, songID: songID) else { return }
-                self.loadTask = nil
+                guard let self, self.isCurrent(generation: generation, songID: songID) else {
+                    settled = true
+                    return
+                }
+                settled = true
                 self.failAndAdvance(
                     generation: generation,
                     songID: songID,
-                    message: lastError?.localizedDescription ?? "这首歌需要订阅数字专辑才能播放、下载哦~"
+                    message: error.localizedDescription
                 )
             }
         }
@@ -1279,6 +1554,31 @@ final class PlayerController {
         let root = root ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appending(path: "TinyCloudMusic", directoryHint: .isDirectory)
         return TrackCache(directory: root.appending(path: "StreamCache", directoryHint: .isDirectory))
+    }
+
+    private func registerPinned(_ url: URL, cache: TrackCache) {
+        let path = url.standardizedFileURL.path
+        if var reference = pinnedCaches[path] {
+            reference.count += 1
+            pinnedCaches[path] = reference
+        } else {
+            pinnedCaches[path] = PinnedCacheReference(cache: cache, count: 1)
+        }
+    }
+
+    private func releaseCurrentItem(from player: AVPlayer) {
+        let sourceURL = (player.currentItem?.asset as? AVURLAsset)?.url
+        player.replaceCurrentItem(with: nil)
+        guard let sourceURL, sourceURL.isFileURL else { return }
+        let path = sourceURL.standardizedFileURL.path
+        guard var reference = pinnedCaches[path] else { return }
+        if reference.count > 1 {
+            reference.count -= 1
+            pinnedCaches[path] = reference
+        } else {
+            pinnedCaches[path] = nil
+        }
+        Task { await reference.cache.unpin(sourceURL) }
     }
 
     private static func makePlayerItem(for sourceURL: URL) -> AVPlayerItem {
@@ -1299,6 +1599,7 @@ final class PlayerController {
         activeSongID = songID
         installItemObservers(item, generation: generation, songID: songID)
         state = .preparing(songID: songID)
+        releaseCurrentItem(from: avPlayer)
         avPlayer.replaceCurrentItem(with: item)
         applyVolume()
         if wantsPlayback { avPlayer.play() }
@@ -1319,6 +1620,7 @@ final class PlayerController {
         standbyPlayer.pause()
         standbyPlayer.volume = 0
         standbyStatusObservation?.invalidate()
+        releaseCurrentItem(from: standbyPlayer)
         standbyPlayer.replaceCurrentItem(with: item)
         standbyStatusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             let rawValue = item.status.rawValue
@@ -1393,13 +1695,15 @@ final class PlayerController {
             standbyStatusObservation?.invalidate()
             standbyStatusObservation = nil
             let message = item.error?.localizedDescription ?? "音频流预缓冲失败"
-            standbyPlayer.replaceCurrentItem(with: nil)
             if standbyTransitionDuration != nil {
+                releaseCurrentItem(from: standbyPlayer)
                 failQualitySwitch(message)
             } else if let sourceURL = (item.asset as? AVURLAsset)?.url {
+                standbyPlayer.replaceCurrentItem(with: nil)
                 finishCrossfade()
                 prepare(sourceURL, generation: generation, songID: songID, crossfade: false)
             } else {
+                releaseCurrentItem(from: standbyPlayer)
                 failAndAdvance(generation: generation, songID: songID, message: message)
             }
         case .unknown:
@@ -1429,14 +1733,16 @@ final class PlayerController {
                         qualityRevision: qualityRevision
                     )
                 } else {
-                    self.standbyPlayer.replaceCurrentItem(with: nil)
                     let message = item.error?.localizedDescription ?? "音频流预缓冲失败"
                     if self.standbyTransitionDuration != nil {
+                        self.releaseCurrentItem(from: self.standbyPlayer)
                         self.failQualitySwitch(message)
                     } else if let sourceURL = (item.asset as? AVURLAsset)?.url {
+                        self.standbyPlayer.replaceCurrentItem(with: nil)
                         self.finishCrossfade()
                         self.prepare(sourceURL, generation: generation, songID: songID, crossfade: false)
                     } else {
+                        self.releaseCurrentItem(from: self.standbyPlayer)
                         self.failAndAdvance(generation: generation, songID: songID, message: message)
                     }
                 }
@@ -1478,7 +1784,7 @@ final class PlayerController {
         guard wantsPlayback else {
             avPlayer.pause()
             standbyPlayer.pause()
-            standbyPlayer.replaceCurrentItem(with: nil)
+            releaseCurrentItem(from: standbyPlayer)
             applyVolume()
             state = .paused(songID: songID)
             return
@@ -1525,7 +1831,7 @@ final class PlayerController {
         standbyStatusObservation?.invalidate()
         standbyStatusObservation = nil
         standbyPlayer.pause()
-        standbyPlayer.replaceCurrentItem(with: nil)
+        releaseCurrentItem(from: standbyPlayer)
         standbySeekPosition = nil
         standbyTransitionDuration = nil
         standbyPlaybackAvailability = nil
@@ -1536,7 +1842,7 @@ final class PlayerController {
         standbyStatusObservation?.invalidate()
         standbyStatusObservation = nil
         standbyPlayer.pause()
-        standbyPlayer.replaceCurrentItem(with: nil)
+        releaseCurrentItem(from: standbyPlayer)
         standbySeekPosition = nil
         standbyTransitionDuration = nil
         standbyPlaybackAvailability = nil
@@ -1562,7 +1868,18 @@ final class PlayerController {
     }
 
     private func loadLyrics(generation: Int, songID: Int64) {
+        let taskID = UUID()
+        lyricTaskID = taskID
         lyricTask = Task { @MainActor [weak self, repository] in
+            defer {
+                if let self, self.lyricTaskID == taskID {
+                    self.lyricTask = nil
+                    self.lyricTaskID = nil
+                    if self.isCurrent(generation: generation, songID: songID) {
+                        self.isLoadingLyrics = false
+                    }
+                }
+            }
             do {
                 let source = try await repository.lyrics(for: songID)
                 try Task.checkCancellation()
@@ -1695,27 +2012,49 @@ final class PlayerController {
     }
 
     private func prefetchNext(generation: Int, index: Int) {
-        guard queue.indices.contains(index) else { return }
+        guard cacheConfigurationTask == nil, queue.indices.contains(index) else { return }
         let songID = queue[index].id
         let quality = playbackQuality
         let expectedLevel = quality == .best ? nil : quality.cacheComponent
-        if let expectedLevel, let ready = cache.readyFile(for: songID, quality: expectedLevel) {
-            prefetchedSongID = songID
-            prefetchedSourceURL = ready
-            prefetchedAvailability = .playable(level: expectedLevel)
-            return
-        }
-
+        let cacheGeneration = cacheGeneration
+        let taskID = UUID()
+        prefetchTaskID = taskID
         prefetchTask = Task { @MainActor [weak self, repository, cache] in
+            defer {
+                if let self, self.prefetchTaskID == taskID {
+                    self.prefetchTask = nil
+                    self.prefetchTaskID = nil
+                }
+            }
             do {
+                if let expectedLevel,
+                   let ready = await cache.readyFile(for: songID, quality: expectedLevel) {
+                    guard let self,
+                          self.isCurrentPrefetch(
+                              taskID: taskID,
+                              generation: generation,
+                              cacheGeneration: cacheGeneration,
+                              songID: songID,
+                              index: index
+                          )
+                    else { return }
+                    self.prefetchedSongID = songID
+                    self.prefetchedSourceURL = ready
+                    self.prefetchedAvailability = .playable(level: expectedLevel)
+                    return
+                }
                 let source = try await repository.playbackSource(for: songID, quality: quality)
                 try Task.checkCancellation()
                 let level = source.availability.level ?? expectedLevel ?? "standard"
-                let sourceURL = cache.readyFile(for: songID, quality: level) ?? source.url
+                let sourceURL = await cache.readyFile(for: songID, quality: level) ?? source.url
                 guard let self,
-                      self.playbackGeneration == generation,
-                      self.queue.indices.contains(index),
-                      self.queue[index].id == songID
+                      self.isCurrentPrefetch(
+                          taskID: taskID,
+                          generation: generation,
+                          cacheGeneration: cacheGeneration,
+                          songID: songID,
+                          index: index
+                      )
                 else { return }
                 self.prefetchedSongID = songID
                 self.prefetchedSourceURL = sourceURL
@@ -1723,16 +2062,31 @@ final class PlayerController {
                 let isTrial = if case .trial = source.availability { true } else { false }
                 if !sourceURL.isFileURL && !isTrial,
                    let cached = try? await cache.cache(songID: songID, quality: level, from: sourceURL) {
-                    guard self.playbackGeneration == generation else { return }
+                    guard self.isCurrentPrefetch(
+                        taskID: taskID,
+                        generation: generation,
+                        cacheGeneration: cacheGeneration,
+                        songID: songID,
+                        index: index
+                    ) else { return }
                     self.prefetchedSourceURL = cached
                 }
-                guard self.playbackGeneration == generation else { return }
-                self.prefetchTask = nil
-            } catch {
-                guard let self, self.playbackGeneration == generation else { return }
-                self.prefetchTask = nil
-            }
+            } catch {}
         }
+    }
+
+    private func isCurrentPrefetch(
+        taskID: UUID,
+        generation: Int,
+        cacheGeneration: Int,
+        songID: Int64,
+        index: Int
+    ) -> Bool {
+        prefetchTaskID == taskID
+            && self.cacheGeneration == cacheGeneration
+            && playbackGeneration == generation
+            && queue.indices.contains(index)
+            && queue[index].id == songID
     }
 
     private func updateDuration(_ seconds: TimeInterval, generation: Int, songID: Int64) {
@@ -1786,21 +2140,15 @@ final class PlayerController {
                startedNewSession,
                let sourceID = timedPlaybackSourceID,
                let totalSeconds = timedPlaybackTotalSeconds {
-                playbackStartReportTask = Task { @MainActor [weak self, repository] in
-                    do {
-                        try await repository.recordPlaybackStart(
-                            for: songID,
-                            sourceID: sourceID,
-                            totalSeconds: totalSeconds
-                        )
-                        self?.lastPlaybackReportWasPodcast = false
-                        self?.playbackReportErrorMessage = nil
-                        self?.playbackReportRevision += 1
-                        return true
-                    } catch {
-                        self?.playbackReportErrorMessage = Self.playbackReportMessage(for: error)
-                        return false
-                    }
+                let revision = accountCredentialRevision
+                playbackStartReportTask = launchPlaybackReport(revision: revision) { [repository] in
+                    try await repository.recordPlaybackStart(
+                        for: songID,
+                        sourceID: sourceID,
+                        totalSeconds: totalSeconds,
+                        expectedCredentialRevision: revision
+                    )
+                    return .song
                 }
             }
         case .waitingToPlayAtSpecifiedRate:
@@ -1958,6 +2306,7 @@ final class PlayerController {
             timedPlaybackSongID = songID
             timedPlaybackSourceID = currentPlaybackSourceID
             timedPlaybackTotalSeconds = max(1, Int(duration))
+            timedPlaybackCredentialRevision = accountCredentialRevision
         }
         if playbackTimingStartedAt == nil { playbackTimingStartedAt = ContinuousClock.now }
         return startedNewSession
@@ -1974,6 +2323,7 @@ final class PlayerController {
         let songID = timedPlaybackSongID
         let sourceID = timedPlaybackSourceID
         let totalSeconds = timedPlaybackTotalSeconds
+        let revision = timedPlaybackCredentialRevision
         let startReportTask = playbackStartReportTask
         let seconds = Int(listenedDuration.components.seconds)
         let podcastEpisodeID = currentSong?.podcastEpisodeID
@@ -1982,36 +2332,102 @@ final class PlayerController {
         timedPlaybackSongID = nil
         timedPlaybackSourceID = nil
         timedPlaybackTotalSeconds = nil
+        timedPlaybackCredentialRevision = nil
         playbackStartReportTask = nil
         listenedDuration = .zero
-        guard let songID, seconds > 0 else { return }
-        Task { @MainActor [weak self, repository] in
+        guard let songID, let revision, seconds > 0 else { return }
+        launchPlaybackReport(
+            revision: revision,
+            preservingFailureOf: startReportTask
+        ) { [repository] in
+            if let podcastEpisodeID, positionMilliseconds > 0 {
+                try await repository.recordPodcastPlayback(
+                    for: podcastEpisodeID,
+                    positionMilliseconds: positionMilliseconds,
+                    completed: completed,
+                    expectedCredentialRevision: revision
+                )
+                return .podcast
+            }
+            guard let sourceID, let totalSeconds else { return nil }
+            try await repository.recordPlayback(
+                for: songID,
+                sourceID: sourceID,
+                playedSeconds: seconds,
+                totalSeconds: totalSeconds,
+                expectedCredentialRevision: revision
+            )
+            return .song
+        }
+    }
+
+    @discardableResult
+    private func launchPlaybackReport(
+        revision: UInt64,
+        preservingFailureOf prerequisite: Task<Bool, Never>? = nil,
+        operation: @escaping @Sendable () async throws -> PlaybackHistoryKind?
+    ) -> Task<Bool, Never> {
+        let taskID = UUID()
+        let task = Task { @MainActor [weak self] in
+            defer {
+                self?.playbackReportTasks[taskID] = nil
+                self?.playbackReportOrder.removeAll { $0 == taskID }
+            }
             do {
-                if let podcastEpisodeID, positionMilliseconds > 0 {
-                    try await repository.recordPodcastPlayback(
-                        for: podcastEpisodeID,
-                        positionMilliseconds: positionMilliseconds,
-                        completed: completed
-                    )
-                    self?.lastPlaybackReportWasPodcast = true
-                    self?.playbackReportErrorMessage = nil
-                } else {
-                    guard let sourceID, let totalSeconds else { return }
-                    let startSucceeded = await startReportTask?.value
-                    try await repository.recordPlayback(
-                        for: songID,
-                        sourceID: sourceID,
-                        playedSeconds: seconds,
-                        totalSeconds: totalSeconds
-                    )
-                    self?.lastPlaybackReportWasPodcast = false
-                    if startSucceeded != false { self?.playbackReportErrorMessage = nil }
-                }
-                self?.playbackReportRevision += 1
+                let prerequisiteSucceeded = await prerequisite?.value
+                try Task.checkCancellation()
+                guard let kind = try await operation() else { return false }
+                try Task.checkCancellation()
+                guard let self,
+                      self.accountCredentialRevision == revision,
+                      self.playbackReportTasks[taskID] != nil
+                else { return false }
+                self.publishPlaybackHistory(
+                    kind,
+                    revision: revision,
+                    clearsPreviousError: prerequisiteSucceeded != false
+                )
+                return true
+            } catch is CancellationError {
+                return false
             } catch {
-                self?.playbackReportErrorMessage = Self.playbackReportMessage(for: error)
+                guard let self,
+                      self.accountCredentialRevision == revision,
+                      self.playbackReportTasks[taskID] != nil
+                else { return false }
+                self.playbackReportErrorMessage = Self.playbackReportMessage(for: error)
+                return false
             }
         }
+        if playbackReportOrder.count == Self.maximumPendingPlaybackReports {
+            let oldest = playbackReportOrder.removeFirst()
+            playbackReportTasks.removeValue(forKey: oldest)?.cancel()
+        }
+        playbackReportOrder.append(taskID)
+        playbackReportTasks[taskID] = task
+        return task
+    }
+
+    private func cancelPlaybackReports() {
+        playbackReportTasks.values.forEach { $0.cancel() }
+        playbackReportTasks.removeAll()
+        playbackReportOrder.removeAll()
+        playbackStartReportTask = nil
+    }
+
+    private func publishPlaybackHistory(
+        _ kind: PlaybackHistoryKind,
+        revision: UInt64,
+        clearsPreviousError: Bool
+    ) {
+        guard accountCredentialRevision == revision else { return }
+        playbackHistorySequence += 1
+        playbackHistoryEvent = PlaybackHistoryEvent(
+            sequence: playbackHistorySequence,
+            credentialRevision: revision,
+            kind: kind
+        )
+        if clearsPreviousError { playbackReportErrorMessage = nil }
     }
 
     private static func playbackReportMessage(for error: Error) -> String {
@@ -2034,19 +2450,15 @@ final class PlayerController {
               seconds >= 1
         else { return }
         reportedPodcastPlaybackGeneration = playbackGeneration
-        Task { @MainActor [weak self, repository] in
-            do {
-                try await repository.recordPodcastPlayback(
-                    for: episodeID,
-                    positionMilliseconds: Int(seconds * 1_000),
-                    completed: false
-                )
-                self?.lastPlaybackReportWasPodcast = true
-                self?.playbackReportErrorMessage = nil
-                self?.playbackReportRevision += 1
-            } catch {
-                self?.playbackReportErrorMessage = Self.playbackReportMessage(for: error)
-            }
+        let revision = accountCredentialRevision
+        launchPlaybackReport(revision: revision) { [repository] in
+            try await repository.recordPodcastPlayback(
+                for: episodeID,
+                positionMilliseconds: Int(seconds * 1_000),
+                completed: false,
+                expectedCredentialRevision: revision
+            )
+            return .podcast
         }
     }
 
@@ -2076,6 +2488,7 @@ final class PlayerController {
     private func resetTransitionPreparation() {
         prefetchTask?.cancel()
         prefetchTask = nil
+        prefetchTaskID = nil
         prefetchedSongID = nil
         prefetchedSourceURL = nil
         prefetchedAvailability = nil

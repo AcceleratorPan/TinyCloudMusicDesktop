@@ -91,6 +91,13 @@ private enum VideoDetailSection: String {
     }
 }
 
+private enum VideoRelatedPhase: Equatable {
+    case notRequested
+    case loading
+    case loaded
+    case failed(String)
+}
+
 // AppKit runs local event monitors on the main thread, but the imported callback is not actor-annotated.
 private struct MainThreadScrollEvent: @unchecked Sendable {
     let value: NSEvent
@@ -215,11 +222,28 @@ private enum VideoHomeSection: String, CaseIterable {
     }
 }
 
+private enum VideoRecommendationSource: Hashable, Sendable {
+    case featured
+    case page(Int)
+}
+
+private enum VideoRecommendationOutcome: Sendable {
+    case loaded(VideoRecommendationSource, [VideoRecommendation])
+    case failed(VideoRecommendationSource, String)
+
+    var source: VideoRecommendationSource {
+        switch self {
+        case let .loaded(source, _), let .failed(source, _): source
+        }
+    }
+}
+
 struct VideoRecommendationsView: View {
     let library: LiveVideoLibrary
     let currentUserID: Int64?
     let subscriptionOverrides: [VideoPageResource: Bool]
     let subscriptionRevision: Int
+    let loadedSubscriptionRevision: Int
     let onOpenRoute: (Route) -> Void
     let onLogin: () -> Void
     let onSubscriptionsLoaded: ([VideoPageResource]) -> Void
@@ -232,6 +256,15 @@ struct VideoRecommendationsView: View {
     @State private var errorMessage: String?
     @State private var generation = 0
     @State private var loadTask: Task<Void, Never>?
+    @State private var loadMoreTask: Task<Void, Never>?
+    @State private var recommendationNextOffset: Int?
+    @State private var recommendationFailures: [VideoRecommendationSource: String] = [:]
+    @State private var recommendationAccountID: Int64?
+    @State private var recommendationCredentialRevision: UInt64?
+
+    private var credentialRevision: UInt64 {
+        library.transport.credentialSnapshotValue().revision
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -261,9 +294,13 @@ struct VideoRecommendationsView: View {
         }
         .task(id: loadIdentity) { startLoad() }
         .onDisappear {
-            generation &+= 1
+            generation += 1
             loadTask?.cancel()
             loadTask = nil
+            loadMoreTask?.cancel()
+            loadMoreTask = nil
+            isLoading = false
+            isLoadingMore = false
         }
     }
 
@@ -302,7 +339,10 @@ struct VideoRecommendationsView: View {
                     if let errorMessage {
                         InlineRetry(message: errorMessage) {
                             if selectedSection == .subscriptions, let page = subscriptionPage, page.hasMore {
-                                Task { await loadMore(page) }
+                                startSubscriptionLoadMore(page)
+                            } else if selectedSection == .recommendations,
+                                      !recommendationFailures.isEmpty {
+                                retryRecommendationFailures()
                             } else {
                                 startLoad()
                             }
@@ -311,9 +351,15 @@ struct VideoRecommendationsView: View {
                               let page = subscriptionPage,
                               page.hasMore {
                         LoadMoreTrigger(title: isLoadingMore ? "正在加载更多…" : "继续加载") {
-                            Task { await loadMore(page) }
+                            startSubscriptionLoadMore(page)
                         }
                         .id(page.nextOffset)
+                    } else if selectedSection == .recommendations,
+                              let offset = recommendationNextOffset {
+                        LoadMoreTrigger(title: isLoadingMore ? "正在加载更多…" : "继续加载") {
+                            loadRecommendationPage(offset: offset)
+                        }
+                        .id(offset)
                     }
                 }
                 .padding(.horizontal, 24)
@@ -336,7 +382,7 @@ struct VideoRecommendationsView: View {
 
     private var loadIdentity: String {
         let revision = selectedSection == .subscriptions ? subscriptionRevision : 0
-        return "\(selectedSection.rawValue):\(currentUserID.map(String.init) ?? "guest"):\(revision)"
+        return "\(selectedSection.rawValue):\(currentUserID.map(String.init) ?? "guest"):\(credentialRevision):\(revision)"
     }
 
     private var loadingLabel: String {
@@ -357,10 +403,15 @@ struct VideoRecommendationsView: View {
 
     @MainActor
     private func startLoad(force: Bool = false) {
-        generation &+= 1
+        generation += 1
         let requestGeneration = generation
         let section = selectedSection
+        let accountID = currentUserID
+        let credentialRevision = credentialRevision
         loadTask?.cancel()
+        loadTask = nil
+        loadMoreTask?.cancel()
+        loadMoreTask = nil
         isLoadingMore = false
         errorMessage = nil
         guard !isLoggedOutSubscription else {
@@ -370,31 +421,61 @@ struct VideoRecommendationsView: View {
             return
         }
 
+        if section == .recommendations,
+           !force,
+           recommendationAccountID == currentUserID,
+           recommendationCredentialRevision == credentialRevision,
+           !recommendations.isEmpty {
+            isLoading = false
+            return
+        }
         if section == .subscriptions { subscriptionPage = nil }
         isLoading = true
         loadTask = Task { @MainActor in
             do {
-                if force {
-                    await library.invalidateCachedResponses(
-                        in: section == .subscriptions ? [.library] : [.detail]
-                    )
-                }
                 switch section {
                 case .recommendations:
-                    let loaded = try await loadRecommendations()
+                    let sources: [VideoRecommendationSource] = [.featured, .page(0)]
+                    let outcomes = try await loadRecommendationSources(
+                        sources,
+                        refreshCache: force,
+                        expectedCredentialRevision: credentialRevision
+                    )
                     try Task.checkCancellation()
-                    guard generation == requestGeneration else { return }
-                    recommendations = loaded
+                    guard generation == requestGeneration,
+                          currentUserID == accountID,
+                          self.credentialRevision == credentialRevision
+                    else { return }
+                    recommendations = []
+                    recommendationFailures = [:]
+                    recommendationNextOffset = 8
+                    recommendationAccountID = currentUserID
+                    recommendationCredentialRevision = credentialRevision
+                    applyRecommendationOutcomes(outcomes, sources: sources)
+                    guard !recommendations.isEmpty else {
+                        throw VideoLibraryError.unavailable(
+                            recommendationFailures.values.first ?? "暂无可用推荐"
+                        )
+                    }
                 case .subscriptions:
-                    let loaded = try await library.subscriptions()
+                    let loaded = try await library.subscriptions(
+                        refreshCache: force || subscriptionRevision > loadedSubscriptionRevision,
+                        expectedCredentialRevision: credentialRevision
+                    )
                     try Task.checkCancellation()
-                    guard generation == requestGeneration else { return }
+                    guard generation == requestGeneration,
+                          currentUserID == accountID,
+                          self.credentialRevision == credentialRevision
+                    else { return }
                     onSubscriptionsLoaded(loaded.items.map(\.resource))
                     subscriptionPage = loaded
                 }
             } catch is CancellationError {
             } catch {
-                guard generation == requestGeneration else { return }
+                guard generation == requestGeneration,
+                      currentUserID == accountID,
+                      self.credentialRevision == credentialRevision
+                else { return }
                 errorMessage = error.localizedDescription
             }
             guard generation == requestGeneration else { return }
@@ -404,9 +485,20 @@ struct VideoRecommendationsView: View {
     }
 
     @MainActor
+    private func startSubscriptionLoadMore(_ current: VideoSubscriptionPage) {
+        guard loadMoreTask == nil else { return }
+        let requestGeneration = generation
+        loadMoreTask = Task { @MainActor in
+            await loadMore(current)
+            if generation == requestGeneration { loadMoreTask = nil }
+        }
+    }
+
+    @MainActor
     private func loadMore(_ current: VideoSubscriptionPage) async {
         let requestGeneration = generation
         let accountID = currentUserID
+        let credentialRevision = credentialRevision
         guard selectedSection == .subscriptions,
               accountID != nil,
               current.hasMore,
@@ -418,10 +510,14 @@ struct VideoRecommendationsView: View {
             if generation == requestGeneration { isLoadingMore = false }
         }
         do {
-            let next = try await library.subscriptions(offset: current.nextOffset)
+            let next = try await library.subscriptions(
+                offset: current.nextOffset,
+                expectedCredentialRevision: credentialRevision
+            )
             try Task.checkCancellation()
             guard generation == requestGeneration,
                   currentUserID == accountID,
+                  self.credentialRevision == credentialRevision,
                   selectedSection == .subscriptions,
                   subscriptionPage?.nextOffset == current.nextOffset
             else { return }
@@ -429,24 +525,137 @@ struct VideoRecommendationsView: View {
             subscriptionPage = current.appending(next)
         } catch is CancellationError {
         } catch {
-            guard generation == requestGeneration, currentUserID == accountID else { return }
+            guard generation == requestGeneration,
+                  currentUserID == accountID,
+                  self.credentialRevision == credentialRevision
+            else { return }
             errorMessage = error.localizedDescription
         }
     }
 
-    private func loadRecommendations() async throws -> [VideoRecommendation] {
-        async let featuredMVs = try? library.personalizedMVs()
-        async let firstPage = try? library.recommendations(offset: 0)
-        async let secondPage = try? library.recommendations(offset: 8)
-        async let thirdPage = try? library.recommendations(offset: 16)
-        let pages = await (featuredMVs, firstPage, secondPage, thirdPage)
-        var seen = Set<String>()
-        let items = [pages.0, pages.1, pages.2, pages.3]
-            .compactMap { $0 }
-            .flatMap { $0 }
-            .filter { seen.insert($0.id).inserted }
-        guard !items.isEmpty else { throw VideoLibraryError.unavailable("暂无可用推荐") }
-        return items
+    @MainActor
+    private func loadRecommendationPage(offset: Int) {
+        guard selectedSection == .recommendations,
+              recommendationNextOffset == offset,
+              !isLoadingMore
+        else { return }
+        startRecommendationLoad(sources: [.page(offset)])
+    }
+
+    @MainActor
+    private func retryRecommendationFailures() {
+        let sources = recommendationFailures.keys.sorted(by: sourceOrder)
+        guard !sources.isEmpty, !isLoadingMore else { return }
+        startRecommendationLoad(sources: sources)
+    }
+
+    @MainActor
+    private func startRecommendationLoad(sources: [VideoRecommendationSource]) {
+        let requestGeneration = generation
+        let accountID = currentUserID
+        let credentialRevision = credentialRevision
+        isLoadingMore = true
+        errorMessage = nil
+        loadMoreTask?.cancel()
+        loadMoreTask = Task { @MainActor in
+            do {
+                let outcomes = try await loadRecommendationSources(
+                    sources,
+                    refreshCache: false,
+                    expectedCredentialRevision: credentialRevision
+                )
+                try Task.checkCancellation()
+                guard generation == requestGeneration,
+                      selectedSection == .recommendations,
+                      currentUserID == accountID,
+                      self.credentialRevision == credentialRevision
+                else { return }
+                applyRecommendationOutcomes(outcomes, sources: sources)
+            } catch is CancellationError {
+            } catch {
+                guard generation == requestGeneration,
+                      currentUserID == accountID,
+                      self.credentialRevision == credentialRevision
+                else { return }
+                errorMessage = error.localizedDescription
+            }
+            guard generation == requestGeneration else { return }
+            isLoadingMore = false
+            loadMoreTask = nil
+        }
+    }
+
+    private func loadRecommendationSources(
+        _ sources: [VideoRecommendationSource],
+        refreshCache: Bool,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [VideoRecommendationOutcome] {
+        try await withThrowingTaskGroup(of: VideoRecommendationOutcome.self) { group in
+            for source in sources {
+                group.addTask { [library] in
+                    do {
+                        let items = switch source {
+                        case .featured:
+                            try await library.personalizedMVs(
+                                refreshCache: refreshCache,
+                                expectedCredentialRevision: expectedCredentialRevision
+                            )
+                        case let .page(offset):
+                            try await library.recommendations(
+                                offset: offset,
+                                refreshCache: refreshCache,
+                                expectedCredentialRevision: expectedCredentialRevision
+                            )
+                        }
+                        return .loaded(source, items)
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        return .failed(source, error.localizedDescription)
+                    }
+                }
+            }
+            var outcomes: [VideoRecommendationOutcome] = []
+            for try await outcome in group { outcomes.append(outcome) }
+            return outcomes
+        }
+        .sorted { sourceOrder($0.source, $1.source) }
+    }
+
+    @MainActor
+    private func applyRecommendationOutcomes(
+        _ outcomes: [VideoRecommendationOutcome],
+        sources: [VideoRecommendationSource]
+    ) {
+        var seen = Set(recommendations.map(\.id))
+        for source in sources { recommendationFailures.removeValue(forKey: source) }
+        for outcome in outcomes {
+            switch outcome {
+            case let .loaded(source, items):
+                let additions = items.filter { seen.insert($0.id).inserted }
+                recommendations.append(contentsOf: additions)
+                if case let .page(offset) = source {
+                    if additions.isEmpty {
+                        recommendationNextOffset = nil
+                    } else if offset > 0 {
+                        recommendationNextOffset = offset >= 16 ? nil : offset + 8
+                    }
+                }
+            case let .failed(source, message):
+                recommendationFailures[source] = message
+            }
+        }
+        errorMessage = recommendationFailures.values.sorted().first
+    }
+
+    private func sourceOrder(_ lhs: VideoRecommendationSource, _ rhs: VideoRecommendationSource) -> Bool {
+        func rank(_ source: VideoRecommendationSource) -> Int {
+            switch source {
+            case .featured: -1
+            case let .page(offset): offset
+            }
+        }
+        return rank(lhs) < rank(rhs)
     }
 }
 
@@ -470,7 +679,7 @@ struct VideoDetailView: View {
     @State private var detail: VideoPageDetail?
     @State private var related: [VideoRecommendation] = []
     @State private var detailError: String?
-    @State private var relatedError: String?
+    @State private var relatedPhase = VideoRelatedPhase.notRequested
     @State private var playbackError: String?
     @State private var subscriptionError: String?
     @State private var selectedResolution = 720
@@ -482,8 +691,11 @@ struct VideoDetailView: View {
     @State private var generation = 0
     @State private var detailTask: Task<Void, Never>?
     @State private var relatedTask: Task<Void, Never>?
+    @State private var relatedTaskID: UUID?
     @State private var playbackTask: Task<Void, Never>?
+    @State private var playbackTaskID: UUID?
     @State private var subscriptionTask: Task<Void, Never>?
+    @State private var subscriptionTaskID: UUID?
     @State private var playerStatusObservation: NSKeyValueObservation?
     @State private var playerFailureObserver: NSObjectProtocol?
 
@@ -527,7 +739,12 @@ struct VideoDetailView: View {
             }
         }
         .navigationTitle(detail?.title ?? "视频详情")
-        .task(id: "\(resource.identity)-\(currentUserID.map(String.init) ?? "guest")") { startLoad() }
+        .task(id: "\(resource.identity)-\(videoAccountIdentity)") { startLoad() }
+        .onChange(of: selectedSection) { _, section in
+            if section == .related, relatedPhase == .notRequested {
+                startRelatedLoad(generation: generation)
+            }
+        }
         .onDisappear(perform: stopAndCancel)
     }
 
@@ -546,7 +763,7 @@ struct VideoDetailView: View {
 
     private var visibleSections: [VideoDetailSection] {
         var sections: [VideoDetailSection] = [.knowledge, .comments]
-        if relatedTask != nil || relatedError != nil || !related.isEmpty {
+        if relatedPhase != .loaded || !related.isEmpty {
             sections.append(.related)
         }
         return sections
@@ -710,11 +927,15 @@ struct VideoDetailView: View {
 
     @ViewBuilder
     private var relatedSection: some View {
-        if relatedTask != nil, related.isEmpty {
+        if relatedPhase == .notRequested {
+            Color.clear
+                .frame(height: 1)
+                .task { startRelatedLoad(generation: generation) }
+        } else if relatedPhase == .loading, related.isEmpty {
             ProgressView("正在加载相关推荐…")
                 .frame(maxWidth: .infinity, minHeight: 96)
-        } else if let relatedError, related.isEmpty {
-            InlineRetry(message: relatedError) { startRelatedLoad(generation: generation) }
+        } else if case let .failed(message) = relatedPhase, related.isEmpty {
+            InlineRetry(message: message) { startRelatedLoad(generation: generation) }
         } else {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(related) { item in
@@ -730,12 +951,20 @@ struct VideoDetailView: View {
 
     @MainActor
     private func startLoad() {
-        generation &+= 1
+        generation += 1
         let requestGeneration = generation
+        let accountID = currentUserID
+        let credentialRevision = videoCredentialRevision
         detailTask?.cancel()
         relatedTask?.cancel()
+        relatedTask = nil
+        relatedTaskID = nil
         playbackTask?.cancel()
+        playbackTask = nil
+        playbackTaskID = nil
         subscriptionTask?.cancel()
+        subscriptionTask = nil
+        subscriptionTaskID = nil
         clearPlaybackObservers()
         videoPlayer?.pause()
         videoPlayer?.replaceCurrentItem(with: nil)
@@ -743,7 +972,7 @@ struct VideoDetailView: View {
         detail = nil
         related = []
         detailError = nil
-        relatedError = nil
+        relatedPhase = .notRequested
         playbackError = nil
         subscriptionError = nil
         unavailableResolutions = []
@@ -752,9 +981,13 @@ struct VideoDetailView: View {
         selectedSection = .knowledge
         detailTask = Task { @MainActor in
             do {
-                let loaded = try await loadDetail()
+                let loaded = try await loadDetail(
+                    expectedCredentialRevision: credentialRevision
+                )
                 try Task.checkCancellation()
-                guard generation == requestGeneration else { return }
+                guard generation == requestGeneration,
+                      videoAccountMatches(accountID, credentialRevision)
+                else { return }
                 detail = loaded
                 selectedResolution = VideoResolutionPolicy.preferred(
                     playbackQuality,
@@ -762,19 +995,25 @@ struct VideoDetailView: View {
                 ) ?? playbackQuality.resolution
             } catch is CancellationError {
             } catch {
-                guard generation == requestGeneration else { return }
+                guard generation == requestGeneration,
+                      videoAccountMatches(accountID, credentialRevision)
+                else { return }
                 detailError = error.localizedDescription
             }
-            guard generation == requestGeneration else { return }
+            guard generation == requestGeneration,
+                  videoAccountMatches(accountID, credentialRevision)
+            else { return }
             detailTask = nil
         }
-        startRelatedLoad(generation: requestGeneration)
     }
 
     @MainActor
     private func startRelatedLoad(generation requestGeneration: Int) {
+        guard generation == requestGeneration, relatedTask == nil else { return }
         relatedTask?.cancel()
-        relatedError = nil
+        let taskID = UUID()
+        relatedTaskID = taskID
+        relatedPhase = .loading
         relatedTask = Task { @MainActor in
             do {
                 let loaded = switch resource {
@@ -782,18 +1021,20 @@ struct VideoDetailView: View {
                 case let .video(id): try await library.related(toVideo: id)
                 }
                 try Task.checkCancellation()
-                guard generation == requestGeneration else { return }
+                guard generation == requestGeneration, relatedTaskID == taskID else { return }
                 related = loaded
+                relatedPhase = .loaded
                 if loaded.isEmpty, selectedSection == .related {
                     selectedSection = .knowledge
                 }
             } catch is CancellationError {
             } catch {
-                guard generation == requestGeneration else { return }
-                relatedError = error.localizedDescription
+                guard generation == requestGeneration, relatedTaskID == taskID else { return }
+                relatedPhase = .failed(error.localizedDescription)
             }
-            guard generation == requestGeneration else { return }
+            guard generation == requestGeneration, relatedTaskID == taskID else { return }
             relatedTask = nil
+            relatedTaskID = nil
         }
     }
 
@@ -803,24 +1044,26 @@ struct VideoDetailView: View {
         let requestGeneration = generation
         let requestedResolution = selectedResolution
         let previousPlayer = videoPlayer
+        let taskID = UUID()
         playbackTask?.cancel()
+        playbackTaskID = taskID
         playbackError = nil
         isPreparingPlayback = true
         playbackTask = Task { @MainActor in
             do {
                 let source = try await playbackSource(for: detail)
                 try Task.checkCancellation()
-                guard generation == requestGeneration else { return }
+                guard generation == requestGeneration, playbackTaskID == taskID else { return }
                 let playbackURL = try await VideoPlaybackURLResolver.resolve(source.url)
                 try Task.checkCancellation()
-                guard generation == requestGeneration else { return }
+                guard generation == requestGeneration, playbackTaskID == taskID else { return }
                 songPlayer.pauseForVideo()
                 let player = AVPlayer(playerItem: AVPlayerItem(url: playbackURL))
                 if let position = previousPlayer?.currentTime(), position.isNumeric {
                     _ = await player.seek(to: position, toleranceBefore: .zero, toleranceAfter: .zero)
                 }
                 try Task.checkCancellation()
-                guard generation == requestGeneration else { return }
+                guard generation == requestGeneration, playbackTaskID == taskID else { return }
                 let shouldPlay = previousPlayer?.timeControlStatus != .paused
                 clearPlaybackObservers()
                 previousPlayer?.pause()
@@ -834,15 +1077,16 @@ struct VideoDetailView: View {
                 if shouldPlay { player.play() }
             } catch is CancellationError {
             } catch {
-                guard generation == requestGeneration else { return }
+                guard generation == requestGeneration, playbackTaskID == taskID else { return }
                 if previousPlayer != nil, let previousResolution {
                     selectedResolution = previousResolution
                 }
                 playbackError = error.localizedDescription
                 isPreparingPlayback = false
             }
-            guard generation == requestGeneration else { return }
+            guard generation == requestGeneration, playbackTaskID == taskID else { return }
             playbackTask = nil
+            playbackTaskID = nil
         }
     }
 
@@ -945,62 +1189,152 @@ struct VideoDetailView: View {
     @MainActor
     private func toggleSubscription() {
         guard let detail, !isUpdatingSubscription else { return }
-        guard currentUserID != nil else {
+        guard let accountID = currentUserID else {
             onLogin()
             return
         }
         let requestGeneration = generation
+        let credentialRevision = library.transport.credentialSnapshotValue().revision
         let desired = !detail.isSubscribed
+        let taskID = UUID()
         isUpdatingSubscription = true
         subscriptionError = nil
+        subscriptionTaskID = taskID
         subscriptionTask = Task { @MainActor in
+            defer {
+                if subscriptionTaskID == taskID {
+                    isUpdatingSubscription = false
+                    subscriptionTask = nil
+                    subscriptionTaskID = nil
+                }
+            }
             do {
                 switch resource {
-                case let .mv(id): try await library.setMVSubscribed(id, subscribed: desired)
-                case let .video(id): try await library.setVideoSubscribed(id, subscribed: desired)
+                case let .mv(id):
+                    try await library.setMVSubscribed(
+                        id,
+                        subscribed: desired,
+                        expectedCredentialRevision: credentialRevision
+                    )
+                case let .video(id):
+                    try await library.setVideoSubscribed(
+                        id,
+                        subscribed: desired,
+                        expectedCredentialRevision: credentialRevision
+                    )
                 }
                 try Task.checkCancellation()
-                guard generation == requestGeneration else { return }
+                guard subscriptionTaskID == taskID,
+                      generation == requestGeneration,
+                      currentUserID == accountID,
+                      library.transport.credentialSnapshotValue().revision == credentialRevision
+                else { return }
                 self.detail = detail.settingSubscribed(desired)
                 onSubscriptionChanged(resource, desired)
             } catch is CancellationError {
             } catch {
-                guard generation == requestGeneration else { return }
+                guard subscriptionTaskID == taskID,
+                      generation == requestGeneration,
+                      currentUserID == accountID,
+                      library.transport.credentialSnapshotValue().revision == credentialRevision
+                else { return }
                 subscriptionError = error.localizedDescription
-                await confirmDetailAfterUnknownResult(generation: requestGeneration)
+                await confirmDetailAfterUnknownResult(
+                    desired: desired,
+                    accountID: accountID,
+                    credentialRevision: credentialRevision,
+                    generation: requestGeneration,
+                    taskID: taskID
+                )
             }
-            guard generation == requestGeneration else { return }
-            isUpdatingSubscription = false
-            subscriptionTask = nil
         }
     }
 
     @MainActor
-    private func confirmDetailAfterUnknownResult(generation requestGeneration: Int) async {
-        await library.invalidateCachedResponses(in: [.detail])
-        guard let refreshed = try? await loadDetail(), generation == requestGeneration else { return }
-        detail = refreshed
+    private func confirmDetailAfterUnknownResult(
+        desired: Bool,
+        accountID: Int64,
+        credentialRevision: UInt64,
+        generation requestGeneration: Int,
+        taskID: UUID
+    ) async {
+        do {
+            let refreshed = try await loadDetail(
+                refreshCache: true,
+                applyingOverride: false,
+                expectedCredentialRevision: credentialRevision
+            )
+            try Task.checkCancellation()
+            guard subscriptionTaskID == taskID,
+                  generation == requestGeneration,
+                  currentUserID == accountID,
+                  library.transport.credentialSnapshotValue().revision == credentialRevision
+            else { return }
+            detail = refreshed
+            if refreshed.isSubscribed == desired {
+                subscriptionError = nil
+                onSubscriptionChanged(resource, desired)
+            }
+        } catch is CancellationError {
+        } catch {
+        }
     }
 
-    private func loadDetail() async throws -> VideoPageDetail {
+    private func loadDetail(
+        refreshCache: Bool = false,
+        applyingOverride: Bool = true,
+        expectedCredentialRevision: UInt64? = nil
+    ) async throws -> VideoPageDetail {
         let loaded: VideoPageDetail = switch resource {
-        case let .mv(id): .mv(try await library.mvDetail(id: id))
-        case let .video(id): .video(try await library.videoDetail(id: id))
+        case let .mv(id): .mv(try await library.mvDetail(
+            id: id,
+            refreshCache: refreshCache,
+            expectedCredentialRevision: expectedCredentialRevision
+        ))
+        case let .video(id): .video(try await library.videoDetail(
+            id: id,
+            refreshCache: refreshCache,
+            expectedCredentialRevision: expectedCredentialRevision
+        ))
         }
-        return subscriptionOverride.map { loaded.settingSubscribed($0) } ?? loaded
+        return applyingOverride ? subscriptionOverride.map { loaded.settingSubscribed($0) } ?? loaded : loaded
+    }
+
+    private var videoCredentialRevision: UInt64? {
+        currentUserID.map { _ in library.transport.credentialSnapshotValue().revision }
+    }
+
+    private var videoAccountIdentity: String {
+        "\(currentUserID ?? 0):\(videoCredentialRevision ?? 0)"
+    }
+
+    private func videoAccountMatches(_ accountID: Int64?, _ credentialRevision: UInt64?) -> Bool {
+        currentUserID == accountID
+            && credentialRevision.map {
+                library.transport.credentialSnapshotValue().revision == $0
+            } != false
     }
 
     @MainActor
     private func stopAndCancel() {
-        generation &+= 1
+        generation += 1
         detailTask?.cancel()
+        detailTask = nil
         relatedTask?.cancel()
+        relatedTask = nil
+        relatedTaskID = nil
         playbackTask?.cancel()
+        playbackTask = nil
+        playbackTaskID = nil
         subscriptionTask?.cancel()
+        subscriptionTask = nil
+        subscriptionTaskID = nil
         clearPlaybackObservers()
         videoPlayer?.pause()
         videoPlayer?.replaceCurrentItem(with: nil)
         videoPlayer = nil
+        isPreparingPlayback = false
+        isUpdatingSubscription = false
     }
 
     private var selectableResolutions: [Int] {
@@ -1118,7 +1452,7 @@ private struct VideoCommentsSection: View {
             emojiPictureIDs = (try? await library.commentEmojiPictureIDs()) ?? [:]
         }
         .onDisappear {
-            generation &+= 1
+            generation += 1
             loadTask?.cancel()
             loadTask = nil
         }
@@ -1128,7 +1462,7 @@ private struct VideoCommentsSection: View {
     private func startLoad(reset: Bool) {
         guard reset || loadTask == nil else { return }
         if reset {
-            generation &+= 1
+            generation += 1
             loadTask?.cancel()
             comments = []
             nextOffset = 0
@@ -1149,16 +1483,13 @@ private struct VideoCommentsSection: View {
                 )
                 try Task.checkCancellation()
                 guard generation == requestGeneration else { return }
-                if reset {
-                    comments = page.comments
-                } else {
-                    let existing = Set(comments.map(\.id))
-                    comments += page.comments.filter { !existing.contains($0.id) }
-                }
+                var seen = Set(reset ? [] : comments.map(\.id))
+                let additions = page.comments.filter { seen.insert($0.id).inserted }
+                if reset { comments = additions } else { comments += additions }
                 totalCount = page.totalCount
                 nextOffset = page.nextOffset
                 beforeTime = page.beforeTime
-                hasMore = page.hasMore && page.nextOffset > offset && !page.comments.isEmpty
+                hasMore = page.hasMore && page.nextOffset > offset && !additions.isEmpty
             } catch is CancellationError {
             } catch {
                 guard generation == requestGeneration else { return }

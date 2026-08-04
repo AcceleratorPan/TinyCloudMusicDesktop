@@ -1,0 +1,40 @@
+{
+  "code": 200,
+  "data": {
+    "meetTimeOverview": {
+      "playTime": 3600,
+      "playCount": 12
+    },
+    "annualPlaylist": {
+      "items": [
+        {
+          "songId": 9001,
+          "songName": "Synthetic legacy track",
+          "artistId": 9002,
+          "artistName": "Synthetic artist",
+          "playCount": 3
+        }
+      ]
+    },
+    "unknownFixtureField": "synthetic decoder contract only"
+  },
+  "middleYearFixture": {
+    "code": 200,
+    "data": {
+      "meetTimeOverview": {
+        "playTime": 7200,
+        "playCount": 42
+      },
+      "annualSong": {
+        "songId": 9101,
+        "songName": "Synthetic middle-year track",
+        "artistNameList": "Middle Artist",
+        "playCnt": 6,
+        "unknownSongField": "ignored"
+      },
+      "unknownMiddleYearField": {
+        "value": "ignored"
+      }
+    }
+  }
+}

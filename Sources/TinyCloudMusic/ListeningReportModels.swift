@@ -138,7 +138,14 @@ enum ListeningReportDecoder {
         _ root: [String: Any],
         decodeSong: SongDecoder
     ) -> [ListeningRankEntry] {
-        for values in rankArrays(in: root) {
+        rankEntries(scanReport(in: root, scalarValuesAllowed: false).rankArrays, decodeSong: decodeSong)
+    }
+
+    private static func rankEntries(
+        _ rankArrays: [[[String: Any]]],
+        decodeSong: SongDecoder
+    ) -> [ListeningRankEntry] {
+        for values in rankArrays {
             var seen = Set<Int64>()
             let entries = values.compactMap { value -> ListeningRankEntry? in
                 guard let song = song(in: value, decodeSong: decodeSong),
@@ -163,14 +170,13 @@ enum ListeningReportDecoder {
         decodeSong: SongDecoder
     ) -> ListeningReport {
         let data = root.object("data").isEmpty ? root : root.object("data")
-        let title = shortText(value(in: data, keys: ["title", "reportTitle", "dateDesc", "timeRange"]))
-            ?? defaultTitle
+        let scan = scanReport(in: data)
         return ListeningReport(
             period: period,
-            title: title,
-            metrics: metrics(in: data),
-            topSongs: rankEntries(data, decodeSong: decodeSong),
-            previousEndTime: previousCursor(in: data)?.endTime
+            title: shortText(scan.title) ?? defaultTitle,
+            metrics: metrics(from: scan),
+            topSongs: rankEntries(scan.rankArrays, decodeSong: decodeSong),
+            previousEndTime: previousCursor(scan.previousEndTime)?.endTime
         )
     }
 
@@ -238,24 +244,32 @@ enum ListeningReportDecoder {
         (.albums, ["albumCount", "totalAlbumCount"]),
         (.days, ["dayCount", "listenDays"])
     ]
+    private static let titleKeys = ["title", "reportTitle", "dateDesc", "timeRange"]
+    private static let durationKeys = ["totalDuration", "listenDuration"]
+    private static let previousEndTimeKeys = ["previousEndTime", "prevEndTime", "preEndTime", "preReportEndTime"]
+    private static let rankArrayKeys = ["songDTOs", "songItems", "topSongs", "songs", "items"]
     private static let rankContainerKeys = Set(["songDTOs", "songItems", "topSongBlock", "topSongs", "songs"])
 
-    private static func metrics(in root: [String: Any]) -> [ListeningMetric] {
+    private struct ReportScan {
+        var title: Any?
+        var duration: Any?
+        var realtimeDuration: Any?
+        var metricValues: [ListeningMetricKind: Any] = [:]
+        var previousEndTime: Any?
+        var rankArrays: [[[String: Any]]] = []
+    }
+
+    private static func metrics(from scan: ReportScan) -> [ListeningMetric] {
         var result: [ListeningMetric] = []
-        if let value = realtimeDurationValue(in: root)
-            ?? metricValue(value(in: root, keys: ["totalDuration", "listenDuration"])) {
+        if let value = secondsFromMinutes(scan.realtimeDuration).map(ListeningMetricValue.number)
+            ?? metricValue(scan.duration) {
             result.append(ListeningMetric(kind: .duration, value: value))
         }
         result += metricKeys.compactMap { kind, keys in
-            guard let value = metricValue(value(in: root, keys: keys)) else { return nil }
+            guard let value = metricValue(scan.metricValues[kind]) else { return nil }
             return ListeningMetric(kind: kind, value: value)
         }
         return result
-    }
-
-    private static func realtimeDurationValue(in root: [String: Any]) -> ListeningMetricValue? {
-        secondsFromMinutes(root.object("listenTimeDistributionBlock")["playDuration"])
-            .map(ListeningMetricValue.number)
     }
 
     private static func metricValue(_ raw: Any?) -> ListeningMetricValue? {
@@ -312,10 +326,6 @@ enum ListeningReportDecoder {
         }
     }
 
-    private static func rankArrays(in root: [String: Any]) -> [[[String: Any]]] {
-        findArrays(in: root, keys: ["songDTOs", "songItems", "topSongs", "songs", "items"])
-    }
-
     private static func durationSeconds(in value: [String: Any]) -> Int64? {
         guard var duration = int64(
             in: value,
@@ -325,11 +335,8 @@ enum ListeningReportDecoder {
         return duration
     }
 
-    private static func previousCursor(in root: [String: Any]) -> ListeningReportCursor? {
-        guard let value = int64Value(value(
-            in: root,
-            keys: ["previousEndTime", "prevEndTime", "preEndTime", "preReportEndTime"]
-        )) else { return nil }
+    private static func previousCursor(_ raw: Any?) -> ListeningReportCursor? {
+        guard let value = int64Value(raw) else { return nil }
         let oldest = Int64(Date(timeIntervalSince1970: 946_684_800).timeIntervalSince1970 * 1_000)
         let newest = Int64(Date().addingTimeInterval(366 * 24 * 60 * 60).timeIntervalSince1970 * 1_000)
         guard (oldest...newest).contains(value) else { return nil }
@@ -345,26 +352,67 @@ enum ListeningReportDecoder {
         return date
     }
 
-    private static func findArrays(
+    private static func scanReport(
+        in root: [String: Any],
+        scalarValuesAllowed: Bool = true
+    ) -> ReportScan {
+        var result = ReportScan()
+        if scalarValuesAllowed {
+            result.realtimeDuration = root.object("listenTimeDistributionBlock")["playDuration"]
+        }
+        scanReport(in: root, scalarValuesAllowed: scalarValuesAllowed, into: &result)
+        return result
+    }
+
+    private static func scanReport(
         in raw: Any,
-        keys: [String],
-        depth: Int = 0
-    ) -> [[[String: Any]]] {
-        guard depth < 5 else { return [] }
-        var result: [[[String: Any]]] = []
+        depth: Int = 0,
+        scalarValuesAllowed: Bool,
+        into result: inout ReportScan
+    ) {
+        guard depth < 5 else { return }
         if let object = raw as? [String: Any] {
-            for key in keys {
-                if let values = object[key] as? [[String: Any]], !values.isEmpty { result.append(values) }
+            let rankEntry = isRankEntry(object)
+            if scalarValuesAllowed, !rankEntry {
+                if result.title == nil { result.title = firstValue(in: object, keys: titleKeys) }
+                if result.duration == nil { result.duration = firstValue(in: object, keys: durationKeys) }
+                for (kind, keys) in metricKeys where result.metricValues[kind] == nil {
+                    result.metricValues[kind] = firstValue(in: object, keys: keys)
+                }
+                if result.previousEndTime == nil {
+                    result.previousEndTime = firstValue(in: object, keys: previousEndTimeKeys)
+                }
             }
-            for child in object.values {
-                result += findArrays(in: child, keys: keys, depth: depth + 1)
+            for key in rankArrayKeys {
+                if let values = object[key] as? [[String: Any]], !values.isEmpty {
+                    result.rankArrays.append(values)
+                }
+            }
+            for (key, child) in object {
+                scanReport(
+                    in: child,
+                    depth: depth + 1,
+                    scalarValuesAllowed: scalarValuesAllowed
+                        && !rankEntry
+                        && !rankContainerKeys.contains(key),
+                    into: &result
+                )
             }
         } else if let array = raw as? [Any] {
             for child in array {
-                result += findArrays(in: child, keys: keys, depth: depth + 1)
+                scanReport(
+                    in: child,
+                    depth: depth + 1,
+                    scalarValuesAllowed: scalarValuesAllowed,
+                    into: &result
+                )
             }
         }
-        return result
+    }
+
+    private static func firstValue(in object: [String: Any], keys: [String]) -> Any? {
+        for key in keys where object[key] != nil { return object[key] }
+        return nil
     }
 
     private static func value(
@@ -530,7 +578,7 @@ enum AnnualListeningReportDecoder {
         let value = data.object("annualSinger")
         guard let name = text(value["singerName"]) else { return nil }
         let artistID = text(value["artistId"]) ?? ""
-        let tracks = value.array("top5Songs").enumerated().compactMap { index, raw -> AnnualReportTrack? in
+        let tracks = value.array("top5Songs").prefix(5).enumerated().compactMap { index, raw -> AnnualReportTrack? in
             var item = raw
             item["songName"] = raw["name"]
             item["artistId"] = artistID
@@ -636,7 +684,7 @@ enum AnnualListeningReportDecoder {
         let singer = value.object("newSingerDetailDto")
         var items: [AnnualReportItem] = []
         if let artist = artistItem(singer, defaultNote: "新遇见") { items.append(artist) }
-        items += value.array("top5SingerDetails").compactMap {
+        items += value.array("top5SingerDetails").prefix(5).compactMap {
             artistItem($0, defaultNote: "常听歌手")
         }
         guard !metrics.isEmpty || !details.isEmpty || !items.isEmpty else { return nil }
@@ -662,12 +710,16 @@ enum AnnualListeningReportDecoder {
 
     private static func monthlyListening(_ data: [String: Any]) -> AnnualReportSection? {
         let items = data.object("monthListenDTO").array("monthListenItemList")
-        let months = items.compactMap { item -> AnnualReportItem? in
+        var seenMonths = Set<Int64>()
+        var months: [AnnualReportItem] = []
+        for item in items {
+            if months.count == 12 { break }
             guard let month = int64(item, ["monthIndex"]), (1...12).contains(month),
-                  let seconds = int64(item, ["playTime"]), seconds >= 0
-            else { return nil }
+                  let seconds = int64(item, ["playTime"]), seconds >= 0,
+                  seenMonths.insert(month).inserted
+            else { continue }
             let artistID = int64(item, ["artistId", "singerId", "id"]).flatMap { $0 > 0 ? $0 : nil }
-            return .month(
+            months.append(.month(
                 month: Int(month),
                 durationSeconds: seconds,
                 artistID: artistID,
@@ -675,7 +727,7 @@ enum AnnualListeningReportDecoder {
                 imageURL: firstURL(item, [
                     "artistPicUrl", "singerPicUrl", "img1v1Url", "songCoverPicUrl", "albumCoverUrl", "picUrl"
                 ])
-            )
+            ))
         }
         guard !months.isEmpty else { return nil }
         return section(id: "months", title: "月度足迹", items: months)
@@ -790,11 +842,15 @@ enum AnnualListeningReportDecoder {
     }
 
     private static func monthlyMoods(_ data: [String: Any]) -> AnnualReportSection? {
-        let items = data.object("spiritDto").array("spiritItems").compactMap { item -> AnnualReportItem? in
+        var seenMonths = Set<Int64>()
+        var items: [AnnualReportItem] = []
+        for item in data.object("spiritDto").array("spiritItems") {
+            if items.count == 12 { break }
             guard let month = int64(item, ["playMonth"]), (1...12).contains(month),
-                  let mood = text(item["moodTag"]), mood != "空窗期"
-            else { return nil }
-            return .mood(month: Int(month), name: mood, genre: text(item["genreTagName"]))
+                  let mood = text(item["moodTag"]), mood != "空窗期",
+                  seenMonths.insert(month).inserted
+            else { continue }
+            items.append(.mood(month: Int(month), name: mood, genre: text(item["genreTagName"])))
         }
         guard !items.isEmpty else { return nil }
         return section(id: "monthly-moods", title: "十二个月的心情", items: items)

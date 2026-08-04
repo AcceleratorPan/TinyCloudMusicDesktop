@@ -97,5 +97,16 @@ struct CredentialStoreTests {
     func validation() throws {
         try verifyCredentialValidation()
     }
+
+    @Test("An isolated missing item maps to guest without folding other store errors")
+    func missingItemSnapshotState() throws {
+        let store = CredentialStore(service: "TinyCloudMusicTests.\(UUID())")
+        defer { try? store.delete() }
+        #expect(try store.loadSnapshotState() == .guest)
+
+        let credentials = try SessionCredentials(cookie: "MUSIC_A=test", musicU: "", deviceID: "DEVICE")
+        try store.save(credentials)
+        #expect(try store.loadSnapshotState() == .authenticated(credentials))
+    }
 }
 #endif

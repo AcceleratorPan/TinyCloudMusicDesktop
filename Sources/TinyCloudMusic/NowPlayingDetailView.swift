@@ -5,8 +5,6 @@ struct PlaybackControls: View {
     var showsQueueOptions = true
     var isDislikePending = false
     var onDislike: (() -> Void)? = nil
-    @State private var isScrubbing = false
-    @State private var scrubPosition: TimeInterval = 0
 
     var body: some View {
         VStack(spacing: 8) {
@@ -38,7 +36,7 @@ struct PlaybackControls: View {
 
                 PlayerIconButton(
                     symbol: "backward.fill",
-                    label: player.position > 3 ? "从头播放" : "上一首",
+                    label: "上一首或从头播放",
                     isDisabled: !player.canGoPrevious
                 ) {
                     player.previous()
@@ -112,26 +110,7 @@ struct PlaybackControls: View {
                 }
             }
 
-            HStack(spacing: 10) {
-                Text(timeText(displayedPosition))
-                    .frame(width: 38, alignment: .trailing)
-                Slider(
-                    value: positionBinding,
-                    in: 0...max(player.duration, 1),
-                    onEditingChanged: updateScrubbing
-                )
-                .disabled(player.currentSong == nil)
-                .accessibilityLabel("播放进度")
-                .accessibilityValue("\(timeText(displayedPosition))，总时长 \(timeText(player.duration))")
-                Text(timeText(player.duration))
-                    .frame(width: 38, alignment: .leading)
-            }
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(.secondary)
-        }
-        .onChange(of: player.currentSong?.id) { _, _ in
-            isScrubbing = false
-            scrubPosition = 0
+            PlaybackProgress(player: player)
         }
         .disabled(player.isControlInteractionLocked)
     }
@@ -146,6 +125,36 @@ struct PlaybackControls: View {
         if player.isLoadingHeartMode { return "正在开启心动模式" }
         if let message = player.heartModeErrorMessage { return "心动模式失败：\(message)，点按重试" }
         return player.isHeartModeEnabled ? "关闭心动模式" : "开启心动模式"
+    }
+
+}
+
+private struct PlaybackProgress: View {
+    @Bindable var player: PlayerController
+    @State private var isScrubbing = false
+    @State private var scrubPosition: TimeInterval = 0
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(timeText(displayedPosition))
+                .frame(width: 38, alignment: .trailing)
+            Slider(
+                value: positionBinding,
+                in: 0...max(player.duration, 1),
+                onEditingChanged: updateScrubbing
+            )
+            .disabled(player.currentSong == nil)
+            .accessibilityLabel("播放进度")
+            .accessibilityValue("\(timeText(displayedPosition))，总时长 \(timeText(player.duration))")
+            Text(timeText(player.duration))
+                .frame(width: 38, alignment: .leading)
+        }
+        .font(.caption.monospacedDigit())
+        .foregroundStyle(.secondary)
+        .onChange(of: player.currentSong?.id) { _, _ in
+            isScrubbing = false
+            scrubPosition = 0
+        }
     }
 
     private var displayedPosition: TimeInterval {
@@ -176,6 +185,26 @@ struct PlaybackControls: View {
         guard seconds.isFinite, seconds >= 0 else { return "0:00" }
         let value = Int(seconds)
         return String(format: "%d:%02d", value / 60, value % 60)
+    }
+}
+
+struct NowPlayingLikeButton: View {
+    @Bindable var model: AppModel
+    let songID: Int64
+
+    var body: some View {
+        let isPending = model.pendingMutations.contains(.songLike(songID))
+        PlayerIconButton(
+            symbol: model.likedSongIDs.contains(songID) ? "heart.fill" : "heart",
+            label: isPending
+                ? "正在更新喜欢状态"
+                : (model.likedSongIDs.contains(songID) ? "取消喜欢" : "喜欢"),
+            isActive: model.likedSongIDs.contains(songID),
+            isDisabled: isPending,
+            badge: isPending ? "…" : nil
+        ) {
+            model.toggleSongLiked(songID)
+        }
     }
 }
 
@@ -229,7 +258,6 @@ struct NowPlayingDetailView: View {
                 .padding(.top, 66)
         }
         .frame(minWidth: 780, idealWidth: 940)
-        .frame(height: 720)
         .sheet(isPresented: $showingSheets) {
             if let song = player.currentSong, let library = model.knowledgeLibrary {
                 MusicSheetsView(song: song, library: library, model: model)
@@ -388,7 +416,12 @@ struct NowPlayingDetailView: View {
                 .accessibilityElement(children: .combine)
 
                 if let accountID = model.currentUserID, let library = model.library {
-                    FirstListenMemorySection(songID: song.id, accountID: accountID, library: library)
+                    FirstListenMemorySection(
+                        songID: song.id,
+                        accountID: accountID,
+                        credentialRevision: credentialRevision,
+                        library: library
+                    )
                 }
             }
 
@@ -398,13 +431,7 @@ struct NowPlayingDetailView: View {
 
             HStack(spacing: 10) {
                 if !song.isPodcastEpisode {
-                    PlayerIconButton(
-                        symbol: model.likedSongIDs.contains(song.id) ? "heart.fill" : "heart",
-                        label: model.likedSongIDs.contains(song.id) ? "取消喜欢" : "喜欢",
-                        isActive: model.likedSongIDs.contains(song.id)
-                    ) {
-                        model.toggleSongLiked(song.id)
-                    }
+                    NowPlayingLikeButton(model: model, songID: song.id)
                     CommentButton(songID: song.id, library: model.library) {
                         close()
                         model.open(.comments(song.id))
@@ -426,6 +453,14 @@ struct NowPlayingDetailView: View {
                 .frame(maxWidth: 304)
                 .padding(.bottom, 24)
         }
+    }
+
+    private var credentialRevision: UInt64 {
+        if let session = model.session {
+            _ = session.state
+            return session.credentialRevision
+        }
+        return model.library?.transport.credentialSnapshotValue().revision ?? 0
     }
 
     @ViewBuilder
@@ -508,6 +543,7 @@ struct NowPlayingDetailView: View {
 private struct FirstListenMemorySection: View {
     let songID: Int64
     let accountID: Int64
+    let credentialRevision: UInt64
     let library: LiveMusicLibrary
 
     @State private var memory: FirstListenMemory?
@@ -536,13 +572,25 @@ private struct FirstListenMemorySection: View {
                 .accessibilityElement(children: .combine)
             }
         }
-        .task(id: FirstListenTaskID(songID: songID, accountID: accountID)) {
+        .task(id: FirstListenTaskID(
+            songID: songID,
+            accountID: accountID,
+            credentialRevision: credentialRevision
+        )) {
             memory = nil
             do {
-                let loaded = try await library.firstListenMemory(songID: songID)
+                let loaded = try await library.firstListenMemory(
+                    songID: songID,
+                    expectedCredentialRevision: credentialRevision
+                )
                 try Task.checkCancellation()
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    throw CancellationError()
+                }
                 memory = loaded
+            } catch is CancellationError {
             } catch {
+                guard !Task.isCancelled else { return }
                 memory = nil
             }
         }
@@ -552,6 +600,7 @@ private struct FirstListenMemorySection: View {
 private struct FirstListenTaskID: Hashable {
     let songID: Int64
     let accountID: Int64
+    let credentialRevision: UInt64
 }
 
 private struct NowPlayingToolbarButtonStyle: ButtonStyle {
@@ -620,6 +669,7 @@ private struct PlaybackQueueView: View {
                     .id(item.id)
                     .accessibilityLabel(item.song.map { "\($0.name)，\($0.artistsDisplay)" } ?? "正在加载歌曲")
                     .accessibilityValue(player.currentSongID == item.id ? "当前歌曲" : item.song?.durationText ?? "")
+                    .onAppear { player.resolveQueueSongs(visibleAround: item.id) }
                 }
                 .listStyle(.inset)
                 .onAppear { scrollToCurrent(using: proxy) }

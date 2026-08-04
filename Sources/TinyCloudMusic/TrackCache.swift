@@ -93,16 +93,32 @@ final actor TrackCache {
         let size: Int64
     }
 
+    private struct AudioFileInfo {
+        let fileExtension: String
+        let size: Int64
+    }
+
+    private static let supportedExtensions = ["mp3", "flac", "ogg", "wav", "m4a"]
+
     nonisolated let directory: URL
     private let download: Download
     private let byteLimit: Int64
     private let limiter: TrackCacheDownloadLimiter
+    private let minimumTrimInterval: TimeInterval
+    private let beforeReadyLookup: (@Sendable () async -> Void)?
     private var inFlight: [Key: InFlight] = [:]
+    private var pins: [String: Int] = [:]
+    private var pendingDeletePaths: Set<String> = []
+    private var lastTrimAt: Date?
+    private(set) var trimRunCount = 0
+    private(set) var migrationCount = 0
 
     init(
         directory: URL? = nil,
         byteLimit: Int64 = 2 * 1_024 * 1_024 * 1_024,
         maximumConcurrentDownloads: Int = 2,
+        minimumTrimInterval: TimeInterval = 30,
+        beforeReadyLookup: (@Sendable () async -> Void)? = nil,
         download: @escaping Download = { try await URLSession.shared.download(for: $0) }
     ) {
         self.directory = directory
@@ -110,6 +126,8 @@ final actor TrackCache {
                 .appending(path: "TinyCloudMusic", directoryHint: .isDirectory)
                 .appending(path: "StreamCache", directoryHint: .isDirectory)
         self.byteLimit = max(0, byteLimit)
+        self.minimumTrimInterval = max(0, minimumTrimInterval)
+        self.beforeReadyLookup = beforeReadyLookup
         limiter = TrackCacheDownloadLimiter(limit: maximumConcurrentDownloads)
         self.download = download
     }
@@ -128,26 +146,62 @@ final actor TrackCache {
             .appending(path: "\(songID).\(Self.fileExtension(for: quality))", directoryHint: .notDirectory)
     }
 
-    nonisolated func readyFile(for songID: Int64, quality: String = "standard") -> URL? {
-        readyCachedFile(for: songID, quality: quality)?.url
+    nonisolated func manages(_ url: URL) -> Bool {
+        url.standardizedFileURL.path.hasPrefix(directory.standardizedFileURL.path + "/")
     }
 
-    nonisolated func readyCachedFile(for songID: Int64, quality: String = "standard") -> CachedFile? {
-        let url = fileURL(for: songID, quality: quality)
-        guard Self.isValidAudioFile(url),
-              let data = try? Data(contentsOf: Self.metadataURL(for: url)),
-              let metadata = try? PropertyListDecoder().decode(Metadata.self, from: data),
-              metadata.size > 0,
-              (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) == metadata.size
+    func readyFile(for songID: Int64, quality: String = "standard") async -> URL? {
+        await readyCachedFile(for: songID, quality: quality)?.url
+    }
+
+    func readyPinnedFile(for songID: Int64, quality: String = "standard") async -> URL? {
+        if let beforeReadyLookup { await beforeReadyLookup() }
+        guard !Task.isCancelled,
+              let url = readyCachedFileNow(for: songID, quality: quality)?.url,
+              pin(url)
         else { return nil }
-        return CachedFile(url: url, fileExtension: metadata.fileExtension, size: metadata.size)
+        return url
+    }
+
+    func readyCachedFile(for songID: Int64, quality: String = "standard") async -> CachedFile? {
+        if let beforeReadyLookup { await beforeReadyLookup() }
+        guard !Task.isCancelled else { return nil }
+        return readyCachedFileNow(for: songID, quality: quality)
+    }
+
+    private func readyCachedFileNow(for songID: Int64, quality: String) -> CachedFile? {
+        let quality = Self.cacheComponent(quality)
+        for url in candidateURLs(for: songID, quality: quality) {
+            let path = url.standardizedFileURL.path
+            guard !pendingDeletePaths.contains(path),
+                  let info = Self.audioFileInfo(at: url)
+            else { continue }
+
+            let metadataURL = Self.metadataURL(for: url)
+            let hasMetadata = FileManager.default.fileExists(atPath: metadataURL.path)
+            if hasMetadata {
+                guard let data = try? Data(contentsOf: metadataURL),
+                      let metadata = try? PropertyListDecoder().decode(Metadata.self, from: data),
+                      metadata.size == info.size,
+                      metadata.fileExtension == info.fileExtension
+                else { continue }
+            }
+            guard let cached = migrateIfNeeded(
+                url,
+                songID: songID,
+                quality: quality,
+                info: info,
+                needsMetadata: !hasMetadata
+            ) else { continue }
+            touch(cached.url)
+            return cached
+        }
+        return nil
     }
 
     func cache(songID: Int64, quality: String = "standard", from source: URL) async throws -> URL {
         try Task.checkCancellation()
-        if let ready = readyFile(for: songID, quality: quality) {
-            touch(ready)
-            trimCache(keeping: protectedPaths(including: ready))
+        if let ready = await readyFile(for: songID, quality: quality) {
             return ready
         }
         let key = Key(songID: songID, quality: Self.cacheComponent(quality))
@@ -203,19 +257,21 @@ final actor TrackCache {
         return result
     }
 
-    nonisolated func finalize(
+    func finalize(
         _ downloadedFile: URL,
         for songID: Int64,
         quality: String = "standard",
         storedExtension: String? = nil
     ) throws -> URL {
-        try Self.finalize(
+        let url = try Self.finalize(
             downloadedFile,
             for: songID,
             quality: quality,
             storedExtension: storedExtension,
             directory: directory
         )
+        finalizeInstall(url)
+        return url
     }
 
     func storeCopy(
@@ -223,8 +279,8 @@ final actor TrackCache {
         for songID: Int64,
         quality: String,
         fileExtension: String
-    ) throws -> CachedFile {
-        if let cached = readyCachedFile(for: songID, quality: quality) { return cached }
+    ) async throws -> CachedFile {
+        if let cached = await readyCachedFile(for: songID, quality: quality) { return cached }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let staged = directory.appending(path: "\(UUID().uuidString).cache-part")
         defer { try? FileManager.default.removeItem(at: staged) }
@@ -236,10 +292,72 @@ final actor TrackCache {
             storedExtension: fileExtension,
             directory: directory
         )
-        guard let cached = readyCachedFile(for: songID, quality: quality) else {
+        guard let cached = await readyCachedFile(for: songID, quality: quality) else {
             throw TrackCacheError.emptyDownload
         }
+        finalizeInstall(cached.url)
         return cached
+    }
+
+    @discardableResult
+    func pin(_ url: URL) -> Bool {
+        let path = url.standardizedFileURL.path
+        guard path.hasPrefix(directory.standardizedFileURL.path + "/"),
+              !pendingDeletePaths.contains(path),
+              FileManager.default.fileExists(atPath: path)
+        else { return false }
+        pins[path, default: 0] += 1
+        return true
+    }
+
+    func unpin(_ url: URL) {
+        let path = url.standardizedFileURL.path
+        guard let count = pins[path] else { return }
+        if count > 1 {
+            pins[path] = count - 1
+            return
+        }
+        pins[path] = nil
+        guard pendingDeletePaths.remove(path) != nil else { return }
+        try? FileManager.default.removeItem(at: url)
+        try? FileManager.default.removeItem(at: Self.metadataURL(for: url))
+    }
+
+    func clear() async throws {
+        let tasks = inFlight.values.map(\.task)
+        tasks.forEach { $0.cancel() }
+        for task in tasks { _ = await task.result }
+
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        let files = enumerator.compactMap { value -> URL? in
+            guard let url = value as? URL,
+                  (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+            else { return nil }
+            return url
+        }
+        for url in files {
+            let path = url.standardizedFileURL.path
+            if pins[path] != nil {
+                pendingDeletePaths.insert(path)
+                try? FileManager.default.removeItem(at: Self.metadataURL(for: url))
+                continue
+            }
+            if url.pathExtension == "plist" {
+                let audioPath = url.deletingPathExtension().standardizedFileURL.path
+                if pins[audioPath] != nil {
+                    pendingDeletePaths.insert(audioPath)
+                }
+            }
+            if FileManager.default.fileExists(atPath: path) {
+                try FileManager.default.removeItem(at: url)
+            }
+        }
+        lastTrimAt = nil
     }
 
     private static func download(
@@ -293,11 +411,11 @@ final actor TrackCache {
         directory: URL
     ) throws -> URL {
         let fileManager = FileManager.default
-        guard isValidAudioFile(downloadedFile) else { throw TrackCacheError.emptyDownload }
+        guard let info = audioFileInfo(at: downloadedFile) else { throw TrackCacheError.emptyDownload }
         let quality = cacheComponent(quality)
         let finalURL = directory
             .appending(path: quality, directoryHint: .isDirectory)
-            .appending(path: "\(songID).\(fileExtension(for: quality))", directoryHint: .notDirectory)
+            .appending(path: "\(songID).\(info.fileExtension)", directoryHint: .notDirectory)
         let partURL = finalURL.appendingPathExtension("\(UUID().uuidString).part")
 
         try fileManager.createDirectory(at: finalURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -316,8 +434,8 @@ final actor TrackCache {
         do {
             try fileManager.moveItem(at: partURL, to: finalURL)
             let metadata = Metadata(
-                fileExtension: normalizedExtension(storedExtension ?? finalURL.pathExtension),
-                size: Int64(stagedValues.fileSize ?? 0)
+                fileExtension: info.fileExtension,
+                size: info.size
             )
             try PropertyListEncoder().encode(metadata).write(to: metadataURL, options: .atomic)
         } catch {
@@ -332,8 +450,7 @@ final actor TrackCache {
         guard let request = inFlight[key], request.id == requestID else { return }
         inFlight[key] = nil
         if case let .success(url) = result {
-            touch(url)
-            trimCache(keeping: protectedPaths(including: url))
+            finalizeInstall(url)
         }
         request.waiters.values.forEach { $0.resume(with: result) }
     }
@@ -351,16 +468,76 @@ final actor TrackCache {
         continuation.resume(throwing: CancellationError())
     }
 
+    private func candidateURLs(for songID: Int64, quality: String) -> [URL] {
+        let preferred = fileURL(for: songID, quality: quality)
+        return [preferred] + Self.supportedExtensions
+            .filter { $0 != preferred.pathExtension }
+            .map { preferred.deletingPathExtension().appendingPathExtension($0) }
+    }
+
+    private func migrateIfNeeded(
+        _ url: URL,
+        songID: Int64,
+        quality: String,
+        info: AudioFileInfo,
+        needsMetadata: Bool
+    ) -> CachedFile? {
+        let target = directory
+            .appending(path: quality, directoryHint: .isDirectory)
+            .appending(path: "\(songID).\(info.fileExtension)", directoryHint: .notDirectory)
+        let requiresMove = url.standardizedFileURL != target.standardizedFileURL
+        guard !pendingDeletePaths.contains(target.standardizedFileURL.path) else { return nil }
+        if !requiresMove, !needsMetadata {
+            return CachedFile(url: url, fileExtension: info.fileExtension, size: info.size)
+        }
+
+        let fileManager = FileManager.default
+        let oldMetadataURL = Self.metadataURL(for: url)
+        do {
+            if requiresMove {
+                guard !fileManager.fileExists(atPath: target.path) else { return nil }
+                try fileManager.moveItem(at: url, to: target)
+            }
+            let metadata = Metadata(fileExtension: info.fileExtension, size: info.size)
+            try PropertyListEncoder().encode(metadata).write(
+                to: Self.metadataURL(for: target),
+                options: .atomic
+            )
+            if requiresMove { try? fileManager.removeItem(at: oldMetadataURL) }
+            migrationCount += 1
+            return CachedFile(url: target, fileExtension: info.fileExtension, size: info.size)
+        } catch {
+            if requiresMove,
+               fileManager.fileExists(atPath: target.path),
+               !fileManager.fileExists(atPath: url.path) {
+                try? fileManager.moveItem(at: target, to: url)
+            }
+            return nil
+        }
+    }
+
     private func protectedPaths(including url: URL) -> Set<String> {
-        Set(inFlight.keys.map { fileURL(for: $0.songID, quality: $0.quality).standardizedFileURL.path })
+        Set(inFlight.keys.flatMap { key in
+            candidateURLs(for: key.songID, quality: key.quality).map(\.standardizedFileURL.path)
+        })
+            .union(pins.keys)
             .union([url.standardizedFileURL.path])
+    }
+
+    private func finalizeInstall(_ url: URL) {
+        touch(url)
+        trimCacheIfNeeded(keeping: protectedPaths(including: url))
     }
 
     private func touch(_ url: URL) {
         try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
     }
 
-    private func trimCache(keeping protectedPaths: Set<String>) {
+    private func trimCacheIfNeeded(keeping protectedPaths: Set<String>) {
+        let now = Date()
+        guard lastTrimAt.map({ now.timeIntervalSince($0) >= minimumTrimInterval }) ?? true else { return }
+        lastTrimAt = now
+        trimRunCount += 1
         guard let enumerator = FileManager.default.enumerator(
             at: directory,
             includingPropertiesForKeys: [
@@ -372,7 +549,7 @@ final actor TrackCache {
         // ponytail: scan on completed fills; add a persistent index only if cache size makes this measurable.
         let files = enumerator.compactMap { value -> CacheFile? in
             guard let url = value as? URL,
-                  ["mp3", "flac"].contains(url.pathExtension.lowercased()),
+                  Self.supportedExtensions.contains(url.pathExtension.lowercased()),
                   let values = try? url.resourceValues(forKeys: [
                       .isRegularFileKey, .fileSizeKey, .contentAccessDateKey, .contentModificationDateKey
                   ]),
@@ -405,26 +582,37 @@ final actor TrackCache {
             || mimeType.hasSuffix("+json")
     }
 
-    private nonisolated static func isValidAudioFile(_ url: URL) -> Bool {
+    private nonisolated static func audioFileInfo(at url: URL) -> AudioFileInfo? {
         guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
               values.isRegularFile == true,
-              (values.fileSize ?? 0) >= 2,
+              let fileSize = values.fileSize,
+              fileSize >= 2,
               let handle = try? FileHandle(forReadingFrom: url)
-        else { return false }
+        else { return nil }
         defer { try? handle.close() }
-        guard let bytes = try? handle.read(upToCount: 16).map({ [UInt8]($0) }) else { return false }
+        guard let bytes = try? handle.read(upToCount: 16).map({ [UInt8]($0) }) else { return nil }
 
         func matches(_ value: String, at offset: Int = 0) -> Bool {
             let pattern = Array(value.utf8)
             guard bytes.count >= offset + pattern.count else { return false }
             return bytes[offset..<(offset + pattern.count)].elementsEqual(pattern)
         }
-        return matches("ID3")
-            || matches("fLaC")
-            || matches("OggS")
-            || matches("RIFF")
-            || matches("ftyp", at: 4)
-            || (bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0)
+        if matches("fLaC") {
+            return AudioFileInfo(fileExtension: "flac", size: Int64(fileSize))
+        }
+        if matches("ID3") || (bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0) {
+            return AudioFileInfo(fileExtension: "mp3", size: Int64(fileSize))
+        }
+        if matches("OggS") {
+            return AudioFileInfo(fileExtension: "ogg", size: Int64(fileSize))
+        }
+        if matches("RIFF"), matches("WAVE", at: 8) {
+            return AudioFileInfo(fileExtension: "wav", size: Int64(fileSize))
+        }
+        if matches("ftyp", at: 4), ["M4A ", "M4B ", "M4P "].contains(where: { matches($0, at: 8) }) {
+            return AudioFileInfo(fileExtension: "m4a", size: Int64(fileSize))
+        }
+        return nil
     }
 
     private nonisolated static func cacheComponent(_ quality: String) -> String {
@@ -444,8 +632,4 @@ final actor TrackCache {
         url.appendingPathExtension("metadata.plist")
     }
 
-    private nonisolated static func normalizedExtension(_ value: String) -> String {
-        let value = value.lowercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
-        return value.isEmpty ? "mp3" : String(value.prefix(10))
-    }
 }

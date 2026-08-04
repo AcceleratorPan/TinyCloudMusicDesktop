@@ -57,7 +57,7 @@ extension LiveMusicRepository {
             ]
         }
 
-        let root = try decodedJSONObject(try await request(endpoint, payload: payload, cache: .search))
+        let root = try await request(endpoint, payload: payload, cache: .search)
         try Task.checkCancellation()
         return decodeSearchPage(root, scope: scope, offset: offset)
     }

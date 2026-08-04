@@ -1,34 +1,230 @@
+import Observation
 import SwiftUI
+
+@MainActor
+@Observable
+final class RecommendationHistoryLoader {
+    private(set) var dates: [RecommendationHistoryDate] = []
+    var selectedDate: RecommendationHistoryDate? {
+        get { requestState.selectedDate }
+        set { requestState.selectedDate = newValue }
+    }
+    private(set) var songs: [Song] = []
+    private(set) var acceptedDatesRevision = 0
+    private(set) var isLoadingDates = true
+    private(set) var isLoadingSongs = false
+    private(set) var datesError: String?
+    private(set) var songsError: String?
+
+    private var requestState = RecommendationHistoryRequestState()
+    @ObservationIgnored private var loadedAccountID: Int64?
+    @ObservationIgnored private var loadedCredentialRevision: UInt64?
+    @ObservationIgnored private var datesRequest = LatestRecommendationRequest()
+    @ObservationIgnored private var songsRequest = LatestRecommendationRequest()
+    @ObservationIgnored private var datesTask: Task<Void, Never>?
+    @ObservationIgnored private var songsTask: Task<Void, Never>?
+    @ObservationIgnored private var datesTaskID: UUID?
+    @ObservationIgnored private var songsTaskID: UUID?
+
+    var hasDatesTask: Bool { datesTask != nil }
+    var hasSongsTask: Bool { songsTask != nil }
+
+    isolated deinit {
+        datesTask?.cancel()
+        songsTask?.cancel()
+    }
+
+    @discardableResult
+    func startDates(
+        accountID: Int64?,
+        credentialRevision: UInt64,
+        reload: Int,
+        currentAccountID: @escaping @MainActor @Sendable () -> Int64?,
+        currentCredentialRevision: @escaping @MainActor @Sendable () -> UInt64,
+        load: @escaping @MainActor @Sendable (Bool) async throws -> [RecommendationHistoryDate]
+    ) -> Task<Void, Never>? {
+        datesTask?.cancel()
+        datesTask = nil
+        datesTaskID = nil
+        songsTask?.cancel()
+        songsTask = nil
+        songsTaskID = nil
+        _ = songsRequest.begin()
+
+        let generation = datesRequest.begin()
+        let force = requestState.beginDates(reload: reload)
+        songs = []
+        songsError = nil
+        isLoadingSongs = false
+        if loadedAccountID != accountID || loadedCredentialRevision != credentialRevision {
+            loadedAccountID = accountID
+            loadedCredentialRevision = credentialRevision
+            dates = []
+        }
+        datesError = nil
+        guard let accountID else {
+            isLoadingDates = false
+            return nil
+        }
+
+        isLoadingDates = true
+        let taskID = UUID()
+        datesTaskID = taskID
+        datesTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.datesTaskID == taskID {
+                    self.datesTask = nil
+                    self.datesTaskID = nil
+                    self.isLoadingDates = false
+                }
+            }
+            do {
+                let loaded = try await load(force)
+                try Task.checkCancellation()
+                guard self.datesRequest.accepts(
+                    generation,
+                    accountID: accountID,
+                    credentialRevision: credentialRevision,
+                    currentAccountID: currentAccountID(),
+                    currentCredentialRevision: currentCredentialRevision()
+                ) else { return }
+                self.dates = loaded
+                self.requestState.acceptDates(loaded, force: force)
+                self.acceptedDatesRevision &+= 1
+            } catch is CancellationError {
+            } catch {
+                guard self.datesRequest.accepts(
+                    generation,
+                    accountID: accountID,
+                    credentialRevision: credentialRevision,
+                    currentAccountID: currentAccountID(),
+                    currentCredentialRevision: currentCredentialRevision()
+                ) else { return }
+                self.datesError = error.localizedDescription
+            }
+        }
+        return datesTask
+    }
+
+    @discardableResult
+    func startSongs(
+        accountID: Int64?,
+        credentialRevision: UInt64,
+        currentAccountID: @escaping @MainActor @Sendable () -> Int64?,
+        currentCredentialRevision: @escaping @MainActor @Sendable () -> UInt64,
+        load: @escaping @MainActor @Sendable (
+            RecommendationHistoryDate,
+            [RecommendationHistoryDate],
+            Bool
+        ) async throws -> [Song]
+    ) -> Task<Void, Never>? {
+        songsTask?.cancel()
+        songsTask = nil
+        songsTaskID = nil
+        let generation = songsRequest.begin()
+        guard let date = requestState.selectedDate,
+              let accountID,
+              loadedAccountID == accountID,
+              loadedCredentialRevision == credentialRevision
+        else {
+            songs = []
+            songsError = nil
+            isLoadingSongs = false
+            return nil
+        }
+
+        let availableDates = dates
+        let force = requestState.consumeDetailForce(for: date)
+        songs = []
+        songsError = nil
+        isLoadingSongs = true
+        let taskID = UUID()
+        songsTaskID = taskID
+        songsTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.songsTaskID == taskID {
+                    self.songsTask = nil
+                    self.songsTaskID = nil
+                    self.isLoadingSongs = false
+                }
+            }
+            do {
+                let loaded = try await load(date, availableDates, force)
+                try Task.checkCancellation()
+                guard self.songsRequest.accepts(
+                    generation,
+                    accountID: accountID,
+                    credentialRevision: credentialRevision,
+                    currentAccountID: currentAccountID(),
+                    currentCredentialRevision: currentCredentialRevision()
+                ), self.requestState.selectedDate == date else { return }
+                self.songs = loaded
+            } catch is CancellationError {
+            } catch {
+                guard self.songsRequest.accepts(
+                    generation,
+                    accountID: accountID,
+                    credentialRevision: credentialRevision,
+                    currentAccountID: currentAccountID(),
+                    currentCredentialRevision: currentCredentialRevision()
+                ), self.requestState.selectedDate == date else { return }
+                self.songsError = error.localizedDescription
+            }
+        }
+        return songsTask
+    }
+
+    func cancel() {
+        _ = datesRequest.begin()
+        _ = songsRequest.begin()
+        datesTask?.cancel()
+        songsTask?.cancel()
+        datesTask = nil
+        songsTask = nil
+        datesTaskID = nil
+        songsTaskID = nil
+        isLoadingDates = false
+        isLoadingSongs = false
+    }
+
+}
 
 struct RecommendationHistoryView: View {
     @Bindable var model: AppModel
     let library: LiveMusicLibrary
     @Bindable var player: PlayerController
 
-    @State private var dates: [RecommendationHistoryDate] = []
-    @State private var selectedDate: RecommendationHistoryDate?
-    @State private var songs: [Song] = []
-    @State private var isLoadingDates = true
-    @State private var isLoadingSongs = false
-    @State private var datesError: String?
-    @State private var songsError: String?
+    @State private var loader = RecommendationHistoryLoader()
     @State private var reload = 0
-    @State private var datesRequest = LatestRecommendationRequest()
-    @State private var songsRequest = LatestRecommendationRequest()
 
     var body: some View {
+        @Bindable var loader = loader
+        let revision = credentialRevision
+        let datesIdentity = HistoryDatesTaskID(
+            accountID: model.currentUserID,
+            credentialRevision: revision,
+            reload: reload
+        )
+        let detailIdentity = HistoryDetailTaskID(
+            accountID: model.currentUserID,
+            credentialRevision: revision,
+            acceptedDatesRevision: loader.acceptedDatesRevision,
+            date: loader.selectedDate?.value
+        )
         Group {
-            if isLoadingDates {
+            if loader.isLoadingDates {
                 loading("正在加载历史日期…")
-            } else if let datesError {
+            } else if let datesError = loader.datesError {
                 unavailable("历史日期加载失败", message: datesError)
-            } else if dates.isEmpty {
+            } else if loader.dates.isEmpty {
                 ContentUnavailableView("暂无历史日推", systemImage: "calendar.badge.exclamationmark")
             } else {
                 VStack(spacing: 0) {
                     HStack(spacing: 12) {
-                        Picker("推荐日期", selection: $selectedDate) {
-                            ForEach(dates) { date in
+                        Picker("推荐日期", selection: $loader.selectedDate) {
+                            ForEach(loader.dates) { date in
                                 Text(date.value).tag(Optional(date))
                             }
                         }
@@ -52,87 +248,73 @@ struct RecommendationHistoryView: View {
                 }
             }
         }
-        .task(id: HistoryDatesTaskID(accountID: model.currentUserID, reload: reload)) {
-            await loadDates(force: reload > 0)
+        .task(id: datesIdentity) {
+            guard let task = loader.startDates(
+                accountID: datesIdentity.accountID,
+                credentialRevision: datesIdentity.credentialRevision,
+                reload: datesIdentity.reload,
+                currentAccountID: { model.currentUserID },
+                currentCredentialRevision: { library.transport.credentialSnapshotValue().revision },
+                load: { force in
+                    try await library.recommendationHistoryDates(
+                        forceRefresh: force,
+                        expectedCredentialRevision: datesIdentity.credentialRevision
+                    )
+                }
+            ) else { return }
+            await withTaskCancellationHandler {
+                await task.value
+            } onCancel: {
+                task.cancel()
+            }
         }
-        .task(id: HistoryDetailTaskID(
-            accountID: model.currentUserID,
-            date: selectedDate?.value,
-            reload: reload
-        )) {
-            await loadSongs()
+        .task(id: detailIdentity) {
+            guard let task = loader.startSongs(
+                accountID: detailIdentity.accountID,
+                credentialRevision: detailIdentity.credentialRevision,
+                currentAccountID: { model.currentUserID },
+                currentCredentialRevision: { library.transport.credentialSnapshotValue().revision },
+                load: { date, dates, force in
+                    try await library.historicalDailyRecommendations(
+                        on: date,
+                        availableDates: dates,
+                        forceRefresh: force,
+                        expectedCredentialRevision: detailIdentity.credentialRevision
+                    )
+                }
+            ) else { return }
+            await withTaskCancellationHandler {
+                await task.value
+            } onCancel: {
+                task.cancel()
+            }
         }
+        .onDisappear { loader.cancel() }
         .navigationTitle("历史日推")
     }
 
     @ViewBuilder
     private var detail: some View {
-        if isLoadingSongs {
+        if loader.isLoadingSongs {
             loading("正在加载推荐歌曲…")
-        } else if let songsError {
+        } else if let songsError = loader.songsError {
             unavailable("历史日推不可用", message: songsError)
-        } else if let selectedDate, songs.isEmpty {
+        } else if let selectedDate = loader.selectedDate, loader.songs.isEmpty {
             ContentUnavailableView(
                 "当天暂无推荐",
                 systemImage: "music.note",
                 description: Text(selectedDate.value)
             )
-        } else if let selectedDate {
+        } else if let selectedDate = loader.selectedDate {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     Text("\(selectedDate.value) 每日推荐")
                         .font(.title2.weight(.semibold))
-                    SongList(songs: songs, model: model, player: player, showsHeading: false)
+                    SongList(songs: loader.songs, model: model, player: player, showsHeading: false)
                 }
                 .padding(.horizontal, 28)
                 .padding(.vertical, 22)
             }
-        }
-    }
-
-    @MainActor
-    private func loadDates(force: Bool) async {
-        let accountID = model.currentUserID
-        let generation = datesRequest.begin()
-        dates = []
-        selectedDate = nil
-        songs = []
-        datesError = nil
-        songsError = nil
-        guard accountID != nil else { return }
-        isLoadingDates = true
-        defer { if datesRequest.accepts(generation) { isLoadingDates = false } }
-        do {
-            if force { await library.invalidateCachedResponses(in: [.library]) }
-            let loaded = try await library.recommendationHistoryDates()
-            try Task.checkCancellation()
-            guard datesRequest.accepts(generation), model.currentUserID == accountID else { return }
-            dates = loaded
-            selectedDate = loaded.first
-        } catch is CancellationError {
-        } catch {
-            guard datesRequest.accepts(generation), model.currentUserID == accountID else { return }
-            datesError = error.localizedDescription
-        }
-    }
-
-    @MainActor
-    private func loadSongs() async {
-        guard let date = selectedDate, let accountID = model.currentUserID else { return }
-        let generation = songsRequest.begin()
-        songs = []
-        songsError = nil
-        isLoadingSongs = true
-        defer { if songsRequest.accepts(generation) { isLoadingSongs = false } }
-        do {
-            let loaded = try await library.historicalDailyRecommendations(on: date, availableDates: dates)
-            try Task.checkCancellation()
-            guard songsRequest.accepts(generation), model.currentUserID == accountID, selectedDate == date else { return }
-            songs = loaded
-        } catch is CancellationError {
-        } catch {
-            guard songsRequest.accepts(generation), model.currentUserID == accountID, selectedDate == date else { return }
-            songsError = error.localizedDescription
         }
     }
 
@@ -153,15 +335,25 @@ struct RecommendationHistoryView: View {
             Button("重试") { reload &+= 1 }
         }
     }
+
+    private var credentialRevision: UInt64 {
+        if let session = model.session {
+            _ = session.state // Credential commits publish state with the snapshot revision.
+            return session.credentialRevision
+        }
+        return library.transport.credentialSnapshotValue().revision
+    }
 }
 
 private struct HistoryDatesTaskID: Hashable {
     let accountID: Int64?
+    let credentialRevision: UInt64
     let reload: Int
 }
 
 private struct HistoryDetailTaskID: Hashable {
     let accountID: Int64?
+    let credentialRevision: UInt64
+    let acceptedDatesRevision: Int
     let date: String?
-    let reload: Int
 }

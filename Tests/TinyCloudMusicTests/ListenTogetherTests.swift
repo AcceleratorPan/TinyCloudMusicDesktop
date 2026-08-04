@@ -90,6 +90,69 @@ struct ListenTogetherTests {
         )) == nil)
     }
 
+    @Test("Playlist, member, ignored-ID, and existing wire bounds reject inconsistent input")
+    func structuralValidation() throws {
+        #expect((try? ListenTogetherPlaylistCommand(
+            commandType: .replace,
+            userID: 42,
+            version: 1,
+            playMode: .orderLoop,
+            anchorSongID: 1,
+            anchorPosition: 0,
+            randomList: [1, 2],
+            displayList: [1, 2]
+        )) != nil)
+        #expect((try? ListenTogetherPlaylistCommand(
+            commandType: .replace,
+            userID: 42,
+            version: 1,
+            randomList: [1, 1],
+            displayList: [1, 2]
+        )) == nil)
+        #expect((try? ListenTogetherPlaylistCommand(
+            commandType: .replace,
+            userID: 42,
+            version: 1,
+            playMode: .random,
+            anchorSongID: 1,
+            anchorPosition: 1,
+            randomList: [2, 1],
+            displayList: [1, 2]
+        )) == nil)
+        #expect((try? ListenTogetherResponseDecoder.authoritativeState(from: Data(#"""
+        {"code":200,"data":{"playList":{"displayList":[1,2],"randomList":[1,3],"anchorPosition":-1}}}
+        """#.utf8))) == nil)
+        #expect((try? ListenTogetherResponseDecoder.authoritativeState(from: Data(#"""
+        {"code":200,"data":{"playList":{"displayList":[1,2],"randomList":[1,2],"anchorSongId":1,"anchorPosition":1}}}
+        """#.utf8))) == nil)
+        #expect((try? ListenTogetherResponseDecoder.authoritativeState(from: Data(#"""
+        {"code":200,"data":{"playList":{"displayList":[1,2],"randomList":[1,2],"anchorSongId":1}}}
+        """#.utf8))) == nil)
+        #expect((try? ListenTogetherResponseDecoder.authoritativeState(from: Data(#"""
+        {"code":200,"data":{"playList":{"displayList":[1,2],"randomList":[1,2]}}}
+        """#.utf8))) == nil)
+        #expect((try? ListenTogetherResponseDecoder.room(
+            from: Data(#"{"code":200,"data":{"roomInfo":{"roomId":"room","chatRoomId":"chat","creatorId":42,"roomUsers":[{"userId":42,"nickname":"A"},{"userId":42,"nickname":"B"}]}}}"#.utf8),
+            currentUserID: 42
+        )) == nil)
+        #expect((try? ListenTogetherResponseDecoder.remoteEvent(
+            from: #"{"content":{"type":20008,"content":{"ignoreUserIds":[42,42]}}}"#
+        )) == nil)
+
+        let event = #"{"content":{"type":20002,"content":{}}}"#
+        let bounded = event + String(repeating: " ", count: 65_536 - event.utf8.count)
+        #expect(try ListenTogetherResponseDecoder.remoteEvent(from: bounded) == .memberJoined)
+        #expect((try? ListenTogetherResponseDecoder.remoteEvent(from: bounded + " ")) == nil)
+
+        func nestedEvent(depth: Int) throws -> String {
+            var value: [String: Any] = ["type": 20_002, "content": [:]]
+            for _ in 0..<depth { value = ["content": value] }
+            return String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
+        }
+        #expect(try ListenTogetherResponseDecoder.remoteEvent(from: nestedEvent(depth: 7)) == .memberJoined)
+        #expect((try? ListenTogetherResponseDecoder.remoteEvent(from: nestedEvent(depth: 8))) == nil)
+    }
+
     @Test("Authoritative state decodes playlist and playback snapshot")
     func authoritativeState() throws {
         let decoded = try ListenTogetherResponseDecoder.authoritativeState(from: Data(#"""
@@ -100,6 +163,7 @@ struct ListenTogetherTests {
               "displayList": [2671812705, 1],
               "randomList": [1, 2671812705],
               "anchorSongId": 2671812705,
+              "anchorPosition": 0,
               "version": 4
             },
             "playCommand": {
@@ -133,6 +197,7 @@ struct ListenTogetherTests {
             "playlist": {
               "displayList": {"changed": true, "result": ["2671812705"], "rcmdSongIds": []},
               "randomList": null,
+              "anchorPosition": -1,
               "version": [{"userId": 42, "version": 1}]
             },
             "playCommand": null
@@ -165,6 +230,36 @@ struct ListenTogetherTests {
         ))
     }
 
+    @Test("Authenticated mutations keep the credential revision captured before send")
+    func mutationCredentialFence() async {
+        RevisionFenceProtocol.reset()
+        let gate = RevisionFenceGate()
+        let snapshot = CredentialSnapshot(.guest)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RevisionFenceProtocol.self]
+        let service = LiveListenTogetherService(transport: EAPITransport(
+            session: URLSession(configuration: configuration),
+            credentialSnapshot: snapshot,
+            beforeSendingRequest: { await gate.wait() }
+        ))
+
+        let request = Task {
+            _ = try await service.createRoom(expectedCredentialRevision: 0)
+        }
+        await gate.waitUntilBlocked()
+        _ = snapshot.store(.guest)
+        await gate.open()
+
+        do {
+            try await request.value
+            Issue.record("The stale mutation unexpectedly sent")
+        } catch is CredentialRevisionMismatch {
+        } catch {
+            Issue.record("The stale mutation failed with \(error)")
+        }
+        #expect(RevisionFenceProtocol.requestCount == 0)
+    }
+
     @Test("Native realtime SDK and chatroom ABI are bundled")
     @MainActor
     func realtimeSDKIsBundled() throws {
@@ -193,21 +288,25 @@ struct ListenTogetherTests {
 
         let credentials = try listenTogetherLiveCredentials(role: "member")
         let transport = EAPITransport(cookie: credentials.cookie, musicU: credentials.musicU)
+        let expectedCredentialRevision = transport.credentialSnapshotValue().revision
         let userID = try await listenTogetherLiveUserID(transport: transport)
         let first = try await listenTogetherTokenMetadata(
             transport: transport,
             userID: userID,
-            host: "https://interface3.music.163.com"
+            host: "https://interface3.music.163.com",
+            expectedCredentialRevision: expectedCredentialRevision
         )
         let second = try await listenTogetherTokenMetadata(
             transport: transport,
             userID: userID,
-            host: "https://interface3.music.163.com"
+            host: "https://interface3.music.163.com",
+            expectedCredentialRevision: expectedCredentialRevision
         )
         let standardHost = try await listenTogetherTokenMetadata(
             transport: transport,
             userID: userID,
-            host: "https://interface.music.163.com"
+            host: "https://interface.music.163.com",
+            expectedCredentialRevision: expectedCredentialRevision
         )
 
         print(
@@ -292,39 +391,229 @@ struct ListenTogetherTests {
 struct ListenTogetherControllerLifecycleTests {
     @Test("Rapid create and logout perform one write and clean the created room")
     func roomOperationsAreExclusive() async {
-        ListenTogetherControllerProtocol.reset([
-            "/weapi/listen/together/status/get": .init(Self.notInRoom),
-            "/eapi/listen/together/room/create": .init(Self.room, delay: 0.15),
-            "/api/middle/im/token/get": .init(Self.credentials),
-            "/eapi/listen/together/end/v2": .init(Self.succeeded)
-        ])
+        ListenTogetherControllerProtocol.reset(Self.operationStubs)
+        let gate = NonCooperativeRequestGate()
         let realtime = ListenTogetherRealtimeStub()
-        let controller = makeController(realtime: realtime)
+        let controller = makeController(realtime: realtime, requestGate: gate)
         controller.updateAccount(42)
-        await wait { controller.currentUserID == 42 }
+        await wait { controller.currentUserID == 42 && controller.errorMessage != nil }
 
+        await gate.arm(afterPassing: 1)
         let firstCreate = Task { @MainActor in await controller.createRoom() }
-        await wait {
-            ListenTogetherControllerProtocol.requestCount(for: "/eapi/listen/together/room/create") == 1
-        }
+        #expect(await gate.waitUntilEntered(1))
+        #expect(controller.room?.id == "room-1")
         firstCreate.cancel()
         let duplicateCreate = Task { @MainActor in await controller.createRoom() }
-        let firstLogout = Task { @MainActor in await controller.prepareForLogout() }
-        let duplicateLogout = Task { @MainActor in await controller.prepareForLogout() }
+        var logoutCompletions = 0
+        let firstLogout = Task { @MainActor in
+            await controller.prepareForLogout()
+            logoutCompletions += 1
+        }
+        let duplicateLogout = Task { @MainActor in
+            await controller.prepareForLogout()
+            logoutCompletions += 1
+        }
+        #expect(await gate.waitUntilCancelled(1))
+        try? await Task.sleep(for: .milliseconds(20))
+        #expect(logoutCompletions == 0)
+        #expect(ListenTogetherControllerProtocol.requestCount(
+            for: "/eapi/listen/together/end/v2"
+        ) == 0)
+
+        await gate.release(1)
         await firstCreate.value
         await duplicateCreate.value
         await firstLogout.value
         await duplicateLogout.value
 
+        #expect(logoutCompletions == 2)
         #expect(ListenTogetherControllerProtocol.requestCount(
             for: "/eapi/listen/together/room/create"
         ) == 1)
         #expect(ListenTogetherControllerProtocol.requestCount(
             for: "/eapi/listen/together/end/v2"
         ) == 1)
-        #expect(realtime.connectCount == 1)
+        #expect(realtime.connectCount == 0)
         #expect(controller.room == nil)
         #expect(controller.currentUserID == nil)
+        #expect(!controller.requiresShutdown)
+    }
+
+    @Test("Account B waits for a non-cooperative A create")
+    func accountSwitchWaitsForCreate() async throws {
+        try await assertAccountSwitchWaits(for: .create)
+    }
+
+    @Test("Account B waits for a non-cooperative A join")
+    func accountSwitchWaitsForJoin() async throws {
+        try await assertAccountSwitchWaits(for: .join)
+    }
+
+    @Test("Account B waits for a non-cooperative A token request")
+    func accountSwitchWaitsForToken() async throws {
+        try await assertAccountSwitchWaits(for: .token)
+    }
+
+    @Test("Rapid A to B to C waits for the retired A operation")
+    func rapidAccountSwitchWaitsForRetiredOperation() async {
+        ListenTogetherControllerProtocol.reset(Self.operationStubs)
+        let gate = NonCooperativeRequestGate()
+        let credentialSnapshot = CredentialSnapshot(.guest)
+        let realtime = ListenTogetherRealtimeStub()
+        let controller = makeController(
+            realtime: realtime,
+            requestGate: gate,
+            credentialSnapshot: credentialSnapshot
+        )
+        controller.updateAccount(42)
+        await wait { controller.currentUserID == 42 && controller.errorMessage != nil }
+
+        await gate.arm()
+        let stalled = Task { @MainActor in await controller.createRoom() }
+        #expect(await gate.waitUntilEntered(1))
+        _ = credentialSnapshot.store(.guest)
+        controller.updateAccount(84)
+        #expect(await gate.waitUntilCancelled(1))
+        _ = credentialSnapshot.store(.guest)
+        controller.updateAccount(126)
+        try? await Task.sleep(for: .milliseconds(20))
+        #expect(controller.currentUserID == 42)
+        #expect(ListenTogetherControllerProtocol.requestCount(
+            for: "/weapi/listen/together/status/get"
+        ) == 1)
+
+        await gate.release(1)
+        await stalled.value
+        await wait { controller.currentUserID == 126 && controller.errorMessage != nil }
+        #expect(controller.currentUserID == 126)
+        #expect(ListenTogetherControllerProtocol.requestCount(
+            for: "/weapi/listen/together/status/get"
+        ) == 2)
+        #expect(realtime.connectCount == 0)
+        await controller.shutdown()
+    }
+
+    @Test("Sleep cancels a non-cooperative room operation before returning")
+    func sleepDoesNotWaitForRoomOperation() async {
+        ListenTogetherControllerProtocol.reset(Self.operationStubs)
+        let gate = NonCooperativeRequestGate()
+        let realtime = ListenTogetherRealtimeStub()
+        let controller = makeController(realtime: realtime, requestGate: gate)
+        controller.updateAccount(42)
+        await wait { controller.currentUserID == 42 && controller.errorMessage != nil }
+
+        await gate.arm(afterPassing: 1)
+        let create = Task { @MainActor in await controller.createRoom() }
+        #expect(await gate.waitUntilEntered(1))
+        var finished = false
+        let sleep = Task { @MainActor in
+            await controller.sleep()
+            finished = true
+        }
+        #expect(await gate.waitUntilCancelled(1))
+        await wait { finished }
+        let finishedBeforeRelease = finished
+
+        await gate.release(1)
+        await create.value
+        await sleep.value
+        #expect(finishedBeforeRelease)
+        #expect(realtime.connectCount == 0)
+        await controller.shutdown()
+    }
+
+    @Test("Sleep fences a delayed exit fallback status response")
+    func sleepFencesExitFallbackStatus() async {
+        ListenTogetherControllerProtocol.reset([
+            "/weapi/listen/together/status/get": .init(Self.inRoom),
+            "/eapi/listen/together/end/v2": .init(#"{"code":200,"data":{"result":false}}"#)
+        ])
+        let gate = NonCooperativeRequestGate()
+        let controller = makeController(
+            realtime: ListenTogetherRealtimeStub(),
+            requestGate: gate
+        )
+        controller.updateAccount(42)
+        await wait {
+            if case .recoveryAvailable = controller.phase { return true }
+            return false
+        }
+
+        await gate.arm(afterPassing: 1)
+        let end = Task { @MainActor in await controller.endRoom() }
+        #expect(await gate.waitUntilEntered(1))
+        let sleep = Task { @MainActor in await controller.sleep() }
+        #expect(await gate.waitUntilCancelled(1))
+        await sleep.value
+        #expect(controller.isSleeping)
+
+        await gate.release(1)
+        await end.value
+        #expect(controller.isSleeping)
+        #expect(controller.room?.id == "room-1")
+        #expect(controller.errorMessage == nil)
+    }
+
+    @Test("Logout waits for a cancelled non-cooperative room operation")
+    func logoutWaitsForRoomOperation() async {
+        ListenTogetherControllerProtocol.reset(Self.operationStubs)
+        let gate = NonCooperativeRequestGate()
+        let realtime = ListenTogetherRealtimeStub()
+        let controller = makeController(realtime: realtime, requestGate: gate)
+        controller.updateAccount(42)
+        await wait { controller.currentUserID == 42 && controller.errorMessage != nil }
+
+        await gate.arm(afterPassing: 1)
+        let create = Task { @MainActor in await controller.createRoom() }
+        #expect(await gate.waitUntilEntered(1))
+        var finished = false
+        let logout = Task { @MainActor in
+            await controller.prepareForLogout()
+            finished = true
+        }
+        #expect(await gate.waitUntilCancelled(1))
+        try? await Task.sleep(for: .milliseconds(20))
+        #expect(!finished)
+        #expect(ListenTogetherControllerProtocol.requestCount(
+            for: "/eapi/listen/together/end/v2"
+        ) == 0)
+
+        await gate.release(1)
+        await create.value
+        await logout.value
+        #expect(finished)
+        #expect(controller.currentUserID == nil)
+        #expect(realtime.connectCount == 0)
+        #expect(!controller.requiresShutdown)
+    }
+
+    @Test("Shutdown drains a retired non-cooperative room operation")
+    func shutdownDrainsRetiredRoomOperation() async {
+        ListenTogetherControllerProtocol.reset(Self.operationStubs)
+        let gate = NonCooperativeRequestGate()
+        let realtime = ListenTogetherRealtimeStub()
+        let controller = makeController(realtime: realtime, requestGate: gate)
+        controller.updateAccount(42)
+        await wait { controller.currentUserID == 42 && controller.errorMessage != nil }
+
+        await gate.arm()
+        let create = Task { @MainActor in await controller.createRoom() }
+        #expect(await gate.waitUntilEntered(1))
+        var finished = false
+        let shutdown = Task { @MainActor in
+            await controller.shutdown()
+            finished = true
+        }
+        #expect(await gate.waitUntilCancelled(1))
+        try? await Task.sleep(for: .milliseconds(20))
+        #expect(!finished)
+        #expect(controller.requiresShutdown)
+
+        await gate.release(1)
+        await create.value
+        await shutdown.value
+        #expect(finished)
+        #expect(!controller.requiresShutdown)
     }
 
     @Test("Recovery connects before authority and preserves a message received during reconciliation")
@@ -424,10 +713,46 @@ struct ListenTogetherControllerLifecycleTests {
 
         realtime.send(Self.remoteEnded)
         await wait { controller.room == nil }
+        await wait { realtime.disconnectCount == 1 }
         #expect(controller.phase == .ended(reason: nil))
         #expect(controller.errorMessage == nil)
         #expect(!player.isControlInteractionLocked)
         #expect(!player.isSharedControlActive)
+        #expect(!controller.requiresShutdown)
+    }
+
+    @Test("Shutdown waits for the single tracked disconnect")
+    func shutdownWaitsForDisconnect() async {
+        ListenTogetherControllerProtocol.reset([
+            "/weapi/listen/together/status/get": .init(Self.inRoom),
+            "/api/middle/im/token/get": .init(Self.credentials),
+            "/eapi/listen/together/sync/playlist/get": .init(Self.authoritativePaused),
+            "/eapi/listen/together/heartbeat": .init(Self.heartbeat),
+            "/eapi/listen/together/end/v2": .init(Self.succeeded)
+        ])
+        let gate = RevisionFenceGate()
+        let realtime = ListenTogetherRealtimeStub(disconnectGate: gate)
+        let controller = makeController(realtime: realtime)
+        controller.updateAccount(42)
+        await wait {
+            if case .recoveryAvailable = controller.phase { return true }
+            return false
+        }
+        controller.recover()
+        await wait { controller.isConnected }
+
+        realtime.send(Self.remoteEnded)
+        await gate.waitUntilBlocked()
+        #expect(controller.requiresShutdown)
+
+        let shutdown = Task { @MainActor in await controller.shutdown() }
+        await Task.yield()
+        #expect(controller.requiresShutdown)
+        await gate.open()
+        await shutdown.value
+        #expect(realtime.disconnectCount == 1)
+        #expect(realtime.shutdownCount == 1)
+        #expect(!controller.requiresShutdown)
     }
 
     @Test("Joining connects before authority and preserves a message received during setup")
@@ -466,21 +791,284 @@ struct ListenTogetherControllerLifecycleTests {
         await controller.prepareForLogout()
     }
 
+    @Test("Join waits for account bootstrap before accepting once")
+    func joinWaitsForAccountBootstrap() async throws {
+        ListenTogetherControllerProtocol.reset([
+            "/weapi/listen/together/status/get": .init(Self.notInRoom),
+            "/eapi/listen/together/play/invitation/accept": .init(Self.room),
+            "/api/middle/im/token/get": .init(Self.credentials),
+            "/eapi/listen/together/sync/playlist/get": .init(Self.authoritativePaused),
+            "/eapi/listen/together/heartbeat": .init(Self.heartbeat),
+            "/eapi/listen/together/end/v2": .init(Self.succeeded)
+        ])
+        let gate = NonCooperativeRequestGate()
+        let waitGate = BootstrapWaitGate()
+        await gate.arm()
+        let realtime = ListenTogetherRealtimeStub()
+        let controller = makeController(
+            realtime: realtime,
+            requestGate: gate,
+            accountBootstrapWaitObserver: { waitGate.enter() }
+        )
+        controller.updateAccount(84)
+        #expect(await gate.waitUntilEntered(1))
+
+        var joinFinished = false
+        let join = Task { @MainActor in
+            await controller.join(try! ListenTogetherInvitation(roomID: "room-1", inviterID: 42))
+            joinFinished = true
+        }
+        await waitGate.waitUntilEntered()
+        #expect(!joinFinished)
+        #expect(ListenTogetherControllerProtocol.requestCount(
+            for: "/eapi/listen/together/play/invitation/accept"
+        ) == 0)
+
+        await gate.release(1)
+        await join.value
+        let events = ListenTogetherControllerProtocol.events
+        let acceptIndex = try #require(events.firstIndex(
+            of: "/eapi/listen/together/play/invitation/accept"
+        ))
+        let connectIndex = try #require(events.firstIndex(of: "realtime-connect"))
+        let authorityIndex = try #require(events.firstIndex(
+            of: "/eapi/listen/together/sync/playlist/get"
+        ))
+        #expect(acceptIndex < connectIndex)
+        #expect(connectIndex < authorityIndex)
+        #expect(ListenTogetherControllerProtocol.requestCount(
+            for: "/eapi/listen/together/play/invitation/accept"
+        ) == 1)
+        await controller.shutdown()
+    }
+
+    @Test("Account replacement drops a join waiting for old bootstrap")
+    func accountReplacementDropsWaitingJoin() async throws {
+        ListenTogetherControllerProtocol.reset([
+            "/weapi/listen/together/status/get": .init(Self.notInRoom),
+            "/eapi/listen/together/play/invitation/accept": .init(Self.room)
+        ])
+        let gate = NonCooperativeRequestGate()
+        let waitGate = BootstrapWaitGate()
+        await gate.arm()
+        let controller = makeController(
+            realtime: ListenTogetherRealtimeStub(),
+            requestGate: gate,
+            accountBootstrapWaitObserver: { waitGate.enter() }
+        )
+        controller.updateAccount(84)
+        #expect(await gate.waitUntilEntered(1))
+        let join = Task { @MainActor in
+            await controller.join(try! ListenTogetherInvitation(roomID: "room-1", inviterID: 42))
+        }
+        await waitGate.waitUntilEntered()
+
+        controller.updateAccount(85)
+        await gate.release(1)
+        await join.value
+        #expect(ListenTogetherControllerProtocol.requestCount(
+            for: "/eapi/listen/together/play/invitation/accept"
+        ) == 0)
+        await controller.shutdown()
+    }
+
+    @Test("Caller cancellation drops a join waiting for bootstrap")
+    func callerCancellationDropsWaitingJoin() async throws {
+        ListenTogetherControllerProtocol.reset([
+            "/weapi/listen/together/status/get": .init(Self.notInRoom),
+            "/eapi/listen/together/play/invitation/accept": .init(Self.room)
+        ])
+        let gate = NonCooperativeRequestGate()
+        let waitGate = BootstrapWaitGate()
+        await gate.arm()
+        let controller = makeController(
+            realtime: ListenTogetherRealtimeStub(),
+            requestGate: gate,
+            accountBootstrapWaitObserver: { waitGate.enter() }
+        )
+        controller.updateAccount(84)
+        #expect(await gate.waitUntilEntered(1))
+        let join = Task { @MainActor in
+            await controller.join(try! ListenTogetherInvitation(roomID: "room-1", inviterID: 42))
+        }
+
+        await waitGate.waitUntilEntered()
+        join.cancel()
+        await gate.release(1)
+        await join.value
+        #expect(ListenTogetherControllerProtocol.requestCount(
+            for: "/eapi/listen/together/play/invitation/accept"
+        ) == 0)
+        await controller.shutdown()
+    }
+
+    @Test("Nil queue sends only play while a real queue change preserves playlist then play")
+    func queueIntentConsumption() async throws {
+        ListenTogetherControllerProtocol.reset([
+            "/weapi/listen/together/status/get": .init(Self.inRoom),
+            "/api/middle/im/token/get": .init(Self.credentials),
+            "/eapi/listen/together/sync/playlist/get": .init(Self.authoritativePaused),
+            "/eapi/listen/together/sync/list/command/report": .init(Self.succeeded),
+            "/eapi/listen/together/play/command/report": .init(Self.succeeded),
+            "/eapi/listen/together/heartbeat": .init(Self.heartbeat),
+            "/eapi/listen/together/end/v2": .init(Self.succeeded)
+        ])
+        let realtime = ListenTogetherRealtimeStub()
+        let player = PlayerController(repository: FixtureMusicRepository(), crossfadeDuration: 0)
+        let controller = makeController(player: player, realtime: realtime)
+        controller.updateAccount(42)
+        await wait {
+            if case .recoveryAvailable = controller.phase { return true }
+            return false
+        }
+        controller.recover()
+        await wait { controller.isConnected }
+        ListenTogetherControllerProtocol.clearEvents()
+
+        var commitCount = 0
+        let playOnly = PlayerControlIntent(
+            trigger: .user,
+            play: .pause(songID: 1, progress: 1),
+            queue: nil
+        )
+        #expect(player.controlInterceptor?(playOnly) { commitCount += 1 } == true)
+        await wait { commitCount == 1 }
+        #expect(ListenTogetherControllerProtocol.requestCount(
+            for: "/eapi/listen/together/sync/list/command/report"
+        ) == 0)
+        #expect(ListenTogetherControllerProtocol.requestCount(
+            for: "/eapi/listen/together/play/command/report"
+        ) == 1)
+
+        ListenTogetherControllerProtocol.clearEvents()
+        let changedQueue = PlayerControlIntent(
+            trigger: .user,
+            play: .play(songID: 2, progress: 0),
+            queue: PlayerQueueOrder(
+                displaySongIDs: [1, 2],
+                randomSongIDs: [2, 1],
+                anchorSongID: 2
+            )
+        )
+        #expect(player.controlInterceptor?(changedQueue) { commitCount += 1 } == true)
+        await wait { commitCount == 2 }
+        let events = ListenTogetherControllerProtocol.events
+        let playlistIndex = try #require(events.firstIndex(
+            of: "/eapi/listen/together/sync/list/command/report"
+        ))
+        let playIndex = try #require(events.firstIndex(
+            of: "/eapi/listen/together/play/command/report"
+        ))
+        #expect(playlistIndex < playIndex)
+        #expect(ListenTogetherControllerProtocol.requestCount(
+            for: "/eapi/listen/together/sync/list/command/report"
+        ) == 1)
+        #expect(ListenTogetherControllerProtocol.requestCount(
+            for: "/eapi/listen/together/play/command/report"
+        ) == 1)
+        await controller.prepareForLogout()
+    }
+
+    private func assertAccountSwitchWaits(
+        for operation: StalledRoomOperation
+    ) async throws {
+        ListenTogetherControllerProtocol.reset(Self.operationStubs)
+        let gate = NonCooperativeRequestGate()
+        let credentialSnapshot = CredentialSnapshot(.guest)
+        let realtime = ListenTogetherRealtimeStub()
+        let controller = makeController(
+            realtime: realtime,
+            requestGate: gate,
+            credentialSnapshot: credentialSnapshot
+        )
+        let invitation = try ListenTogetherInvitation(roomID: "fixture-room", inviterID: 7)
+        controller.updateAccount(42)
+        await wait { controller.currentUserID == 42 && controller.errorMessage != nil }
+
+        await gate.arm(afterPassing: operation == .token ? 1 : 0)
+        let stalled = Task { @MainActor in
+            switch operation {
+            case .create, .token:
+                await controller.createRoom()
+            case .join:
+                await controller.join(invitation)
+            }
+        }
+        #expect(await gate.waitUntilEntered(1))
+
+        _ = credentialSnapshot.store(.guest)
+        controller.updateAccount(84)
+        let cancellationObserved = await gate.waitUntilCancelled(1)
+        let replacement = Task { @MainActor in await controller.checkInvitation(invitation) }
+        try? await Task.sleep(for: .milliseconds(20))
+        #expect(controller.currentUserID == 42)
+        #expect(ListenTogetherControllerProtocol.requestCount(
+            for: "/eapi/listen/together/room/check"
+        ) == 0)
+
+        await gate.release(1)
+        await stalled.value
+        await replacement.value
+        await wait { controller.currentUserID == 84 }
+        #expect(cancellationObserved)
+        if case .readyToJoin = controller.phase {
+        } else {
+            Issue.record("Replacement room operation did not run after the account switch drained")
+        }
+        #expect(realtime.connectCount == 0)
+        #expect(ListenTogetherControllerProtocol.requestCount(
+            for: "/eapi/listen/together/room/check"
+        ) == 1)
+        switch operation {
+        case .create:
+            #expect(ListenTogetherControllerProtocol.requestCount(
+                for: "/eapi/listen/together/room/create"
+            ) == 0)
+        case .join:
+            #expect(ListenTogetherControllerProtocol.requestCount(
+                for: "/eapi/listen/together/play/invitation/accept"
+            ) == 0)
+        case .token:
+            #expect(ListenTogetherControllerProtocol.requestCount(
+                for: "/eapi/listen/together/room/create"
+            ) == 1)
+            #expect(ListenTogetherControllerProtocol.requestCount(
+                for: "/api/middle/im/token/get"
+            ) == 0)
+        }
+        await controller.shutdown()
+    }
+
     private func makeController(
-        player: PlayerController = PlayerController(repository: FixtureMusicRepository(), crossfadeDuration: 0),
-        realtime: ListenTogetherRealtimeStub
+        player: PlayerController? = nil,
+        realtime: ListenTogetherRealtimeStub,
+        requestGate: NonCooperativeRequestGate? = nil,
+        credentialSnapshot: CredentialSnapshot? = nil,
+        accountBootstrapWaitObserver: (@MainActor @Sendable () -> Void)? = nil
     ) -> ListenTogetherController {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [ListenTogetherControllerProtocol.self]
+        let beforeSendingRequest: (@Sendable () async -> Void)?
+        if let requestGate {
+            beforeSendingRequest = { await requestGate.wait() }
+        } else {
+            beforeSendingRequest = nil
+        }
         let transport = EAPITransport(
             session: URLSession(configuration: configuration),
             cookie: "",
-            musicU: ""
+            musicU: "",
+            credentialSnapshot: credentialSnapshot,
+            beforeSendingRequest: beforeSendingRequest
         )
         return ListenTogetherController(
             service: LiveListenTogetherService(transport: transport),
-            player: player,
-            realtime: realtime
+            player: player ?? PlayerController(
+                repository: FixtureMusicRepository(),
+                crossfadeDuration: 0
+            ),
+            realtime: realtime,
+            accountBootstrapWaitObserver: accountBootstrapWaitObserver
         )
     }
 
@@ -491,15 +1079,155 @@ struct ListenTogetherControllerLifecycleTests {
     }
 
     private static let room = #"{"code":200,"data":{"roomInfo":{"roomId":"room-1","chatRoomId":"chat-1","creatorId":42,"roomUsers":[{"userId":42,"nickname":"Host"}]}}}"#
+    private static let roomCheck = #"{"code":200,"data":{"joinable":true,"status":"READY"}}"#
+    private static let invalidStatus = #"{"code":200,"data":{"status":"NOT_IN_ROOM"}}"#
     private static let notInRoom = #"{"code":200,"data":{"inRoom":false,"status":"NOT_IN_ROOM"}}"#
     private static let inRoom = #"{"code":200,"data":{"inRoom":true,"status":"IN_ROOM","roomInfo":{"roomId":"room-1","chatRoomId":"chat-1","creatorId":42,"roomUsers":[{"userId":42,"nickname":"Host"}]}}}"#
     private static let credentials = #"{"code":200,"data":{"accId":"account","token":"token"}}"#
     private static let succeeded = #"{"code":200,"data":{"result":true}}"#
     private static let heartbeat = #"{"code":200,"data":{"result":true,"timeSpan":30}}"#
-    private static let authoritativePaused = #"{"code":200,"data":{"playList":{"displayList":[1,2],"randomList":[1,2],"anchorSongId":1,"version":1},"playCommand":{"commandType":"PROGRESS","progress":1000,"playStatus":"PAUSE","formerSongId":1,"targetSongId":1}}}"#
+    private static let authoritativePaused = #"{"code":200,"data":{"playList":{"displayList":[1,2],"randomList":[1,2],"anchorSongId":1,"anchorPosition":0,"version":1},"playCommand":{"commandType":"PROGRESS","progress":1000,"playStatus":"PAUSE","formerSongId":1,"targetSongId":1}}}"#
     private static let remotePlay = #"{"content":{"type":20000,"content":{"serverSeq":1,"commandType":"GOTO","formerSongId":1,"targetSongId":2,"progress":2000,"playStatus":"PAUSE"}}}"#
     private static let remoteUnknownSong = #"{"content":{"type":20000,"content":{"serverSeq":1,"commandType":"GOTO","formerSongId":1,"targetSongId":999,"progress":0,"playStatus":"PAUSE"}}}"#
     private static let remoteEnded = #"{"ext":{"serverExt":{"type":20003,"content":{"exitType":"ROOM_EMPTY"}}}}"#
+    private static let operationStubs: [String: ListenTogetherControllerProtocol.Stub] = [
+        "/weapi/listen/together/status/get": .init(invalidStatus),
+        "/eapi/listen/together/room/create": .init(room),
+        "/eapi/listen/together/play/invitation/accept": .init(room),
+        "/eapi/listen/together/room/check": .init(roomCheck),
+        "/api/middle/im/token/get": .init(credentials),
+        "/eapi/listen/together/end/v2": .init(succeeded)
+    ]
+}
+
+private enum StalledRoomOperation: Equatable {
+    case create
+    case join
+    case token
+}
+
+@MainActor
+private final class BootstrapWaitGate {
+    private var entered = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func enter() {
+        entered = true
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending { waiter.resume() }
+    }
+
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+}
+
+private actor NonCooperativeRequestGate {
+    private var passesBeforeBlocking: Int?
+    private var nextEntry = 0
+    private var entered: Set<Int> = []
+    private var cancelled: Set<Int> = []
+    private var waiters: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var entryWaiters: [Int: [CheckedContinuation<Bool, Never>]] = [:]
+    private var cancellationWaiters: [Int: [CheckedContinuation<Bool, Never>]] = [:]
+
+    func arm(afterPassing passes: Int = 0) {
+        passesBeforeBlocking = passes
+    }
+
+    func wait() async {
+        guard let passesBeforeBlocking else { return }
+        if passesBeforeBlocking > 0 {
+            self.passesBeforeBlocking = passesBeforeBlocking - 1
+            return
+        }
+        self.passesBeforeBlocking = nil
+        nextEntry += 1
+        let entry = nextEntry
+        await withTaskCancellationHandler {
+            await withCheckedContinuation {
+                waiters[entry] = $0
+                entered.insert(entry)
+                let pending = entryWaiters.removeValue(forKey: entry) ?? []
+                for waiter in pending { waiter.resume(returning: true) }
+            }
+        } onCancel: {
+            Task { await self.recordCancellation(entry) }
+        }
+    }
+
+    func waitUntilEntered(_ entry: Int) async -> Bool {
+        if entered.contains(entry) { return true }
+        return await withCheckedContinuation { entryWaiters[entry, default: []].append($0) }
+    }
+
+    func waitUntilCancelled(_ entry: Int) async -> Bool {
+        if cancelled.contains(entry) { return true }
+        return await withCheckedContinuation {
+            cancellationWaiters[entry, default: []].append($0)
+        }
+    }
+
+    func release(_ entry: Int) {
+        waiters.removeValue(forKey: entry)?.resume()
+    }
+
+    private func recordCancellation(_ entry: Int) {
+        cancelled.insert(entry)
+        let pending = cancellationWaiters.removeValue(forKey: entry) ?? []
+        for waiter in pending { waiter.resume(returning: true) }
+    }
+}
+
+private actor RevisionFenceGate {
+    private var blocked = true
+    private var entered = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        entered = true
+        guard blocked else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func waitUntilBlocked() async {
+        while !entered { await Task.yield() }
+    }
+
+    func open() {
+        blocked = false
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending { waiter.resume() }
+    }
+}
+
+private final class RevisionFenceProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var count = 0
+
+    static var requestCount: Int { lock.withLock { count } }
+    static func reset() { lock.withLock { count = 0 } }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.lock.withLock { Self.count += 1 }
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: [:]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"code":200,"data":{"result":true}}"#.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 
 private final class ListenTogetherControllerProtocol: URLProtocol, @unchecked Sendable {
@@ -566,12 +1294,20 @@ private final class ListenTogetherControllerProtocol: URLProtocol, @unchecked Se
 private final class ListenTogetherRealtimeStub: ListenTogetherRealtimeTransport {
     var onEvent: ((NIMChatroomEvent) -> Void)?
     private(set) var connectCount = 0
+    private(set) var disconnectCount = 0
+    private(set) var shutdownCount = 0
     private(set) var emittedMessageCount = 0
     private var generation = 0
+    private var connected = false
     private let messageOnConnect: String?
+    private let disconnectGate: RevisionFenceGate?
 
-    init(messageOnConnect: String? = nil) {
+    init(
+        messageOnConnect: String? = nil,
+        disconnectGate: RevisionFenceGate? = nil
+    ) {
         self.messageOnConnect = messageOnConnect
+        self.disconnectGate = disconnectGate
     }
 
     func connect(
@@ -579,8 +1315,13 @@ private final class ListenTogetherRealtimeStub: ListenTogetherRealtimeTransport 
         credentials: ListenTogetherRealtimeCredentials,
         generation: Int
     ) async throws {
+        if connected {
+            disconnectCount += 1
+            ListenTogetherControllerProtocol.record("realtime-disconnect")
+        }
         connectCount += 1
         self.generation = generation
+        connected = true
         ListenTogetherControllerProtocol.record("realtime-connect")
         if connectCount == 1, let messageOnConnect {
             emittedMessageCount += 1
@@ -588,8 +1329,16 @@ private final class ListenTogetherRealtimeStub: ListenTogetherRealtimeTransport 
         }
     }
 
-    func disconnect() async {
+    func disconnect(generation: Int) async {
+        if let disconnectGate { await disconnectGate.wait() }
+        guard connected, self.generation == generation else { return }
+        connected = false
+        disconnectCount += 1
         ListenTogetherControllerProtocol.record("realtime-disconnect")
+    }
+
+    func shutdown() async {
+        shutdownCount += 1
     }
 
     func send(_ raw: String) {
@@ -701,6 +1450,7 @@ private func runListenTogetherHostLiveSmoke(
     let credentials = try listenTogetherLiveCredentials(role: "host")
     let transport = EAPITransport(cookie: credentials.cookie, musicU: credentials.musicU)
     let service = LiveListenTogetherService(transport: transport)
+    let expectedCredentialRevision = service.credentialRevision
     let realtime = NIMChatroomTransport()
     let recorder = ListenTogetherRealtimeRecorder()
     realtime.onEvent = { recorder.events.append($0) }
@@ -711,7 +1461,10 @@ private func runListenTogetherHostLiveSmoke(
     do {
         let userID = try await listenTogetherLiveUserID(transport: transport)
         hostUserID = userID
-        let room = try await service.createRoom(currentUserID: userID)
+        let room = try await service.createRoom(
+            currentUserID: userID,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
         roomID = room.id
         try coordination.writeRoom(ListenTogetherLiveRoomDescriptor(
             roomID: room.id,
@@ -721,7 +1474,9 @@ private func runListenTogetherHostLiveSmoke(
         try coordination.signal("host-room-created")
         try await coordination.waitForSignal("member-joined")
 
-        let realtimeCredentials = try await service.realtimeCredentials()
+        let realtimeCredentials = try await service.realtimeCredentials(
+            expectedCredentialRevision: expectedCredentialRevision
+        )
         try await realtime.connect(
             roomID: room.chatRoomID,
             credentials: realtimeCredentials,
@@ -734,7 +1489,8 @@ private func runListenTogetherHostLiveSmoke(
             roomID: room.id,
             songID: listenTogetherLiveSongID,
             playStatus: .playing,
-            progress: 0
+            progress: 0,
+            expectedCredentialRevision: expectedCredentialRevision
         ).succeeded else { throw ListenTogetherLiveTestError.heartbeatRejected }
         try coordination.signal("host-heartbeat")
         try await coordination.waitForSignal("member-heartbeat")
@@ -742,7 +1498,11 @@ private func runListenTogetherHostLiveSmoke(
 
         for (index, step) in listenTogetherLivePlaySteps(sender: .host).enumerated() {
             let command = try listenTogetherLiveCommand(step: step, sequence: index + 1)
-            guard try await service.reportPlayCommandConfirmed(roomID: room.id, command: command) else {
+            guard try await service.reportPlayCommandConfirmed(
+                roomID: room.id,
+                command: command,
+                expectedCredentialRevision: expectedCredentialRevision
+            ) else {
                 throw ListenTogetherLiveTestError.commandRejected
             }
             try coordination.signal("host-play-\(index)-sent")
@@ -758,7 +1518,11 @@ private func runListenTogetherHostLiveSmoke(
             randomList: [listenTogetherLiveSongID],
             displayList: [listenTogetherLiveSongID]
         )
-        guard try await service.reportPlaylistCommandConfirmed(roomID: room.id, command: playlist) else {
+        guard try await service.reportPlaylistCommandConfirmed(
+            roomID: room.id,
+            command: playlist,
+            expectedCredentialRevision: expectedCredentialRevision
+        ) else {
             throw ListenTogetherLiveTestError.commandRejected
         }
         try coordination.signal("host-playlist-sent")
@@ -772,7 +1536,8 @@ private func runListenTogetherHostLiveSmoke(
                 roomID: room.id,
                 songID: listenTogetherLiveSongID,
                 playStatus: .playing,
-                progress: 0
+                progress: 0,
+                expectedCredentialRevision: expectedCredentialRevision
             ).succeeded else { throw ListenTogetherLiveTestError.heartbeatRejected }
             guard try await recorder.waitForPlay(step: step, after: eventOffset) else {
                 throw ListenTogetherLiveTestError.messageTimeout(recorder.diagnostic(after: eventOffset))
@@ -786,6 +1551,7 @@ private func runListenTogetherHostLiveSmoke(
         try await coordination.waitForSignal("member-left")
         guard await waitForListenTogetherRoomState(
             service: service,
+            transport: transport,
             currentUserID: userID,
             roomID: room.id,
             inRoom: false
@@ -802,8 +1568,10 @@ private func runListenTogetherHostLiveSmoke(
         do {
             try await confirmListenTogetherCleanup(
                 service: service,
+                transport: transport,
                 roomID: roomID,
-                currentUserID: hostUserID
+                currentUserID: hostUserID,
+                expectedCredentialRevision: expectedCredentialRevision
             )
         } catch {
             throw ListenTogetherLiveTestError.cleanupFailed
@@ -819,6 +1587,7 @@ private func runListenTogetherMemberLiveSmoke(
     let credentials = try listenTogetherLiveCredentials(role: "member")
     let transport = EAPITransport(cookie: credentials.cookie, musicU: credentials.musicU)
     let service = LiveListenTogetherService(transport: transport)
+    let expectedCredentialRevision = service.credentialRevision
     let realtime = NIMChatroomTransport()
     let recorder = ListenTogetherRealtimeRecorder()
     realtime.onEvent = { recorder.events.append($0) }
@@ -841,14 +1610,20 @@ private func runListenTogetherMemberLiveSmoke(
         guard try await service.checkInvitation(invitation).joinable else {
             throw ListenTogetherLiveTestError.invitationRejected
         }
-        let accepted = try await service.acceptInvitation(invitation, currentUserID: userID)
+        let accepted = try await service.acceptInvitation(
+            invitation,
+            currentUserID: userID,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
         guard accepted.id == descriptor.roomID, accepted.chatRoomID == descriptor.chatRoomID else {
             throw ListenTogetherLiveTestError.roomMismatch
         }
         joined = true
         try coordination.signal("member-joined")
 
-        let realtimeCredentials = try await service.realtimeCredentials()
+        let realtimeCredentials = try await service.realtimeCredentials(
+            expectedCredentialRevision: expectedCredentialRevision
+        )
         try await realtime.connect(
             roomID: descriptor.chatRoomID,
             credentials: realtimeCredentials,
@@ -860,7 +1635,8 @@ private func runListenTogetherMemberLiveSmoke(
             roomID: descriptor.roomID,
             songID: listenTogetherLiveSongID,
             playStatus: .playing,
-            progress: 0
+            progress: 0,
+            expectedCredentialRevision: expectedCredentialRevision
         ).succeeded else { throw ListenTogetherLiveTestError.heartbeatRejected }
         try coordination.signal("member-heartbeat")
         try await coordination.waitForSignal("host-heartbeat")
@@ -873,7 +1649,8 @@ private func runListenTogetherMemberLiveSmoke(
                 roomID: descriptor.roomID,
                 songID: listenTogetherLiveSongID,
                 playStatus: .playing,
-                progress: 0
+                progress: 0,
+                expectedCredentialRevision: expectedCredentialRevision
             ).succeeded else { throw ListenTogetherLiveTestError.heartbeatRejected }
             guard try await recorder.waitForPlay(step: step, after: eventOffset) else {
                 throw ListenTogetherLiveTestError.messageTimeout(recorder.diagnostic(after: eventOffset))
@@ -899,18 +1676,23 @@ private func runListenTogetherMemberLiveSmoke(
             let command = try listenTogetherLiveCommand(step: step, sequence: index + 1)
             guard try await service.reportPlayCommandConfirmed(
                 roomID: descriptor.roomID,
-                command: command
+                command: command,
+                expectedCredentialRevision: expectedCredentialRevision
             ) else { throw ListenTogetherLiveTestError.commandRejected }
             try coordination.signal("member-play-\(index)-sent")
             try await coordination.waitForSignal("host-play-\(index)-received")
         }
 
         try await coordination.waitForSignal("host-exit-ready")
-        guard try await service.endRoomConfirmed(roomID: descriptor.roomID) else {
+        guard try await service.endRoomConfirmed(
+            roomID: descriptor.roomID,
+            expectedCredentialRevision: expectedCredentialRevision
+        ) else {
             throw ListenTogetherLiveTestError.endRejected
         }
         guard await waitForListenTogetherRoomState(
             service: service,
+            transport: transport,
             currentUserID: userID,
             roomID: descriptor.roomID,
             inRoom: false
@@ -925,7 +1707,10 @@ private func runListenTogetherMemberLiveSmoke(
 
     await realtime.disconnect()
     if joined, let room, memberUserID != nil {
-        _ = try? await service.endRoomConfirmed(roomID: room.roomID)
+        _ = try? await service.endRoomConfirmed(
+            roomID: room.roomID,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
     }
     if let failure { throw failure }
 }
@@ -1135,12 +1920,14 @@ private struct ListenTogetherTokenMetadata {
 private func listenTogetherTokenMetadata(
     transport: EAPITransport,
     userID: Int64,
-    host: String
+    host: String,
+    expectedCredentialRevision: UInt64
 ) async throws -> ListenTogetherTokenMetadata {
     let response = try await transport.requestQuery(
         path: "/api/middle/im/token/get",
         fields: [("bizName", "music_listenTogether")],
-        host: host
+        host: host,
+        expectedCredentialRevision: expectedCredentialRevision
     )
     let value = try decodedJSONObject(response).object("data")
     let uid = listenTogetherScalarString(value["uid"])
@@ -1194,12 +1981,18 @@ private func listenTogetherLiveUserID(transport: EAPITransport) async throws -> 
 
 private func confirmListenTogetherCleanup(
     service: LiveListenTogetherService,
+    transport: EAPITransport,
     roomID: String,
-    currentUserID: Int64
+    currentUserID: Int64,
+    expectedCredentialRevision: UInt64
 ) async throws {
-    _ = try? await service.endRoomConfirmed(roomID: roomID)
+    _ = try? await service.endRoomConfirmed(
+        roomID: roomID,
+        expectedCredentialRevision: expectedCredentialRevision
+    )
     guard await waitForListenTogetherRoomState(
         service: service,
+        transport: transport,
         currentUserID: currentUserID,
         roomID: roomID,
         inRoom: false
@@ -1231,7 +2024,7 @@ private func confirmListenTogetherPlaylist(
     throw ListenTogetherLiveTestError.playlistNotObserved(diagnostic)
 }
 
-private func listenTogetherPlaylistDiagnostic(_ data: Data, expectedSongID: Int64) -> String {
+private func listenTogetherPlaylistDiagnostic(_ data: [String: Any], expectedSongID: Int64) -> String {
     guard let root = try? decodedJSONObject(data) else { return "invalid" }
     let payload = root.object("data")
     let playlist = payload.object("playlist")
@@ -1248,12 +2041,17 @@ private func listenTogetherPlaylistDiagnostic(_ data: Data, expectedSongID: Int6
 
 private func waitForListenTogetherRoomState(
     service: LiveListenTogetherService,
+    transport: EAPITransport,
     currentUserID: Int64,
     roomID: String,
     inRoom: Bool
 ) async -> Bool {
     for _ in 0..<20 {
-        if let status = try? await service.status(currentUserID: currentUserID),
+        if let status = try? await listenTogetherLiveStatus(
+            service: service,
+            transport: transport,
+            currentUserID: currentUserID
+        ),
            status.inRoom == inRoom,
            !inRoom || status.room?.id == roomID {
             return true
@@ -1261,4 +2059,25 @@ private func waitForListenTogetherRoomState(
         try? await Task.sleep(for: .milliseconds(250))
     }
     return false
+}
+
+private func listenTogetherLiveStatus(
+    service: LiveListenTogetherService,
+    transport: EAPITransport,
+    currentUserID: Int64
+) async throws -> ListenTogetherStatus {
+    do {
+        return try await service.status(currentUserID: currentUserID)
+    } catch EAPIError.service(301, _) {
+        let data = try await transport.request(
+            EAPIEndpoint(
+                "/eapi/listen/together/status/get",
+                signing: "/api/listen/together/status/get"
+            ),
+            json: compactJSON([:]),
+            invalidatesAccountCache: false,
+            retryable: false
+        )
+        return try ListenTogetherResponseDecoder.status(from: data, currentUserID: currentUserID)
+    }
 }

@@ -42,17 +42,66 @@ enum NOSUploadURL {
     }
 }
 
+final class UploadProgressCoalescer: @unchecked Sendable {
+    private let lock = NSLock()
+    private let progress: @Sendable (Int64, Int64) -> Void
+    private let minimumIntervalNanoseconds: UInt64
+    private var lastEmission: UInt64 = 0
+    private var lastCompleted: Int64 = -1
+    private var latest: (completed: Int64, total: Int64)?
+
+    init(
+        minimumInterval: Duration = .milliseconds(100),
+        progress: @escaping @Sendable (Int64, Int64) -> Void
+    ) {
+        minimumIntervalNanoseconds = UInt64(max(
+            0,
+            minimumInterval.components.seconds * 1_000_000_000
+                + minimumInterval.components.attoseconds / 1_000_000_000
+        ))
+        self.progress = progress
+    }
+
+    func submit(_ completed: Int64, total: Int64, force: Bool = false) {
+        let value = lock.withLock { () -> (Int64, Int64)? in
+            let completed = min(max(0, completed), max(0, total))
+            latest = (completed, total)
+            let now = DispatchTime.now().uptimeNanoseconds
+            let significant = completed - lastCompleted >= max(1, total / 100)
+            guard force
+                    || lastCompleted < 0
+                    || (total > 0 && completed == total)
+                    || significant
+                    || now &- lastEmission >= minimumIntervalNanoseconds
+            else { return nil }
+            lastEmission = now
+            lastCompleted = completed
+            return (completed, total)
+        }
+        if let value { progress(value.0, value.1) }
+    }
+
+    func flush() {
+        let value: (completed: Int64, total: Int64)? = lock.withLock {
+            guard let latest, latest.completed != lastCompleted else { return nil }
+            return latest
+        }
+        guard let value else { return }
+        submit(value.completed, total: value.total, force: true)
+    }
+}
+
 private final class NOSRequestDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private let originalHost: String?
     private let base: Int64
     private let total: Int64
-    private let progress: @Sendable (Int64, Int64) -> Void
+    private let progress: UploadProgressCoalescer
 
     init(url: URL, base: Int64, total: Int64, progress: @escaping @Sendable (Int64, Int64) -> Void) {
         originalHost = url.host?.lowercased()
         self.base = base
         self.total = total
-        self.progress = progress
+        self.progress = UploadProgressCoalescer(progress: progress)
     }
 
     func urlSession(
@@ -62,7 +111,7 @@ private final class NOSRequestDelegate: NSObject, URLSessionTaskDelegate, @unche
         totalBytesSent: Int64,
         totalBytesExpectedToSend: Int64
     ) {
-        progress(min(total, base + totalBytesSent), total)
+        progress.submit(min(total, base + totalBytesSent), total: total)
     }
 
     func urlSession(
@@ -81,6 +130,8 @@ private final class NOSRequestDelegate: NSObject, URLSessionTaskDelegate, @unche
         }
         completionHandler(request)
     }
+
+    func flushProgress() { progress.flush() }
 }
 
 private final class UploadIDParser: NSObject, XMLParserDelegate {
@@ -141,8 +192,9 @@ struct NOSAudioUpload: Sendable {
         allocation: NOSAllocation,
         uploadBase: URL,
         confirmedOffset: Int64,
+        authorize: @escaping @Sendable () async throws -> Void = {},
         shouldPause: @escaping @Sendable () async -> Bool,
-        didConfirm: @escaping @Sendable (Int64) async -> Void,
+        didConfirm: @escaping @Sendable (Int64) async throws -> Void,
         progress: @escaping @Sendable (Int64, Int64) -> Void
     ) async throws {
         guard confirmedOffset >= 0, confirmedOffset <= manifest.byteCount else {
@@ -181,20 +233,22 @@ struct NOSAudioUpload: Sendable {
                 request,
                 base: offset,
                 total: manifest.byteCount,
+                authorize: authorize,
                 progress: progress
             )
             let expected = offset + count
             let serverOffset = isFinal ? expected : self.confirmedOffset(from: response, body: body)
             guard serverOffset == expected else { throw AudioUploadError.invalidServerOffset }
             offset = expected
-            await didConfirm(offset)
+            try await didConfirm(offset)
             progress(offset, manifest.byteCount)
         }
     }
 
     func initiatePodcastMultipart(
         allocation: NOSAllocation,
-        contentType: String
+        contentType: String,
+        authorize: @escaping @Sendable () async throws -> Void = {}
     ) async throws -> String {
         var components = URLComponents(url: try podcastObjectURL(allocation.objectKey), resolvingAgainstBaseURL: false)!
         components.query = "uploads"
@@ -202,7 +256,7 @@ struct NOSAudioUpload: Sendable {
         request.httpMethod = "POST"
         request.setValue(allocation.token, forHTTPHeaderField: "x-nos-token")
         request.setValue(contentType, forHTTPHeaderField: "X-Nos-Meta-Content-Type")
-        let (data, _) = try await perform(request, progress: { _, _ in })
+        let (data, _) = try await perform(request, authorize: authorize, progress: { _, _ in })
         let delegate = UploadIDParser()
         let parser = XMLParser(data: data)
         parser.delegate = delegate
@@ -218,6 +272,7 @@ struct NOSAudioUpload: Sendable {
         allocation: NOSAllocation,
         uploadID: String,
         partNumber: Int,
+        authorize: @escaping @Sendable () async throws -> Void = {},
         progress: @escaping @Sendable (Int64, Int64) -> Void
     ) async throws -> AudioUploadPart {
         guard !uploadID.isEmpty, partNumber > 0 else { throw AudioUploadError.missingUploadIdentifier }
@@ -248,6 +303,7 @@ struct NOSAudioUpload: Sendable {
                     request,
                     base: offset,
                     total: manifest.byteCount,
+                    authorize: authorize,
                     progress: progress
                 )
                 guard let etag = response.value(forHTTPHeaderField: "ETag")?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -268,11 +324,14 @@ struct NOSAudioUpload: Sendable {
         allocation: NOSAllocation,
         uploadID: String,
         contentType: String,
-        parts: [AudioUploadPart]
+        parts: [AudioUploadPart],
+        authorize: @escaping @Sendable () async throws -> Void = {}
     ) async throws {
         guard !uploadID.isEmpty, !parts.isEmpty else { throw AudioUploadError.missingUploadIdentifier }
         let root = XMLElement(name: "CompleteMultipartUpload")
-        for part in parts.sorted(by: { $0.number < $1.number }) {
+        var resume = PodcastUploadResume()
+        resume.parts = parts
+        for part in resume.stableParts {
             let element = XMLElement(name: "Part")
             element.addChild(XMLElement(name: "PartNumber", stringValue: String(part.number)))
             element.addChild(XMLElement(name: "ETag", stringValue: part.etag))
@@ -287,7 +346,7 @@ struct NOSAudioUpload: Sendable {
         request.setValue(allocation.token, forHTTPHeaderField: "x-nos-token")
         request.setValue("application/xml; charset=utf-8", forHTTPHeaderField: "Content-Type")
         request.setValue(contentType, forHTTPHeaderField: "X-Nos-Meta-Content-Type")
-        _ = try await perform(request, progress: { _, _ in })
+        _ = try await perform(request, authorize: authorize, progress: { _, _ in })
     }
 
     private func podcastObjectURL(_ objectKey: String) throws -> URL {
@@ -302,14 +361,22 @@ struct NOSAudioUpload: Sendable {
         _ request: URLRequest,
         base: Int64 = 0,
         total: Int64 = 0,
+        authorize: @escaping @Sendable () async throws -> Void = {},
         progress: @escaping @Sendable (Int64, Int64) -> Void
     ) async throws -> (Data, HTTPURLResponse) {
         guard let url = request.url, NOSUploadURL.isAllowed(url) else { throw AudioUploadError.invalidUploadHost }
         let delegate = NOSRequestDelegate(url: url, base: base, total: total, progress: progress)
-        let (data, response) = try await session.data(for: request, delegate: delegate)
-        guard let http = response as? HTTPURLResponse else { throw EAPIError.invalidResponse }
-        guard (200..<300).contains(http.statusCode) else { throw EAPIError.http(http.statusCode) }
-        return (data, http)
+        do {
+            try await authorize()
+            let (data, response) = try await session.data(for: request, delegate: delegate)
+            delegate.flushProgress()
+            guard let http = response as? HTTPURLResponse else { throw EAPIError.invalidResponse }
+            guard (200..<300).contains(http.statusCode) else { throw EAPIError.http(http.statusCode) }
+            return (data, http)
+        } catch {
+            delegate.flushProgress()
+            throw error
+        }
     }
 
     private func confirmedOffset(from response: HTTPURLResponse, body: Data) -> Int64? {

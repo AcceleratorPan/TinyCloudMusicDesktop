@@ -113,6 +113,8 @@ enum WriteAPIContractCheck {
         let audioLibrary = LiveAudioContentLibrary(transport: transport)
         let knowledgeLibrary = LiveMusicKnowledgeLibrary(transport: transport)
         let listenTogetherService = LiveListenTogetherService(transport: transport)
+        let expectedCredentialRevision = transport.credentialSnapshotValue().revision
+        let reportingCredentialRevision = reportingTransport.credentialSnapshotValue().revision
         let originalCookieLibrary = LiveMusicLibrary(transport: EAPITransport(
             session: URLSession(configuration: configuration),
             cookie: "MUSIC_U=original-cookie; deviceId=test-device",
@@ -131,48 +133,79 @@ enum WriteAPIContractCheck {
         count += 3
 
         try await verify("/eapi/song/like", signing: "/api/song/like", call: {
-            try await library.setSongLiked(11, liked: true)
+            try await library.setSongLiked(
+                11,
+                liked: true,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
         }) { $0.int64("trackId") == 11 && $0.bool("like") }
         count += 1
 
         for subscribed in [true, false] {
             let action = subscribed ? "subscribe" : "unsubscribe"
             try await verify("/eapi/playlist/\(action)", signing: "/api/playlist/\(action)", call: {
-                try await library.setPlaylistSubscribed(12, subscribed: subscribed)
+                try await library.setPlaylistSubscribed(
+                    12,
+                    subscribed: subscribed,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
             }) { $0.int64("id") == 12 }
             count += 1
         }
         for subscribed in [true, false] {
             let action = subscribed ? "sub" : "unsub"
             try await verify("/eapi/album/\(action)", signing: "/api/album/\(action)", call: {
-                try await library.setAlbumSubscribed(13, subscribed: subscribed)
+                try await library.setAlbumSubscribed(
+                    13,
+                    subscribed: subscribed,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
             }) { $0.string("id") == "13" }
             count += 1
         }
 
         try await verify("/eapi/v1/artist/sub", signing: "/api/v1/artist/sub", call: {
-            try await library.setArtistFollowed(14, followed: true)
+            try await library.setArtistFollowed(
+                14,
+                followed: true,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
         }) { $0.string("artistId") == "14" }
         count += 1
         try await verify("/eapi/artist/unsub", signing: "/api/artist/unsub", call: {
-            try await library.setArtistFollowed(14, followed: false)
+            try await library.setArtistFollowed(
+                14,
+                followed: false,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
         }) { $0.string("artistIds") == "[14]" }
         count += 1
 
         for followed in [true, false] {
             let action = followed ? "follow" : "delfollow"
             try await verify("/eapi/user/\(action)/15", signing: "/api/user/\(action)/15", call: {
-                try await library.setUserFollowed(15, followed: followed)
+                try await library.setUserFollowed(
+                    15,
+                    followed: followed,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
             }) { $0.int("verifyId") == 1 }
             count += 1
         }
 
         try await verify("/eapi/playlist/create", signing: "/api/playlist/create", call: {
-            _ = try await library.createPlaylist(name: "API check", privacy: .privatePlaylist)
+            _ = try await library.createPlaylist(
+                name: "API check",
+                privacy: .privatePlaylist,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
         }) { $0.string("name") == "API check" && $0.int("privacy") == 10 && $0.string("type") == "NORMAL" }
         count += 1
         try await verify("/eapi/playlist/delete", signing: "/api/playlist/delete", call: {
-            try await library.deletePlaylist(16)
+            try await library.deletePlaylist(
+                16,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
         }) { $0.int64("pid") == 16 }
         count += 1
 
@@ -180,7 +213,13 @@ enum WriteAPIContractCheck {
             "/eapi/playlist/update/name",
             signing: "/api/playlist/update/name",
             host: "interface.music.163.com",
-            call: { try await library.updatePlaylistName(16, name: "中文 \"mix\" 🎵") }
+            call: {
+                try await library.updatePlaylistName(
+                    16,
+                    name: "中文 \"mix\" 🎵",
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+            }
         ) { $0.int64("id") == 16 && $0.string("name") == "中文 \"mix\" 🎵" }
         count += 1
 
@@ -188,7 +227,13 @@ enum WriteAPIContractCheck {
             "/eapi/playlist/desc/update",
             signing: "/api/playlist/desc/update",
             host: "interface.music.163.com",
-            call: { try await library.updatePlaylistDescription(16, description: "line 1\nline 2") }
+            call: {
+                try await library.updatePlaylistDescription(
+                    16,
+                    description: "line 1\nline 2",
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+            }
         ) { $0.int64("id") == 16 && $0.string("desc") == "line 1\nline 2" }
         count += 1
 
@@ -196,12 +241,21 @@ enum WriteAPIContractCheck {
             "/eapi/playlist/tags/update",
             signing: "/api/playlist/tags/update",
             host: "interface.music.163.com",
-            call: { try await library.updatePlaylistTags(16, tags: ["学习", "华语"]) }
+            call: {
+                try await library.updatePlaylistTags(
+                    16,
+                    tags: ["学习", "华语"],
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+            }
         ) { $0.int64("id") == 16 && $0.string("tags") == "学习;华语" }
         count += 1
 
         try await verifyWEAPI("/weapi/playlist/order/update", call: {
-            try await library.updatePlaylistOrder([31, 29, 30])
+            try await library.updatePlaylistOrder(
+                [31, 29, 30],
+                expectedCredentialRevision: expectedCredentialRevision
+            )
         }) {
             $0.string("ids") == #"["31","29","30"]"#
                 && $0.string("csrf_token") == "csrf"
@@ -211,7 +265,13 @@ enum WriteAPIContractCheck {
         try await verify(
             "/eapi/playlist/manipulate/tracks",
             signing: "/api/playlist/manipulate/tracks",
-            call: { try await library.updatePlaylistSongOrder(16, trackIDs: [13, 11, 12]) }
+            call: {
+                try await library.updatePlaylistSongOrder(
+                    16,
+                    trackIDs: [13, 11, 12],
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+            }
         ) {
             $0.string("pid") == "16"
                 && $0.string("trackIds") == #"["13","11","12"]"#
@@ -222,22 +282,45 @@ enum WriteAPIContractCheck {
         try await verify(
             "/eapi/playlist/update/privacy",
             signing: "/api/playlist/update/privacy",
-            call: { try await library.makePlaylistPublic(16) }
+            call: {
+                try await library.makePlaylistPublic(
+                    16,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+            }
         ) { $0.int64("id") == 16 && $0.int("privacy") == 0 }
         count += 1
 
-        try await verifyCoverUpload(library: library)
-        try await verifyCoverFailureStops(library: library)
+        try await verifyCoverUpload(
+            library: library,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
+        try await verifyCoverFailureStops(
+            library: library,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
         count += 3
-        try await verifyAudioUploadContracts(library: library, audioLibrary: audioLibrary)
+        try await verifyAudioUploadContracts(
+            library: library,
+            audioLibrary: audioLibrary,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
         count += 8
 
         try await verify("/eapi/v1/playlist/manipulate/tracks", signing: "/api/v1/playlist/manipulate/tracks", call: {
-            try await library.addSongs([11, 12], to: 16)
+            try await library.addSongs(
+                [11, 12],
+                to: 16,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
         }) { $0.string("pid") == "16" && $0.string("trackIds") == #"["11","12"]"# && $0.string("op") == "add" }
         count += 1
         try await verify("/eapi/v1/playlist/manipulate/tracks", signing: "/api/v1/playlist/manipulate/tracks", call: {
-            try await library.removeSongs([11, 12], from: 16)
+            try await library.removeSongs(
+                [11, 12],
+                from: 16,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
         }) { $0.int64("pid") == 16 && $0.string("trackIds") == #"["11","12"]"# && $0.string("op") == "del" }
         count += 1
 
@@ -253,7 +336,11 @@ enum WriteAPIContractCheck {
             signing: "/api/resource/comments/add",
             host: "interface.music.163.com",
             call: {
-                _ = try await library.addComment(songID: 42, content: " hello ")
+                _ = try await library.addComment(
+                    songID: 42,
+                    content: " hello ",
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
             }
         ) { $0.string("threadId") == "R_SO_4_42" && $0.string("content") == "hello" }
         count += 1
@@ -263,7 +350,12 @@ enum WriteAPIContractCheck {
             signing: "/api/resource/comments/reply",
             host: "interface.music.163.com",
             call: {
-                _ = try await library.replyToComment(songID: 42, commentID: 99, content: " reply ")
+                _ = try await library.replyToComment(
+                    songID: 42,
+                    commentID: 99,
+                    content: " reply ",
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
             }
         ) {
             $0.string("threadId") == "R_SO_4_42"
@@ -277,7 +369,11 @@ enum WriteAPIContractCheck {
             signing: "/api/resource/comments/delete",
             host: "interface.music.163.com",
             call: {
-                try await library.deleteComment(songID: 42, commentID: 99)
+                try await library.deleteComment(
+                    songID: 42,
+                    commentID: 99,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
             }
         ) { $0.string("threadId") == "R_SO_4_42" && $0.string("commentId") == "99" }
         count += 1
@@ -285,7 +381,12 @@ enum WriteAPIContractCheck {
         for liked in [true, false] {
             let action = liked ? "like" : "unlike"
             try await verifyWEAPI("/weapi/v1/comment/\(action)", call: {
-                try await library.setCommentLiked(songID: 42, commentID: 99, liked: liked)
+                try await library.setCommentLiked(
+                    songID: 42,
+                    commentID: 99,
+                    liked: liked,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
             }) {
                 $0.string("threadId") == "R_SO_4_42"
                     && $0.string("commentId") == "99"
@@ -356,7 +457,11 @@ enum WriteAPIContractCheck {
         for subscribed in [true, false] {
             let action = subscribed ? "sub" : "unsub"
             try await verifyWEAPI("/weapi/mv/\(action)", call: {
-                try await videoLibrary.setMVSubscribed(42, subscribed: subscribed)
+                try await videoLibrary.setMVSubscribed(
+                    42,
+                    subscribed: subscribed,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
             }) {
                 $0.int64("mvId") == 42 && $0.string("mvIds") == #"["42"]"#
             }
@@ -396,7 +501,11 @@ enum WriteAPIContractCheck {
         for subscribed in [true, false] {
             let action = subscribed ? "sub" : "unsub"
             try await verifyWEAPI("/weapi/cloudvideo/video/\(action)", call: {
-                try await videoLibrary.setVideoSubscribed("00042", subscribed: subscribed)
+                try await videoLibrary.setVideoSubscribed(
+                    "00042",
+                    subscribed: subscribed,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
             }) { $0.string("id") == "00042" }
             count += 1
         }
@@ -470,7 +579,11 @@ enum WriteAPIContractCheck {
 
         for subscribed in [true, false] {
             try await verifyWEAPI("/weapi/djradio/\(subscribed ? "sub" : "unsub")", call: {
-                try await audioLibrary.setPodcastSubscribed(42, subscribed: subscribed)
+                try await audioLibrary.setPodcastSubscribed(
+                    42,
+                    subscribed: subscribed,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
             }) { $0.int64("id") == 42 }
             count += 1
         }
@@ -533,7 +646,13 @@ enum WriteAPIContractCheck {
                 "/eapi/content/interact/collect",
                 signing: "/api/content/interact/collect",
                 host: "interface.music.163.com",
-                call: { try await audioLibrary.setBroadcastCollected("0007", collected: collected) }
+                call: {
+                    try await audioLibrary.setBroadcastCollected(
+                        "0007",
+                        collected: collected,
+                        expectedCredentialRevision: expectedCredentialRevision
+                    )
+                }
             ) {
                 $0.string("contentType") == "BROADCAST"
                     && $0.string("contentId") == "0007"
@@ -567,7 +686,11 @@ enum WriteAPIContractCheck {
 
         RequestCaptureProtocol.reset()
         do {
-            _ = try await library.addComment(songID: 42, content: " \n ")
+            _ = try await library.addComment(
+                songID: 42,
+                content: " \n ",
+                expectedCredentialRevision: expectedCredentialRevision
+            )
             preconditionFailure("Whitespace-only comments must fail before the network")
         } catch EAPIError.invalidPayload {
         }
@@ -591,7 +714,10 @@ enum WriteAPIContractCheck {
 
         RequestCaptureProtocol.reset()
         do {
-            try await library.updatePlaylistOrder([])
+            try await library.updatePlaylistOrder(
+                [],
+                expectedCredentialRevision: expectedCredentialRevision
+            )
             preconditionFailure("An empty playlist order must fail before the network")
         } catch EAPIError.invalidPayload {
         }
@@ -798,7 +924,8 @@ enum WriteAPIContractCheck {
             try await repository.recordPlaybackStart(
                 for: 17,
                 sourceID: 23,
-                totalSeconds: 300
+                totalSeconds: 300,
+                expectedCredentialRevision: reportingCredentialRevision
             )
         }
         count += 1
@@ -808,14 +935,20 @@ enum WriteAPIContractCheck {
                 for: 17,
                 sourceID: 23,
                 playedSeconds: 42,
-                totalSeconds: 300
+                totalSeconds: 300,
+                expectedCredentialRevision: reportingCredentialRevision
             )
         }
         count += 1
 
         RequestCaptureProtocol.reset()
         do {
-            try await repository.recordPlaybackStart(for: 17, sourceID: 0, totalSeconds: 300)
+            try await repository.recordPlaybackStart(
+                for: 17,
+                sourceID: 0,
+                totalSeconds: 300,
+                expectedCredentialRevision: reportingCredentialRevision
+            )
             preconditionFailure("Invalid playback sources must fail before networking")
         } catch EAPIError.invalidPayload {
         }
@@ -829,7 +962,8 @@ enum WriteAPIContractCheck {
                 try await repository.recordPodcastPlayback(
                     for: 201,
                     positionMilliseconds: 12_345,
-                    completed: false
+                    completed: false,
+                    expectedCredentialRevision: reportingCredentialRevision
                 )
             }
         ) {
@@ -913,7 +1047,9 @@ enum WriteAPIContractCheck {
         }
 
         try await verifyWEAPI("/weapi/tag/my/preference/get", call: {
-            _ = try await knowledgeLibrary.preferredStyleIDs()
+            _ = try await knowledgeLibrary.preferredStyleIDs(
+                expectedCredentialRevision: knowledgeLibrary.transport.credentialSnapshotValue().revision
+            )
         }) { $0.string("csrf_token") == "csrf" }
         count += 1
 
@@ -962,16 +1098,23 @@ enum WriteAPIContractCheck {
         precondition(RequestCaptureProtocol.requestCount() == 1)
         count += 1
 
-        count += try await verifyListenTogether(listenTogetherService)
+        count += try await verifyListenTogether(
+            listenTogetherService,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
         try await verifyListenTogetherRequestPolicies(
             service: listenTogetherService,
-            transport: transport
+            transport: transport,
+            expectedCredentialRevision: expectedCredentialRevision
         )
 
         print("Write API contract checks passed: \(count) requests captured locally")
     }
 
-    private static func verifyListenTogether(_ service: LiveListenTogetherService) async throws -> Int {
+    private static func verifyListenTogether(
+        _ service: LiveListenTogetherService,
+        expectedCredentialRevision: UInt64
+    ) async throws -> Int {
         let playCommand = try ListenTogetherPlayCommand(
             commandType: .goTo,
             progress: 12_345,
@@ -984,6 +1127,7 @@ enum WriteAPIContractCheck {
             commandType: .replace,
             userID: 99,
             version: 8,
+            playMode: .random,
             randomList: [43, 42],
             displayList: [42, 43]
         )
@@ -991,7 +1135,11 @@ enum WriteAPIContractCheck {
         try await verify(
             "/eapi/listen/together/room/create",
             signing: "/api/listen/together/room/create",
-            call: { _ = try await service.createRoom() }
+            call: {
+                _ = try await service.createRoom(
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+            }
         ) { $0.string("refer") == "songplay_more" }
         try await verify(
             "/eapi/listen/together/room/check",
@@ -1001,7 +1149,13 @@ enum WriteAPIContractCheck {
         try await verify(
             "/eapi/listen/together/play/invitation/accept",
             signing: "/api/listen/together/play/invitation/accept",
-            call: { _ = try await service.acceptInvitation(roomID: "room-1", inviterID: 99) }
+            call: {
+                _ = try await service.acceptInvitation(
+                    roomID: "room-1",
+                    inviterID: 99,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+            }
         ) {
             $0.string("refer") == "inbox_invite"
                 && $0.string("roomId") == "room-1"
@@ -1018,7 +1172,8 @@ enum WriteAPIContractCheck {
                     roomID: "room-1",
                     songID: 42,
                     playStatus: .playing,
-                    progress: 12_345
+                    progress: 12_345,
+                    expectedCredentialRevision: expectedCredentialRevision
                 )
             }
         ) {
@@ -1030,7 +1185,13 @@ enum WriteAPIContractCheck {
         try await verify(
             "/eapi/listen/together/play/command/report",
             signing: "/api/listen/together/play/command/report",
-            call: { _ = try await service.reportPlayCommand(roomID: "room-1", command: playCommand) }
+            call: {
+                _ = try await service.reportPlayCommand(
+                    roomID: "room-1",
+                    command: playCommand,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+            }
         ) {
             guard $0.string("roomId") == "room-1",
                   let command = jsonObject($0.string("commandInfo"))
@@ -1045,7 +1206,13 @@ enum WriteAPIContractCheck {
         try await verify(
             "/eapi/listen/together/sync/list/command/report",
             signing: "/api/listen/together/sync/list/command/report",
-            call: { _ = try await service.reportPlaylistCommand(roomID: "room-1", command: playlistCommand) }
+            call: {
+                _ = try await service.reportPlaylistCommand(
+                    roomID: "room-1",
+                    command: playlistCommand,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+            }
         ) {
             guard $0.string("roomId") == "room-1",
                   let playlist = jsonObject($0.string("playlistParam")),
@@ -1083,7 +1250,9 @@ enum WriteAPIContractCheck {
 
         RequestCaptureProtocol.reset()
         do {
-            _ = try await service.realtimeCredentials()
+            _ = try await service.realtimeCredentials(
+                expectedCredentialRevision: expectedCredentialRevision
+            )
             preconditionFailure("Expected the local HTTP 400 response")
         } catch EAPIError.http(400) {
         }
@@ -1117,7 +1286,12 @@ enum WriteAPIContractCheck {
         try await verify(
             "/eapi/listen/together/end/v2",
             signing: "/api/listen/together/end/v2",
-            call: { _ = try await service.endRoom(roomID: "room-1") }
+            call: {
+                _ = try await service.endRoom(
+                    roomID: "room-1",
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+            }
         ) {
             $0.count == 1 && $0["roomId"] as? String == "room-1"
         }
@@ -1134,7 +1308,8 @@ enum WriteAPIContractCheck {
 
     private static func verifyListenTogetherRequestPolicies(
         service: LiveListenTogetherService,
-        transport: EAPITransport
+        transport: EAPITransport,
+        expectedCredentialRevision: UInt64
     ) async throws {
         RequestCaptureProtocol.reset(responses: [
             "/eapi/listen/together/heartbeat": (500, Data(#"{"code":500}"#.utf8))
@@ -1144,7 +1319,8 @@ enum WriteAPIContractCheck {
                 roomID: "room-1",
                 songID: 42,
                 playStatus: .paused,
-                progress: 0
+                progress: 0,
+                expectedCredentialRevision: expectedCredentialRevision
             )
             preconditionFailure("The local HTTP 500 response must fail")
         } catch EAPIError.http(500) {
@@ -1179,7 +1355,11 @@ enum WriteAPIContractCheck {
             probePath: "/eapi/listen/together/cache-probe-eapi",
             realtimePath: "/eapi/listen/together/room/create",
             transport: transport,
-            call: { _ = try await service.createRoom() }
+            call: {
+                _ = try await service.createRoom(
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+            }
         )
         try await verifyListenTogetherDoesNotInvalidateCache(
             probePath: "/eapi/listen/together/cache-probe-weapi",
@@ -1374,7 +1554,10 @@ enum WriteAPIContractCheck {
         }
     }
 
-    private static func verifyCoverUpload(library: LiveMusicLibrary) async throws {
+    private static func verifyCoverUpload(
+        library: LiveMusicLibrary,
+        expectedCredentialRevision: UInt64
+    ) async throws {
         RequestCaptureProtocol.reset(responses: [
             "/weapi/nos/token/alloc": (200, Data(#"{"code":200,"result":{"objectKey":"object-key.jpg","token":"nos-token","docId":"987654"}}"#.utf8)),
             "/yyimgs/object-key.jpg": (200, Data()),
@@ -1387,7 +1570,8 @@ enum WriteAPIContractCheck {
                 filename: "cover.jpg",
                 width: 1_000,
                 height: 1_000
-            )
+            ),
+            expectedCredentialRevision: expectedCredentialRevision
         )
         let requests = RequestCaptureProtocol.requests()
         guard requests.count == 3,
@@ -1421,7 +1605,10 @@ enum WriteAPIContractCheck {
         else { preconditionFailure("Playlist cover update contract mismatch") }
     }
 
-    private static func verifyCoverFailureStops(library: LiveMusicLibrary) async throws {
+    private static func verifyCoverFailureStops(
+        library: LiveMusicLibrary,
+        expectedCredentialRevision: UInt64
+    ) async throws {
         let allocation = Data(#"{"code":200,"result":{"objectKey":"object-key.jpg","token":"nos-token","docId":"987654"}}"#.utf8)
         let cover = ProcessedPlaylistCover(
             jpegData: Data([1, 2, 3]),
@@ -1444,7 +1631,11 @@ enum WriteAPIContractCheck {
         for (responses, expectedCount) in cases {
             RequestCaptureProtocol.reset(responses: responses)
             do {
-                try await library.updatePlaylistCover(16, cover: cover)
+                try await library.updatePlaylistCover(
+                    16,
+                    cover: cover,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
                 preconditionFailure("A failed cover stage must stop the upload")
             } catch EAPIError.http(500) {
             }
@@ -1454,7 +1645,8 @@ enum WriteAPIContractCheck {
 
     private static func verifyAudioUploadContracts(
         library: LiveMusicLibrary,
-        audioLibrary: LiveAudioContentLibrary
+        audioLibrary: LiveAudioContentLibrary,
+        expectedCredentialRevision: UInt64
     ) async throws {
         let form = PodcastUploadForm(
             name: "Episode",
@@ -1490,10 +1682,23 @@ enum WriteAPIContractCheck {
             "/eapi/upload/cloud/info/v2": (200, Data(#"{"code":200,"songId":43}"#.utf8)),
             "/eapi/cloud/pub/v2": (200, Data(#"{"code":200}"#.utf8))
         ])
-        let check = try await library.checkCloudUpload(manifest)
-        let allocation = try await library.allocateCloudUpload(manifest)
-        let registeredID = try await library.registerCloudUpload(manifest, allocation: allocation)
-        try await library.publishCloudUpload(songID: registeredID)
+        let check = try await library.checkCloudUpload(
+            manifest,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
+        let allocation = try await library.allocateCloudUpload(
+            manifest,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
+        let registeredID = try await library.registerCloudUpload(
+            manifest,
+            allocation: allocation,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
+        try await library.publishCloudUpload(
+            songID: registeredID,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
         let cloudRequests = RequestCaptureProtocol.requests()
         guard check == CloudUploadCheck(needsUpload: true, songID: 41),
               allocation.resourceID == "42",
@@ -1525,9 +1730,22 @@ enum WriteAPIContractCheck {
             "/weapi/voice/workbench/voice/batch/upload/v2": (200, Data(#"{"code":200}"#.utf8))
         ])
         manifest.podcastForm = form
-        let podcastAllocation = try await audioLibrary.allocatePodcastUpload(manifest)
-        try await audioLibrary.precheckPodcastUpload(form: form, documentID: 75, token: podcastAllocation.token)
-        try await audioLibrary.submitPodcastUpload(form: form, documentID: 75, token: podcastAllocation.token)
+        let podcastAllocation = try await audioLibrary.allocatePodcastUpload(
+            manifest,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
+        try await audioLibrary.precheckPodcastUpload(
+            form: form,
+            documentID: 75,
+            token: podcastAllocation.token,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
+        try await audioLibrary.submitPodcastUpload(
+            form: form,
+            documentID: 75,
+            token: podcastAllocation.token,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
         let podcastRequests = RequestCaptureProtocol.requests()
         guard podcastRequests.count == 3,
               let podcastAllocationBody = podcastRequests[0].httpBody,
@@ -1554,7 +1772,11 @@ enum WriteAPIContractCheck {
             "/eapi/upload/cloud/info/v2": (500, Data())
         ])
         do {
-            _ = try await library.registerCloudUpload(manifest, allocation: allocation)
+            _ = try await library.registerCloudUpload(
+                manifest,
+                allocation: allocation,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
             preconditionFailure("Unknown cloud registration must fail")
         } catch EAPIError.http(500) {
         }

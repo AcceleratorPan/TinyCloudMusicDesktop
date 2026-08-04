@@ -18,8 +18,13 @@ struct CloudMusicView: View {
     @State private var isImporting = false
     @State private var showsUploadTasks = false
     @State private var uploadError: String?
+    @State private var uploadRefreshTask: Task<Void, Never>?
+    @State private var uploadRefreshID: UUID?
 
     private let pageSize = 30
+    private var credentialRevision: UInt64 {
+        library.transport.credentialSnapshotValue().revision
+    }
 
     var body: some View {
         Group {
@@ -78,7 +83,7 @@ struct CloudMusicView: View {
             }
         }
         .onChange(of: model.uploads?.completionRevision ?? 0) { _, _ in
-            Task { await load(reset: true) }
+            scheduleUploadRefresh()
         }
         .fileImporter(isPresented: $isImporting, allowedContentTypes: [.audio]) { result in
             switch result {
@@ -103,8 +108,13 @@ struct CloudMusicView: View {
         } message: {
             Text(uploadError ?? "")
         }
-        .task(id: model.currentUserID) { await load(reset: true) }
-        .task(id: selectedID) { await loadSelectedDetail() }
+        .task(id: "\(model.currentUserID ?? 0):\(credentialRevision)") { await load(reset: true) }
+        .task(id: "\(selectedID ?? 0):\(credentialRevision)") { await loadSelectedDetail() }
+        .onDisappear {
+            uploadRefreshTask?.cancel()
+            uploadRefreshTask = nil
+            uploadRefreshID = nil
+        }
     }
 
     private var cloudList: some View {
@@ -217,19 +227,26 @@ struct CloudMusicView: View {
     }
 
     @MainActor
-    private func load(reset: Bool) async {
-        guard model.currentUserID != nil else {
+    private func load(
+        reset: Bool,
+        preservingVisiblePage: Bool = false,
+        forceRefresh: Bool = false
+    ) async {
+        guard let accountID = model.currentUserID else {
             page = nil
             return
         }
+        let credentialRevision = credentialRevision
         if reset {
-            generation &+= 1
+            generation += 1
             isLoadingMore = false
-            loadingDetailID = nil
-            selectedID = nil
-            details = [:]
-            detailErrors = [:]
-            page = nil
+            if !preservingVisiblePage {
+                loadingDetailID = nil
+                selectedID = nil
+                details = [:]
+                detailErrors = [:]
+                page = nil
+            }
             errorMessage = nil
             loadMoreError = nil
         }
@@ -237,52 +254,125 @@ struct CloudMusicView: View {
         isLoading = true
         defer { if generation == currentGeneration { isLoading = false } }
         do {
-            let loaded = try await library.cloudSongs(limit: pageSize)
+            let loaded = try await library.cloudSongs(
+                limit: pageSize,
+                forceRefresh: forceRefresh,
+                expectedCredentialRevision: credentialRevision
+            )
             try Task.checkCancellation()
-            guard generation == currentGeneration else { return }
+            guard generation == currentGeneration,
+                  model.currentUserID == accountID,
+                  self.credentialRevision == credentialRevision
+            else { return }
             page = loaded
+            if preservingVisiblePage {
+                selectedID = nil
+                loadingDetailID = nil
+                details = [:]
+                detailErrors = [:]
+            }
         } catch is CancellationError {
         } catch {
-            guard generation == currentGeneration else { return }
-            errorMessage = error.localizedDescription
+            guard generation == currentGeneration,
+                  model.currentUserID == accountID,
+                  self.credentialRevision == credentialRevision
+            else { return }
+            if preservingVisiblePage, page != nil {
+                loadMoreError = error.localizedDescription
+            } else {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
     @MainActor
     private func loadMore() async {
-        guard let page, page.hasMore, !isLoadingMore else { return }
+        guard let page, let accountID = model.currentUserID, page.hasMore, !isLoadingMore else { return }
+        let credentialRevision = credentialRevision
         let currentGeneration = generation
         isLoadingMore = true
         loadMoreError = nil
         defer { if generation == currentGeneration { isLoadingMore = false } }
         do {
-            let next = try await library.cloudSongs(offset: page.offset + pageSize, limit: pageSize)
+            let requestOffset = page.offset + pageSize
+            guard requestOffset > page.offset else {
+                self.page = CloudSongPage(
+                    songs: page.songs,
+                    offset: page.offset,
+                    hasMore: false,
+                    totalCount: page.totalCount
+                )
+                return
+            }
+            let next = try await library.cloudSongs(
+                offset: requestOffset,
+                limit: pageSize,
+                expectedCredentialRevision: credentialRevision
+            )
             try Task.checkCancellation()
-            guard generation == currentGeneration else { return }
-            self.page = page.appending(next)
+            guard generation == currentGeneration,
+                  model.currentUserID == accountID,
+                  self.credentialRevision == credentialRevision
+            else { return }
+            self.page = page.merging(next).page
         } catch is CancellationError {
         } catch {
-            guard generation == currentGeneration else { return }
+            guard generation == currentGeneration,
+                  model.currentUserID == accountID,
+                  self.credentialRevision == credentialRevision
+            else { return }
             loadMoreError = error.localizedDescription
         }
     }
 
     @MainActor
     private func loadSelectedDetail() async {
-        guard let selectedID, details[selectedID] == nil else { return }
+        guard let selectedID, let accountID = model.currentUserID, details[selectedID] == nil else { return }
+        let credentialRevision = credentialRevision
         let currentGeneration = generation
         loadingDetailID = selectedID
         detailErrors[selectedID] = nil
         defer { if loadingDetailID == selectedID { loadingDetailID = nil } }
         do {
-            let detail = try await library.cloudSongDetails(ids: [selectedID]).first
+            let detail = try await library.cloudSongDetails(
+                ids: [selectedID],
+                expectedCredentialRevision: credentialRevision
+            ).first
             try Task.checkCancellation()
-            guard generation == currentGeneration, self.selectedID == selectedID else { return }
+            guard generation == currentGeneration, model.currentUserID == accountID,
+                  self.selectedID == selectedID
+                    && self.credentialRevision == credentialRevision
+            else { return }
             if let detail { details[selectedID] = detail }
         } catch is CancellationError {
         } catch {
-            guard generation == currentGeneration, self.selectedID == selectedID else { return }
+            guard generation == currentGeneration, model.currentUserID == accountID,
+                  self.selectedID == selectedID
+                    && self.credentialRevision == credentialRevision
+            else { return }
             detailErrors[selectedID] = error.localizedDescription
+        }
+    }
+
+    private func scheduleUploadRefresh() {
+        guard let accountID = model.currentUserID else { return }
+        uploadRefreshTask?.cancel()
+        let taskID = UUID()
+        uploadRefreshID = taskID
+        uploadRefreshTask = Task { @MainActor in
+            defer {
+                if uploadRefreshID == taskID {
+                    uploadRefreshTask = nil
+                    uploadRefreshID = nil
+                }
+            }
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+                guard model.currentUserID == accountID else { return }
+                await load(reset: true, preservingVisiblePage: true, forceRefresh: true)
+            } catch is CancellationError {
+            } catch {
+            }
         }
     }
 }

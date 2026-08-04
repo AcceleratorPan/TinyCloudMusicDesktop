@@ -11,21 +11,41 @@ struct LiveMusicLibrary: Sendable {
         self.transport = transport
     }
 
-    func loginState() async throws -> MusicLibraryLoginState {
+    func loginState(
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64? = nil
+    ) async throws -> MusicLibraryLoginState {
         let endpoint = EAPIEndpoint("/eapi/v1/user/info", signing: "/api/v1/user/info")
-        let root = try rawObject(try await transport.request(endpoint, json: Data()))
+        let root = try await transport.requestJSONObject(
+            endpoint,
+            json: Data(),
+            cache: .library,
+            refreshCache: forceRefresh,
+            expectedCredentialRevision: expectedCredentialRevision,
+            allowsDomainBusinessCodes: true
+        )
         guard (200..<300).contains(root.int("code")) else { return .loggedOut }
         let userID = root.object("userPoint").int64("userId")
         guard userID != 0 else { return .loggedOut }
 
-        return .loggedIn(try await userInfo(userID: userID))
+        return .loggedIn(try await userInfo(
+            userID: userID,
+            forceRefresh: forceRefresh,
+            expectedCredentialRevision: expectedCredentialRevision
+        ))
     }
 
-    func userInfo(userID: Int64) async throws -> MusicLibraryUser {
+    func userInfo(
+        userID: Int64,
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64? = nil
+    ) async throws -> MusicLibraryUser {
         guard userID > 0 else { throw EAPIError.invalidPayload }
         let root = try await call(
             EAPIEndpoint("/eapi/v1/user/detail", signing: "/api/v1/user/detail/\(userID)"),
-            json: Data()
+            json: Data(),
+            refreshCache: forceRefresh,
+            expectedCredentialRevision: expectedCredentialRevision
         )
         guard let user = MusicLibraryDecoder.user(root.object("profile"), root: root) else {
             throw EAPIError.missingData("profile")
@@ -33,30 +53,66 @@ struct LiveMusicLibrary: Sendable {
         return user
     }
 
-    func dailyRecommendations() async throws -> [Song] {
+    func dailyRecommendations(
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [Song] {
         let root = try await call(
             EAPIEndpoint(
                 "/api/v3/discovery/recommend/songs",
                 signing: "/api/v3/discovery/recommend/songs"
             ),
-            json: Data()
+            json: Data(),
+            refreshCache: forceRefresh,
+            expectedCredentialRevision: expectedCredentialRevision
         )
         return root.object("data").array("dailySongs").compactMap(songDecoder.decodeLiveSong)
     }
 
-    func userPlaylists(userID: Int64) async throws -> [Playlist] {
+    func userPlaylists(
+        userID: Int64,
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64,
+        onUpdate: (@MainActor @Sendable ([Playlist]) -> Void)? = nil
+    ) async throws -> [Playlist] {
         guard userID > 0 else { throw EAPIError.invalidPayload }
-        let root = try await call(
-            EAPIEndpoint("/eapi/user/playlist", signing: "/api/user/playlist"),
-            payload: ["uid": userID, "offset": 0, "limit": 1_000],
-            cache: .playlistSummaries
-        )
-        return root.array("playlist").compactMap(songDecoder.decodeLivePlaylist)
+        let endpoint = EAPIEndpoint("/eapi/user/playlist", signing: "/api/user/playlist")
+        var playlists: [Playlist] = []
+        var seen = Set<Int64>()
+        var offset = 0
+        while true {
+            let limit = 100
+            let root = try await call(
+                endpoint,
+                payload: ["uid": userID, "offset": offset, "limit": limit],
+                cache: .playlistSummaries,
+                refreshCache: forceRefresh,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
+            try Task.checkCancellation()
+            let raw = Array(root.array("playlist").prefix(limit))
+            let page = raw.compactMap(songDecoder.decodeLivePlaylist)
+            let added = page.filter { seen.insert($0.id).inserted }
+            playlists.append(contentsOf: added)
+            if !added.isEmpty { await onUpdate?(playlists) }
+            let nextOffset = offset + raw.count
+            guard root.bool("more"), !raw.isEmpty, !added.isEmpty,
+                  nextOffset > offset
+            else { break }
+            offset = nextOffset
+        }
+        return playlists
     }
 
-    func recommendationHistoryDates() async throws -> [RecommendationHistoryDate] {
+    func recommendationHistoryDates(
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [RecommendationHistoryDate] {
         decodeRecommendationHistoryDates(
-            try decodedJSONObject(try await transport.requestRecommendationHistory())
+            try await transport.requestRecommendationHistory(
+                refreshCache: forceRefresh,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
         )
     }
 
@@ -66,11 +122,17 @@ struct LiveMusicLibrary: Sendable {
 
     func historicalDailyRecommendations(
         on date: RecommendationHistoryDate,
-        availableDates: [RecommendationHistoryDate]
+        availableDates: [RecommendationHistoryDate],
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64
     ) async throws -> [Song] {
         guard availableDates.contains(date) else { throw EAPIError.invalidPayload }
         return decodeHistoricalDailyRecommendations(
-            try decodedJSONObject(try await transport.requestRecommendationHistory(date: date.value))
+            try await transport.requestRecommendationHistory(
+                date: date.value,
+                refreshCache: forceRefresh,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
         )
     }
 
@@ -78,40 +140,100 @@ struct LiveMusicLibrary: Sendable {
         root.object("data").array("songs").compactMap(songDecoder.decodeLiveSong)
     }
 
-    func recentlyPlayedSongs(limit: Int = 100) async throws -> [Song] {
-        decodeRecentlyPlayedSongs(try await recentPlaybackRoot(.song, limit: limit))
+    func recentlyPlayedSongs(
+        limit: Int = 100,
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [Song] {
+        decodeRecentlyPlayedSongs(
+            try await recentPlaybackRoot(
+                .song,
+                limit: limit,
+                forceRefresh: forceRefresh,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
+        )
     }
 
     func decodeRecentlyPlayedSongs(_ root: [String: Any]) -> [Song] {
         decodeRecentResources(root, kind: .song, decode: songDecoder.decodeLiveSong, title: \.name)
     }
 
-    func recentlyPlayedAlbums(limit: Int = 100) async throws -> [Album] {
-        decodeRecentlyPlayedAlbums(try await recentPlaybackRoot(.album, limit: limit))
+    func recentlyPlayedAlbums(
+        limit: Int = 100,
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [Album] {
+        decodeRecentlyPlayedAlbums(
+            try await recentPlaybackRoot(
+                .album,
+                limit: limit,
+                forceRefresh: forceRefresh,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
+        )
     }
 
     func decodeRecentlyPlayedAlbums(_ root: [String: Any]) -> [Album] {
         decodeRecentResources(root, kind: .album, decode: songDecoder.decodeLiveAlbum, title: \.name)
     }
 
-    func recentlyPlayedPlaylists(limit: Int = 100) async throws -> [Playlist] {
-        decodeRecentlyPlayedPlaylists(try await recentPlaybackRoot(.playlist, limit: limit))
+    func recentlyPlayedPlaylists(
+        limit: Int = 100,
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [Playlist] {
+        decodeRecentlyPlayedPlaylists(
+            try await recentPlaybackRoot(
+                .playlist,
+                limit: limit,
+                forceRefresh: forceRefresh,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
+        )
     }
 
     func decodeRecentlyPlayedPlaylists(_ root: [String: Any]) -> [Playlist] {
         decodeRecentResources(root, kind: .playlist, decode: songDecoder.decodeLivePlaylist, title: \.name)
     }
 
-    func recentlyPlayedVideos(limit: Int = 100) async throws -> [RecentMediaSummary] {
-        try await recentlyPlayedMedia(.video, limit: limit)
+    func recentlyPlayedVideos(
+        limit: Int = 100,
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [RecentMediaSummary] {
+        try await recentlyPlayedMedia(
+            .video,
+            limit: limit,
+            forceRefresh: forceRefresh,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
     }
 
-    func recentlyPlayedVoices(limit: Int = 100) async throws -> [RecentMediaSummary] {
-        try await recentlyPlayedMedia(.voice, limit: limit)
+    func recentlyPlayedVoices(
+        limit: Int = 100,
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [RecentMediaSummary] {
+        try await recentlyPlayedMedia(
+            .voice,
+            limit: limit,
+            forceRefresh: forceRefresh,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
     }
 
-    func recentlyPlayedPodcasts(limit: Int = 100) async throws -> [RecentMediaSummary] {
-        try await recentlyPlayedMedia(.podcast, limit: limit)
+    func recentlyPlayedPodcasts(
+        limit: Int = 100,
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [RecentMediaSummary] {
+        try await recentlyPlayedMedia(
+            .podcast,
+            limit: limit,
+            forceRefresh: forceRefresh,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
     }
 
     func decodeRecentlyPlayedMedia(
@@ -121,11 +243,19 @@ struct LiveMusicLibrary: Sendable {
         MusicLibraryDecoder.recentMedia(root, kind: kind)
     }
 
-    func listeningRecords(userID: Int64, period: MusicListeningPeriod) async throws -> [MusicListeningRecord] {
+    func listeningRecords(
+        userID: Int64,
+        period: MusicListeningPeriod,
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [MusicListeningRecord] {
         guard userID > 0 else { throw EAPIError.invalidPayload }
         let root = try await call(
             EAPIEndpoint("/eapi/v1/play/record", signing: "/api/v1/play/record"),
-            payload: ["uid": String(userID), "type": period.rawValue]
+            payload: ["uid": String(userID), "type": period.rawValue],
+            cache: .listeningHistory,
+            refreshCache: forceRefresh,
+            expectedCredentialRevision: expectedCredentialRevision
         )
         return decodeListeningRecords(root, period: period)
     }
@@ -144,7 +274,10 @@ struct LiveMusicLibrary: Sendable {
         }
     }
 
-    func totalListeningDuration(forceRefresh: Bool = false) async throws -> Int64 {
+    func totalListeningDuration(
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64
+    ) async throws -> Int64 {
         // This endpoint rejects the VIP requester and must use the account's original cookie.
         let root = try await call(
             EAPIEndpoint(
@@ -153,7 +286,9 @@ struct LiveMusicLibrary: Sendable {
                 host: Self.eapiHost
             ),
             payload: [:],
-            cache: forceRefresh ? nil : .library,
+            cache: .listeningHistory,
+            refreshCache: forceRefresh,
+            expectedCredentialRevision: expectedCredentialRevision,
             includesClientHeader: true
         )
         try requireSuccess(root)
@@ -177,7 +312,10 @@ struct LiveMusicLibrary: Sendable {
         return duration
     }
 
-    func todayListeningRank(forceRefresh: Bool = false) async throws -> [ListeningRankEntry] {
+    func todayListeningRank(
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [ListeningRankEntry] {
         let root = try await call(
             EAPIEndpoint(
                 "/eapi/content/activity/listen/data/today/song/play/rank",
@@ -185,7 +323,9 @@ struct LiveMusicLibrary: Sendable {
                 host: Self.eapiHost
             ),
             payload: [:],
-            cache: forceRefresh ? nil : .library,
+            cache: .listeningHistory,
+            refreshCache: forceRefresh,
+            expectedCredentialRevision: expectedCredentialRevision,
             includesClientHeader: true
         )
         try requireSuccess(root)
@@ -195,7 +335,8 @@ struct LiveMusicLibrary: Sendable {
     func listeningSongRank(
         period: ListeningReportPeriod,
         cursor: ListeningReportCursor? = nil,
-        forceRefresh: Bool = false
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64
     ) async throws -> [ListeningRankEntry] {
         guard period != .year else { throw EAPIError.invalidPayload }
         let root = try await call(
@@ -205,7 +346,9 @@ struct LiveMusicLibrary: Sendable {
                 host: Self.eapiHost
             ),
             payload: listeningPayload(period: period, cursor: cursor),
-            cache: forceRefresh ? nil : .library,
+            cache: .listeningHistory,
+            refreshCache: forceRefresh,
+            expectedCredentialRevision: expectedCredentialRevision,
             includesClientHeader: true
         )
         try requireSuccess(root)
@@ -214,7 +357,8 @@ struct LiveMusicLibrary: Sendable {
 
     func realtimeListeningReport(
         period: ListeningReportPeriod,
-        forceRefresh: Bool = false
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64
     ) async throws -> ListeningReport {
         guard period != .year else { throw EAPIError.invalidPayload }
         let root = try await call(
@@ -224,7 +368,9 @@ struct LiveMusicLibrary: Sendable {
                 host: Self.eapiHost
             ),
             payload: ["type": period.rawValue],
-            cache: forceRefresh ? nil : .library,
+            cache: .listeningHistory,
+            refreshCache: forceRefresh,
+            expectedCredentialRevision: expectedCredentialRevision,
             includesClientHeader: true
         )
         try requireSuccess(root)
@@ -234,7 +380,8 @@ struct LiveMusicLibrary: Sendable {
     func listeningReport(
         period: ListeningReportPeriod,
         cursor: ListeningReportCursor? = nil,
-        forceRefresh: Bool = false
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64
     ) async throws -> ListeningReport {
         let root = try await call(
             EAPIEndpoint(
@@ -243,14 +390,19 @@ struct LiveMusicLibrary: Sendable {
                 host: Self.eapiHost
             ),
             payload: listeningPayload(period: period, cursor: cursor),
-            cache: forceRefresh ? nil : .library,
+            cache: .listeningHistory,
+            refreshCache: forceRefresh,
+            expectedCredentialRevision: expectedCredentialRevision,
             includesClientHeader: true
         )
         try requireSuccess(root)
         return decodeListeningReport(root, period: period, defaultTitle: "\(period.title)听歌报告")
     }
 
-    func yearListeningFootprints(forceRefresh: Bool = false) async throws -> [YearListeningFootprint] {
+    func yearListeningFootprints(
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [YearListeningFootprint] {
         let root = try await call(
             EAPIEndpoint(
                 "/eapi/content/activity/listen/data/year/report",
@@ -258,7 +410,9 @@ struct LiveMusicLibrary: Sendable {
                 host: Self.eapiHost
             ),
             payload: [:],
-            cache: forceRefresh ? nil : .library,
+            cache: .listeningHistory,
+            refreshCache: forceRefresh,
+            expectedCredentialRevision: expectedCredentialRevision,
             includesClientHeader: true
         )
         try requireSuccess(root)
@@ -267,7 +421,8 @@ struct LiveMusicLibrary: Sendable {
 
     func annualListeningReport(
         year: Int,
-        forceRefresh: Bool = false
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64
     ) async throws -> AnnualListeningReport {
         guard AnnualListeningReportDecoder.supportedYears.contains(year) else {
             throw EAPIError.invalidPayload
@@ -281,7 +436,9 @@ struct LiveMusicLibrary: Sendable {
                 host: Self.eapiHost
             ),
             payload: [:],
-            cache: forceRefresh ? nil : .library,
+            cache: .listeningHistory,
+            refreshCache: forceRefresh,
+            expectedCredentialRevision: expectedCredentialRevision,
             includesClientHeader: true
         )
         try requireSuccess(root)
@@ -290,7 +447,8 @@ struct LiveMusicLibrary: Sendable {
 
     func firstListenMemory(
         songID: Int64,
-        forceRefresh: Bool = false
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64
     ) async throws -> FirstListenMemory {
         guard songID > 0 else { throw EAPIError.invalidPayload }
         let root = try await call(
@@ -300,7 +458,9 @@ struct LiveMusicLibrary: Sendable {
                 host: Self.eapiHost
             ),
             payload: ["songId": songID],
-            cache: forceRefresh ? nil : .detail
+            cache: .listeningHistory,
+            refreshCache: forceRefresh,
+            expectedCredentialRevision: expectedCredentialRevision
         )
         try requireSuccess(root)
         return decodeFirstListenMemory(root)
@@ -346,7 +506,11 @@ struct LiveMusicLibrary: Sendable {
         ListeningReportDecoder.firstListenMemory(root, now: now)
     }
 
-    func personalFM(mode: PersonalFMMode, limit: Int = 3) async throws -> [PersonalFMTrack] {
+    func personalFM(
+        mode: PersonalFMMode,
+        limit: Int = 3,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [PersonalFMTrack] {
         guard (1...10).contains(limit) else { throw EAPIError.invalidPayload }
         let values = mode.requestValues
         let root = try await call(
@@ -356,7 +520,8 @@ struct LiveMusicLibrary: Sendable {
                 host: Self.eapiHost
             ),
             payload: ["mode": values.mode, "subMode": values.subMode, "limit": limit],
-            cache: nil
+            cache: nil,
+            expectedCredentialRevision: expectedCredentialRevision
         )
         return decodePersonalFM(root)
     }
@@ -369,41 +534,51 @@ struct LiveMusicLibrary: Sendable {
         }
     }
 
-    func trashPersonalFMTrack(_ track: PersonalFMTrack, playedSeconds: Int) async throws {
-        _ = try decodedJSONObject(
-            try await transport.requestFMTrash(
-                songID: track.id,
-                algorithm: track.algorithm,
-                playedSeconds: max(1, playedSeconds)
-            )
+    func trashPersonalFMTrack(
+        _ track: PersonalFMTrack,
+        playedSeconds: Int,
+        expectedCredentialRevision: UInt64
+    ) async throws {
+        _ = try await transport.requestFMTrash(
+            songID: track.id,
+            algorithm: track.algorithm,
+            playedSeconds: max(1, playedSeconds),
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
     func hasActiveVIP() async throws -> Bool {
-        let root = try decodedJSONObject(
-            try await transport.request(
-                EAPIEndpoint(
-                    "/eapi/music-vip-membership/client/vip/info",
-                    signing: "/api/music-vip-membership/client/vip/info",
-                    host: Self.interfaceHost
-                ),
-                json: compactJSON(["verifyId": 1, "e_r": true, "os": "iOS"]),
-                vip: true
-            )
+        let root = try await transport.requestJSONObject(
+            EAPIEndpoint(
+                "/eapi/music-vip-membership/client/vip/info",
+                signing: "/api/music-vip-membership/client/vip/info",
+                host: Self.interfaceHost
+            ),
+            json: compactJSON(["verifyId": 1, "e_r": true, "os": "iOS"]),
+            vip: true
         )
         let data = root.object("data")
         return data.int64("now") < data.object("musicPackage").int64("expireTime")
     }
 
-    func setSongLiked(_ songID: Int64, liked: Bool) async throws {
+    func setSongLiked(
+        _ songID: Int64,
+        liked: Bool,
+        expectedCredentialRevision: UInt64
+    ) async throws {
         guard songID > 0 else { throw EAPIError.invalidPayload }
         _ = try await mutate(
             EAPIEndpoint("/eapi/song/like", signing: "/api/song/like"),
-            payload: ["trackId": songID, "like": liked]
+            payload: ["trackId": songID, "like": liked],
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
-    func setPlaylistSubscribed(_ playlistID: Int64, subscribed: Bool) async throws {
+    func setPlaylistSubscribed(
+        _ playlistID: Int64,
+        subscribed: Bool,
+        expectedCredentialRevision: UInt64
+    ) async throws {
         guard playlistID > 0 else { throw EAPIError.invalidPayload }
         let action = subscribed ? "subscribe" : "unsubscribe"
         _ = try await mutate(
@@ -412,11 +587,16 @@ struct LiveMusicLibrary: Sendable {
                 signing: "/api/playlist/\(action)",
                 host: Self.interfaceHost
             ),
-            payload: ["id": playlistID, "e_r": true, "verifyId": 1]
+            payload: ["id": playlistID, "e_r": true, "verifyId": 1],
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
-    func setAlbumSubscribed(_ albumID: Int64, subscribed: Bool) async throws {
+    func setAlbumSubscribed(
+        _ albumID: Int64,
+        subscribed: Bool,
+        expectedCredentialRevision: UInt64
+    ) async throws {
         guard albumID > 0 else { throw EAPIError.invalidPayload }
         let action = subscribed ? "sub" : "unsub"
         _ = try await mutate(
@@ -425,11 +605,16 @@ struct LiveMusicLibrary: Sendable {
                 signing: "/api/album/\(action)",
                 host: Self.interfaceHost
             ),
-            payload: ["id": String(albumID), "e_r": true, "verifyId": 1]
+            payload: ["id": String(albumID), "e_r": true, "verifyId": 1],
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
-    func setArtistFollowed(_ artistID: Int64, followed: Bool) async throws {
+    func setArtistFollowed(
+        _ artistID: Int64,
+        followed: Bool,
+        expectedCredentialRevision: UInt64
+    ) async throws {
         guard artistID > 0 else { throw EAPIError.invalidPayload }
         let endpoint = followed
             ? EAPIEndpoint(
@@ -445,10 +630,18 @@ struct LiveMusicLibrary: Sendable {
         let payload: [String: Any] = followed
             ? ["artistId": String(artistID), "e_r": true]
             : ["artistIds": try jsonString([artistID]), "e_r": true]
-        _ = try await mutate(endpoint, payload: payload)
+        _ = try await mutate(
+            endpoint,
+            payload: payload,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
     }
 
-    func setUserFollowed(_ userID: Int64, followed: Bool) async throws {
+    func setUserFollowed(
+        _ userID: Int64,
+        followed: Bool,
+        expectedCredentialRevision: UInt64
+    ) async throws {
         guard userID > 0 else { throw EAPIError.invalidPayload }
         let action = followed ? "follow" : "delfollow"
         _ = try await mutate(
@@ -457,11 +650,16 @@ struct LiveMusicLibrary: Sendable {
                 signing: "/api/user/\(action)/\(userID)",
                 host: Self.interfaceHost
             ),
-            payload: ["verifyId": 1, "e_r": true]
+            payload: ["verifyId": 1, "e_r": true],
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
-    func createPlaylist(name: String, privacy: MusicPlaylistPrivacy = .publicPlaylist) async throws -> Int64 {
+    func createPlaylist(
+        name: String,
+        privacy: MusicPlaylistPrivacy = .publicPlaylist,
+        expectedCredentialRevision: UInt64
+    ) async throws -> Int64 {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw EAPIError.invalidPayload }
         let root = try await mutate(
@@ -477,14 +675,16 @@ struct LiveMusicLibrary: Sendable {
                 "type": "NORMAL",
                 "name": name,
                 "e_r": true
-            ]
+            ],
+            expectedCredentialRevision: expectedCredentialRevision,
+            invalidatesGroups: [.playlistSummaries]
         )
         let id = root.int64("id")
         guard id != 0 else { throw EAPIError.missingData("id") }
         return id
     }
 
-    func deletePlaylist(_ playlistID: Int64) async throws {
+    func deletePlaylist(_ playlistID: Int64, expectedCredentialRevision: UInt64) async throws {
         guard playlistID > 0 else { throw EAPIError.invalidPayload }
         _ = try await mutate(
             EAPIEndpoint(
@@ -492,11 +692,17 @@ struct LiveMusicLibrary: Sendable {
                 signing: "/api/playlist/delete",
                 host: Self.interfaceHost
             ),
-            payload: ["os": "iOS", "verifyId": 1, "pid": playlistID, "e_r": true]
+            payload: ["os": "iOS", "verifyId": 1, "pid": playlistID, "e_r": true],
+            expectedCredentialRevision: expectedCredentialRevision,
+            invalidatesGroups: [.playlistSummaries]
         )
     }
 
-    func updatePlaylistName(_ playlistID: Int64, name: String) async throws {
+    func updatePlaylistName(
+        _ playlistID: Int64,
+        name: String,
+        expectedCredentialRevision: UInt64
+    ) async throws {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard playlistID > 0, !name.isEmpty else { throw EAPIError.invalidPayload }
         _ = try await mutate(
@@ -505,11 +711,16 @@ struct LiveMusicLibrary: Sendable {
                 signing: "/api/playlist/update/name",
                 host: "https://interface.music.163.com"
             ),
-            payload: ["id": playlistID, "name": name]
+            payload: ["id": playlistID, "name": name],
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
-    func updatePlaylistDescription(_ playlistID: Int64, description: String) async throws {
+    func updatePlaylistDescription(
+        _ playlistID: Int64,
+        description: String,
+        expectedCredentialRevision: UInt64
+    ) async throws {
         guard playlistID > 0 else { throw EAPIError.invalidPayload }
         _ = try await mutate(
             EAPIEndpoint(
@@ -517,11 +728,16 @@ struct LiveMusicLibrary: Sendable {
                 signing: "/api/playlist/desc/update",
                 host: "https://interface.music.163.com"
             ),
-            payload: ["id": playlistID, "desc": description]
+            payload: ["id": playlistID, "desc": description],
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
-    func updatePlaylistTags(_ playlistID: Int64, tags: [String]) async throws {
+    func updatePlaylistTags(
+        _ playlistID: Int64,
+        tags: [String],
+        expectedCredentialRevision: UInt64
+    ) async throws {
         guard playlistID > 0 else { throw EAPIError.invalidPayload }
         let tags = PlaylistMetadataDraft.normalizeTags(tags)
         _ = try await mutate(
@@ -530,36 +746,47 @@ struct LiveMusicLibrary: Sendable {
                 signing: "/api/playlist/tags/update",
                 host: "https://interface.music.163.com"
             ),
-            payload: ["id": playlistID, "tags": tags.joined(separator: ";")]
+            payload: ["id": playlistID, "tags": tags.joined(separator: ";")],
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
     func updatePlaylistCover(
         _ playlistID: Int64,
-        cover: ProcessedPlaylistCover
+        cover: ProcessedPlaylistCover,
+        expectedCredentialRevision: UInt64
     ) async throws {
         guard playlistID > 0 else { throw EAPIError.invalidPayload }
         try await PlaylistImageUpload(transport: transport).updateCover(
             playlistID: playlistID,
-            cover: cover
+            cover: cover,
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
-    func updatePlaylistOrder(_ playlistIDs: [Int64]) async throws {
+    func updatePlaylistOrder(
+        _ playlistIDs: [Int64],
+        expectedCredentialRevision: UInt64
+    ) async throws {
         guard !playlistIDs.isEmpty,
               playlistIDs.allSatisfy({ $0 > 0 }),
               Set(playlistIDs).count == playlistIDs.count
         else { throw EAPIError.invalidPayload }
-        let root = try decodedJSONObject(
-            try await transport.requestWEAPI(
-                path: "/weapi/playlist/order/update",
-                payload: ["ids": try jsonString(playlistIDs.map(String.init))]
-            )
+        let root = try await transport.requestWEAPIJSONObject(
+            path: "/weapi/playlist/order/update",
+            payload: ["ids": try jsonString(playlistIDs.map(String.init))],
+            expectedCredentialRevision: expectedCredentialRevision,
+            invalidatesGroups: [.playlistSummaries],
+            invalidatesAccountCache: false
         )
         try requireSuccess(root)
     }
 
-    func updatePlaylistSongOrder(_ playlistID: Int64, trackIDs: [Int64]) async throws {
+    func updatePlaylistSongOrder(
+        _ playlistID: Int64,
+        trackIDs: [Int64],
+        expectedCredentialRevision: UInt64
+    ) async throws {
         guard playlistID > 0,
               !trackIDs.isEmpty,
               trackIDs.allSatisfy({ $0 > 0 }),
@@ -574,27 +801,50 @@ struct LiveMusicLibrary: Sendable {
                 "pid": String(playlistID),
                 "trackIds": try jsonString(trackIDs.map(String.init)),
                 "op": "update"
-            ]
+            ],
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
-    func makePlaylistPublic(_ playlistID: Int64) async throws {
+    func makePlaylistPublic(
+        _ playlistID: Int64,
+        expectedCredentialRevision: UInt64
+    ) async throws {
         guard playlistID > 0 else { throw EAPIError.invalidPayload }
         _ = try await mutate(
             EAPIEndpoint(
                 "/eapi/playlist/update/privacy",
                 signing: "/api/playlist/update/privacy"
             ),
-            payload: ["id": playlistID, "privacy": 0]
+            payload: ["id": playlistID, "privacy": 0],
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
-    func addSongs(_ songIDs: [Int64], to playlistID: Int64) async throws {
-        try await manipulateSongs(songIDs, playlistID: playlistID, operation: "add")
+    func addSongs(
+        _ songIDs: [Int64],
+        to playlistID: Int64,
+        expectedCredentialRevision: UInt64
+    ) async throws {
+        try await manipulateSongs(
+            songIDs,
+            playlistID: playlistID,
+            operation: "add",
+            expectedCredentialRevision: expectedCredentialRevision
+        )
     }
 
-    func removeSongs(_ songIDs: [Int64], from playlistID: Int64) async throws {
-        try await manipulateSongs(songIDs, playlistID: playlistID, operation: "del")
+    func removeSongs(
+        _ songIDs: [Int64],
+        from playlistID: Int64,
+        expectedCredentialRevision: UInt64
+    ) async throws {
+        try await manipulateSongs(
+            songIDs,
+            playlistID: playlistID,
+            operation: "del",
+            expectedCredentialRevision: expectedCredentialRevision
+        )
     }
 
     func commentCount(songID: Int64) async throws -> MusicCommentCount {
@@ -695,38 +945,69 @@ struct LiveMusicLibrary: Sendable {
         )
     }
 
-    func addComment(songID: Int64, content: String) async throws -> MusicComment? {
-        try await writeComment(songID: songID, action: "add", content: content)
+    func addComment(
+        songID: Int64,
+        content: String,
+        expectedCredentialRevision: UInt64
+    ) async throws -> MusicComment? {
+        try await writeComment(
+            songID: songID,
+            action: "add",
+            content: content,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
     }
 
-    func replyToComment(songID: Int64, commentID: Int64, content: String) async throws -> MusicComment? {
-        try await writeComment(songID: songID, action: "reply", commentID: commentID, content: content)
+    func replyToComment(
+        songID: Int64,
+        commentID: Int64,
+        content: String,
+        expectedCredentialRevision: UInt64
+    ) async throws -> MusicComment? {
+        try await writeComment(
+            songID: songID,
+            action: "reply",
+            commentID: commentID,
+            content: content,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
     }
 
-    func deleteComment(songID: Int64, commentID: Int64) async throws {
-        _ = try await writeComment(songID: songID, action: "delete", commentID: commentID)
+    func deleteComment(
+        songID: Int64,
+        commentID: Int64,
+        expectedCredentialRevision: UInt64
+    ) async throws {
+        _ = try await writeComment(
+            songID: songID,
+            action: "delete",
+            commentID: commentID,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
     }
 
-    func setCommentLiked(songID: Int64, commentID: Int64, liked: Bool) async throws {
+    func setCommentLiked(
+        songID: Int64,
+        commentID: Int64,
+        liked: Bool,
+        expectedCredentialRevision: UInt64
+    ) async throws {
         guard songID > 0, commentID > 0 else { throw EAPIError.invalidPayload }
-        _ = try decodedJSONObject(
-            try await transport.requestCommentLike(
-                threadID: "R_SO_4_\(songID)",
-                commentID: commentID,
-                liked: liked
-            )
+        _ = try await transport.requestCommentLike(
+            threadID: "R_SO_4_\(songID)",
+            commentID: commentID,
+            liked: liked,
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
     func similarSongs(to songID: Int64) async throws -> [Song] {
         guard songID > 0 else { throw EAPIError.invalidPayload }
-        let root = try decodedJSONObject(
-            try await transport.requestWEAPI(
-                path: "/weapi/v1/discovery/simiSong",
-                payload: ["songid": songID, "limit": 50, "offset": 0],
-                cache: .library,
-                invalidatesAccountCache: false
-            )
+        let root = try await transport.requestWEAPIJSONObject(
+            path: "/weapi/v1/discovery/simiSong",
+            payload: ["songid": songID, "limit": 50, "offset": 0],
+            cache: .library,
+            invalidatesAccountCache: false
         )
         return root.array("songs").compactMap(songDecoder.decodeLiveSong)
     }
@@ -750,7 +1031,10 @@ struct LiveMusicLibrary: Sendable {
         return root.object("data").array("recPlaylist").compactMap(MusicLibraryDecoder.playlist)
     }
 
-    func similarArtists(to artistID: Int64) async throws -> [MusicLibraryArtist] {
+    func similarArtists(
+        to artistID: Int64,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [MusicLibraryArtist] {
         guard artistID > 0 else { throw EAPIError.invalidPayload }
         let root = try await call(
             EAPIEndpoint(
@@ -758,79 +1042,187 @@ struct LiveMusicLibrary: Sendable {
                 signing: "/api/v1/similar/artist/get",
                 host: Self.interfaceHost
             ),
-            payload: ["id": String(artistID), "verifyId": 1, "e_r": true]
+            payload: ["id": String(artistID), "verifyId": 1, "e_r": true],
+            expectedCredentialRevision: expectedCredentialRevision
         )
         return root.array("artists").compactMap(MusicLibraryDecoder.artist)
     }
 
-    func myFollowing(size: Int = 1_000) async throws -> [MusicLibraryFollow] {
-        guard size > 0 else { throw EAPIError.invalidPayload }
-        let root = try await call(
-            EAPIEndpoint(
-                "/eapi/user/follow/users/mixed/get/v2",
-                signing: "/api/user/follow/users/mixed/get/v2",
-                host: Self.interfaceHost
-            ),
-            payload: [
-                "scene": 0,
-                "authority": true,
-                "page": try jsonString(["size": String(size)]),
-                "e_r": true,
-                "verifyId": 1
-            ]
+    func myFollowing(
+        size: Int? = nil,
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64,
+        onUpdate: (@MainActor @Sendable ([MusicLibraryFollow]) -> Void)? = nil
+    ) async throws -> [MusicLibraryFollow] {
+        guard size.map({ $0 > 0 }) ?? true else { throw EAPIError.invalidPayload }
+        let endpoint = EAPIEndpoint(
+            "/eapi/user/follow/users/mixed/get/v2",
+            signing: "/api/user/follow/users/mixed/get/v2",
+            host: Self.interfaceHost
         )
-        return root.object("data").array("records").compactMap(MusicLibraryDecoder.mixedFollow)
-    }
-
-    func followingUsers(userID: Int64, size: Int = 1_000) async throws -> [MusicLibraryUser] {
-        guard userID > 0, size > 0 else { throw EAPIError.invalidPayload }
-        let root = try await call(
-            EAPIEndpoint(
-                "/eapi/user/v3/follows/get",
-                signing: "/api/user/v3/follows/get",
-                host: Self.interfaceHost
-            ),
-            payload: [
-                "page": try jsonString(["size": String(size), "cursor": ""]),
-                "userId": String(userID),
-                "verifyId": 1,
-                "e_r": true
-            ]
-        )
-        return root.object("data").array("records").compactMap {
-            MusicLibraryDecoder.user($0.object("userProfile"))
+        var cursor = ""
+        var consumed = 0
+        var seenCursors = Set<String>()
+        var seen = Set<String>()
+        var values: [MusicLibraryFollow] = []
+        while size.map({ consumed < $0 }) ?? true {
+            let pageSize = min(100, size.map { $0 - consumed } ?? 100)
+            var page: [String: Any] = ["size": String(pageSize)]
+            if !cursor.isEmpty { page["cursor"] = cursor }
+            let root = try await call(
+                endpoint,
+                payload: [
+                    "scene": 0,
+                    "authority": true,
+                    "page": try jsonString(page),
+                    "e_r": true,
+                    "verifyId": 1
+                ],
+                refreshCache: forceRefresh,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
+            try Task.checkCancellation()
+            let data = root.object("data")
+            let records = Array(data.array("records").prefix(pageSize))
+            let decoded = records.compactMap(MusicLibraryDecoder.mixedFollow)
+            let added = decoded.filter { seen.insert($0.id).inserted }
+            values.append(contentsOf: added)
+            if !added.isEmpty { await onUpdate?(values) }
+            consumed += records.count
+            let nextCursor = data.string("nextCursor").isEmpty
+                ? data.string("cursor")
+                : data.string("nextCursor")
+            let hasMore = data.bool("hasMore") || data.bool("more") || records.count == pageSize
+            guard size.map({ consumed < $0 }) ?? true,
+                  hasMore, !records.isEmpty, !added.isEmpty, !nextCursor.isEmpty,
+                  nextCursor != cursor, seenCursors.insert(nextCursor).inserted
+            else { break }
+            cursor = nextCursor
         }
+        return values
     }
 
-    func followedArtists(userID: Int64, offset: Int = 0, limit: Int = 1_000) async throws -> [MusicLibraryArtist] {
-        guard userID > 0, offset >= 0, limit > 0 else { throw EAPIError.invalidPayload }
-        let root = try await call(
-            EAPIEndpoint(
-                "/eapi/user/sub/artist/get",
-                signing: "/api/user/sub/artist/get",
-                host: Self.interfaceHost
-            ),
-            payload: [
-                "offset": String(offset),
-                "limit": String(limit),
-                "id": String(userID),
-                "verifyId": 1,
-                "e_r": true
-            ]
+    func followingUsers(
+        userID: Int64,
+        size: Int? = nil,
+        onUpdate: (@MainActor @Sendable ([MusicLibraryUser]) -> Void)? = nil
+    ) async throws -> [MusicLibraryUser] {
+        guard userID > 0, size.map({ $0 > 0 }) ?? true else { throw EAPIError.invalidPayload }
+        let endpoint = EAPIEndpoint(
+            "/eapi/user/v3/follows/get",
+            signing: "/api/user/v3/follows/get",
+            host: Self.interfaceHost
         )
-        return root.object("data").array("artists").compactMap(MusicLibraryDecoder.artist)
+        var cursor = ""
+        var consumed = 0
+        var seenCursors = Set<String>()
+        var seen = Set<Int64>()
+        var values: [MusicLibraryUser] = []
+        while size.map({ consumed < $0 }) ?? true {
+            let pageSize = min(100, size.map { $0 - consumed } ?? 100)
+            let root = try await call(
+                endpoint,
+                payload: [
+                    "page": try jsonString(["size": String(pageSize), "cursor": cursor]),
+                    "userId": String(userID),
+                    "verifyId": 1,
+                    "e_r": true
+                ]
+            )
+            try Task.checkCancellation()
+            let data = root.object("data")
+            let records = Array(data.array("records").prefix(pageSize))
+            let decoded = records.compactMap { MusicLibraryDecoder.user($0.object("userProfile")) }
+            let added = decoded.filter { seen.insert($0.id).inserted }
+            values.append(contentsOf: added)
+            if !added.isEmpty { await onUpdate?(values) }
+            consumed += records.count
+            let nextCursor = data.string("nextCursor").isEmpty
+                ? data.string("cursor")
+                : data.string("nextCursor")
+            let hasMore = data.bool("hasMore") || data.bool("more") || records.count == pageSize
+            guard size.map({ consumed < $0 }) ?? true,
+                  hasMore, !records.isEmpty, !added.isEmpty, !nextCursor.isEmpty,
+                  nextCursor != cursor, seenCursors.insert(nextCursor).inserted
+            else { break }
+            cursor = nextCursor
+        }
+        return values
     }
 
-    func cloudSongs(offset: Int = 0, limit: Int = 30) async throws -> CloudSongPage {
+    func followedArtists(
+        userID: Int64,
+        offset: Int = 0,
+        limit: Int? = nil,
+        onUpdate: (@MainActor @Sendable ([MusicLibraryArtist]) -> Void)? = nil
+    ) async throws -> [MusicLibraryArtist] {
+        guard userID > 0, offset >= 0, limit.map({ $0 > 0 }) ?? true else {
+            throw EAPIError.invalidPayload
+        }
+        let endpoint = EAPIEndpoint(
+            "/eapi/user/sub/artist/get",
+            signing: "/api/user/sub/artist/get",
+            host: Self.interfaceHost
+        )
+        var nextOffset = offset
+        var consumed = 0
+        var seen = Set<Int64>()
+        var values: [MusicLibraryArtist] = []
+        while limit.map({ consumed < $0 }) ?? true {
+            let pageSize = min(100, limit.map { $0 - consumed } ?? 100)
+            let root = try await call(
+                endpoint,
+                payload: [
+                    "offset": String(nextOffset),
+                    "limit": String(pageSize),
+                    "id": String(userID),
+                    "verifyId": 1,
+                    "e_r": true
+                ]
+            )
+            try Task.checkCancellation()
+            let data = root.object("data")
+            let raw = Array(data.array("artists").prefix(pageSize))
+            let decoded = raw.compactMap(MusicLibraryDecoder.artist)
+            let added = decoded.filter { seen.insert($0.id).inserted }
+            values.append(contentsOf: added)
+            if !added.isEmpty { await onUpdate?(values) }
+            consumed += raw.count
+            let candidate = nextOffset + raw.count
+            let hasMore = data.bool("hasMore") || root.bool("more") || raw.count == pageSize
+            guard limit.map({ consumed < $0 }) ?? true,
+                  hasMore, !raw.isEmpty, !added.isEmpty, candidate > nextOffset
+            else { break }
+            nextOffset = candidate
+        }
+        return values
+    }
+
+    func cloudSongs(
+        offset: Int = 0,
+        limit: Int = 30,
+        forceRefresh: Bool = false,
+        expectedCredentialRevision: UInt64
+    ) async throws -> CloudSongPage {
         guard offset >= 0, (1...100).contains(limit) else { throw EAPIError.invalidPayload }
         return CloudMusicDecoder.page(
-            try decodedJSONObject(try await transport.requestCloudSongs(offset: offset, limit: limit)),
+            try await transport.requestWEAPIJSONObject(
+                path: "/weapi/v1/cloud/get",
+                payload: ["offset": offset, "limit": limit],
+                cache: .library,
+                refreshCache: forceRefresh,
+                expectedCredentialRevision: expectedCredentialRevision,
+                invalidatesAccountCache: false
+            ),
             offset: offset,
             decodeSong: songDecoder.decodeLiveSong
         )
     }
 
-    func cloudSongDetails(ids: [Int64]) async throws -> [CloudSong] {
+    func cloudSongDetails(
+        ids: [Int64],
+        expectedCredentialRevision: UInt64
+    ) async throws -> [CloudSong] {
         guard ids.allSatisfy({ $0 > 0 }) else { throw EAPIError.invalidPayload }
         guard !ids.isEmpty else { return [] }
 
@@ -838,7 +1230,10 @@ struct LiveMusicLibrary: Sendable {
         for start in stride(from: 0, to: ids.count, by: 50) {
             try Task.checkCancellation()
             let batch = Array(ids[start..<min(start + 50, ids.count)])
-            let root = try decodedJSONObject(try await transport.requestCloudSongDetails(ids: batch))
+            let root = try await transport.requestCloudSongDetails(
+                ids: batch,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
             for song in CloudMusicDecoder.songs(root, decodeSong: songDecoder.decodeLiveSong) {
                 songsByID[song.id] = song
             }
@@ -846,27 +1241,55 @@ struct LiveMusicLibrary: Sendable {
         return ids.compactMap { songsByID[$0] }
     }
 
-    func cloudLyrics(userID: Int64, songID: Int64) async throws -> SongLyrics {
+    func cloudLyrics(
+        userID: Int64,
+        songID: Int64,
+        expectedCredentialRevision: UInt64
+    ) async throws -> SongLyrics {
         guard userID > 0, songID > 0 else { throw EAPIError.invalidPayload }
-        guard case let .loggedIn(user) = try await loginState(), user.id == userID else {
-            throw EAPIError.service(code: 403, message: "只能读取当前账号的云盘歌词")
-        }
+        let revision = try cloudCredentialRevision(expected: expectedCredentialRevision)
         let root = try await call(
             Self.cloudLyricEndpoint,
             payload: ["userId": userID, "songId": songID, "lv": -1, "kv": -1],
-            cache: .lyrics
+            cache: .lyrics,
+            expectedCredentialRevision: revision
         )
+        guard root["code"] != nil else { throw EAPIError.invalidResponse }
+        let code = root.int("code")
+        guard code == 0 || (200..<300).contains(code) else {
+            throw EAPIError.service(code: code, message: root.string("message"))
+        }
         return CloudMusicDecoder.lyrics(root)
     }
 
-    func cloudDownloadSource(songID: Int64) async throws -> CloudDownloadSource {
-        guard songID > 0 else { throw EAPIError.invalidPayload }
+    func cloudDownloadSource(
+        userID: Int64,
+        songID: Int64,
+        expectedCredentialRevision: UInt64
+    ) async throws -> CloudDownloadSource {
+        guard userID > 0, songID > 0 else { throw EAPIError.invalidPayload }
+        let revision = try cloudCredentialRevision(expected: expectedCredentialRevision)
         let root = try await call(
             Self.cloudDownloadEndpoint,
             payload: ["songId": songID],
-            cache: nil
+            cache: nil,
+            expectedCredentialRevision: revision
         )
         return try CloudMusicDecoder.downloadSource(root, expectedSongID: songID)
+    }
+
+    private func cloudCredentialRevision(expected: UInt64) throws -> UInt64 {
+        let snapshot = transport.credentialSnapshotValue()
+        guard snapshot.revision == expected else {
+            throw CredentialRevisionMismatch(expected: expected, actual: snapshot.revision)
+        }
+        guard case let .authenticated(credentials) = snapshot.state,
+              !credentials.cookie.isEmpty,
+              !NeteaseCookieHeader.isGuest(credentials.cookie)
+        else {
+            throw EAPIError.service(code: 403, message: "只能读取当前账号的云盘内容")
+        }
+        return expected
     }
 
     private var songDecoder: LiveMusicRepository {
@@ -875,21 +1298,33 @@ struct LiveMusicLibrary: Sendable {
 
     private func recentPlaybackRoot(
         _ kind: RecentPlaybackKind,
-        limit: Int
+        limit: Int,
+        forceRefresh: Bool,
+        expectedCredentialRevision: UInt64
     ) async throws -> [String: Any] {
-        try decodedJSONObject(
-            try await transport.requestRecentPlayback(
-                path: kind.recentPlaybackPath,
-                limit: limit
-            )
+        return try await transport.requestRecentPlayback(
+            path: kind.recentPlaybackPath,
+            limit: limit,
+            refreshCache: forceRefresh,
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
     private func recentlyPlayedMedia(
         _ kind: RecentPlaybackKind,
-        limit: Int
+        limit: Int,
+        forceRefresh: Bool,
+        expectedCredentialRevision: UInt64
     ) async throws -> [RecentMediaSummary] {
-        decodeRecentlyPlayedMedia(try await recentPlaybackRoot(kind, limit: limit), kind: kind)
+        decodeRecentlyPlayedMedia(
+            try await recentPlaybackRoot(
+                kind,
+                limit: limit,
+                forceRefresh: forceRefresh,
+                expectedCredentialRevision: expectedCredentialRevision
+            ),
+            kind: kind
+        )
     }
 
     private func decodeRecentResources<Value: Identifiable>(
@@ -917,7 +1352,12 @@ struct LiveMusicLibrary: Sendable {
         return payload
     }
 
-    private func manipulateSongs(_ songIDs: [Int64], playlistID: Int64, operation: String) async throws {
+    private func manipulateSongs(
+        _ songIDs: [Int64],
+        playlistID: Int64,
+        operation: String,
+        expectedCredentialRevision: UInt64
+    ) async throws {
         guard playlistID > 0, !songIDs.isEmpty, songIDs.allSatisfy({ $0 > 0 }) else {
             throw EAPIError.invalidPayload
         }
@@ -935,7 +1375,8 @@ struct LiveMusicLibrary: Sendable {
                 "trackIds": try jsonString(songIDs.map(String.init)),
                 "op": operation,
                 "e_r": true
-            ]
+            ],
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
@@ -943,7 +1384,8 @@ struct LiveMusicLibrary: Sendable {
         songID: Int64,
         action: String,
         commentID: Int64? = nil,
-        content: String? = nil
+        content: String? = nil,
+        expectedCredentialRevision: UInt64
     ) async throws -> MusicComment? {
         let content = content?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard songID > 0,
@@ -959,7 +1401,8 @@ struct LiveMusicLibrary: Sendable {
                 signing: "/api/resource/comments/\(action)",
                 host: "https://interface.music.163.com"
             ),
-            payload: payload
+            payload: payload,
+            expectedCredentialRevision: expectedCredentialRevision
         )
         return MusicLibraryDecoder.writtenComment(root, songID: songID)
     }
@@ -972,16 +1415,46 @@ struct LiveMusicLibrary: Sendable {
         await transport.invalidateCachedResponses(in: groups)
     }
 
+    func refreshPlaylistDetail(
+        _ playlistID: Int64,
+        expectedCredentialRevision: UInt64
+    ) async throws {
+        guard playlistID > 0 else { throw EAPIError.invalidPayload }
+        _ = try await call(
+            EAPIEndpoint(
+                "/eapi/v6/playlist/detail",
+                signing: "/api/v6/playlist/detail",
+                host: Self.interfaceHost
+            ),
+            payload: [
+                "id": playlistID,
+                "newStyle": "true",
+                "verifyId": 1,
+                "newDetailPage": true,
+                "e_r": true,
+                "n": "300",
+                "s": "5"
+            ],
+            cache: .detail,
+            refreshCache: true,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
+    }
+
     private func call(
         _ endpoint: EAPIEndpoint,
         payload: [String: Any],
         cache: EAPIReadCache? = .library,
+        refreshCache: Bool = false,
+        expectedCredentialRevision: UInt64? = nil,
         includesClientHeader: Bool = false
     ) async throws -> [String: Any] {
         try await call(
             endpoint,
             json: compactJSON(payload),
             cache: cache,
+            refreshCache: refreshCache,
+            expectedCredentialRevision: expectedCredentialRevision,
             includesClientHeader: includesClientHeader
         )
     }
@@ -990,23 +1463,31 @@ struct LiveMusicLibrary: Sendable {
         _ endpoint: EAPIEndpoint,
         json: Data,
         cache: EAPIReadCache? = .library,
+        refreshCache: Bool = false,
+        expectedCredentialRevision: UInt64? = nil,
         includesClientHeader: Bool = false
     ) async throws -> [String: Any] {
-        try decodedJSONObject(try await transport.request(
+        try await transport.requestJSONObject(
             endpoint,
             json: json,
             cache: cache,
+            refreshCache: refreshCache,
+            expectedCredentialRevision: expectedCredentialRevision,
             includesClientHeader: includesClientHeader
-        ))
+        )
     }
 
-    private func mutate(_ endpoint: EAPIEndpoint, payload: [String: Any]) async throws -> [String: Any] {
-        try decodedJSONObject(
-            try await transport.request(
-                endpoint,
-                json: compactJSON(payload),
-                invalidatesAccountCache: true
-            )
+    private func mutate(
+        _ endpoint: EAPIEndpoint,
+        payload: [String: Any],
+        expectedCredentialRevision: UInt64,
+        invalidatesGroups: Set<EAPIReadCache> = []
+    ) async throws -> [String: Any] {
+        return try await transport.requestJSONObject(
+            endpoint,
+            json: compactJSON(payload),
+            expectedCredentialRevision: expectedCredentialRevision,
+            invalidatesGroups: invalidatesGroups
         )
     }
 

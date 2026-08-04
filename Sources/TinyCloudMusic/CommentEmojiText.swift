@@ -144,20 +144,25 @@ enum CommentEmojiCatalog {
 @MainActor
 struct CommentEmojiText: View {
     let content: String
-    let remotePictureIDs: [String: String]
+    private let parts: [CommentEmojiPart]
 
     @State private var images: [String: NSImage] = [:]
+
+    init(content: String, remotePictureIDs: [String: String]) {
+        self.content = content
+        parts = CommentEmojiCatalog.parts(in: content, remotePictureIDs: remotePictureIDs)
+    }
 
     var body: some View {
         renderedText
             .fixedSize(horizontal: false, vertical: true)
             .textSelection(.enabled)
             .accessibilityLabel(Text(content))
-            .task(id: remotePictureIDs) { await loadImages() }
+            .task(id: parts) { await loadImages() }
     }
 
     private var renderedText: Text {
-        CommentEmojiCatalog.parts(in: content, remotePictureIDs: remotePictureIDs).reduce(Text("")) { result, part in
+        parts.reduce(Text("")) { result, part in
             switch part {
             case let .text(text):
                 result + Text(text)
@@ -172,11 +177,9 @@ struct CommentEmojiText: View {
     }
 
     private func loadImages() async {
+        images = [:]
         var loadedImages: [String: NSImage] = [:]
-        for case let .emoji(token, url) in CommentEmojiCatalog.parts(
-            in: content,
-            remotePictureIDs: remotePictureIDs
-        ) where loadedImages[token] == nil {
+        for case let .emoji(token, url) in parts where loadedImages[token] == nil {
             guard let request = ArtworkPipeline.request(for: url, size: CGSize(width: 24, height: 24)) else {
                 continue
             }

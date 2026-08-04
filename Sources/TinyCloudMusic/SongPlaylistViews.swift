@@ -5,26 +5,24 @@ struct AddSongToPlaylistView: View {
     let userID: Int64
     let extras: LiveMusicExtras
     let library: LiveMusicLibrary
-    let onFinished: (Int64, Bool) -> Void
+    @Bindable var model: AppModel
 
     @Environment(\.dismiss) private var dismiss
     @State private var phase: AvailablePlaylistPhase = .idle
-    @State private var addingPlaylistID: Int64?
-    @State private var failedPlaylist: MusicAvailablePlaylist?
-    @State private var operationError: String?
+    @State private var retryRevision = 0
 
     init(
         song: Song,
         userID: Int64,
         extras: LiveMusicExtras,
         library: LiveMusicLibrary,
-        onFinished: @escaping (Int64, Bool) -> Void
+        model: AppModel
     ) {
         self.song = song
         self.userID = userID
         self.extras = extras
         self.library = library
-        self.onFinished = onFinished
+        self.model = model
     }
 
     var body: AnyView { AnyView(bodyContent) }
@@ -32,31 +30,6 @@ struct AddSongToPlaylistView: View {
     private var bodyContent: AnyView {
         AnyView(NavigationStack {
             VStack(spacing: 0) {
-                if let operationError {
-                    HStack(spacing: 10) {
-                        Label(operationError, systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.red)
-                            .lineLimit(2)
-                        Spacer()
-                        if let failedPlaylist {
-                            Button("重试") { add(to: failedPlaylist) }
-                                .disabled(addingPlaylistID != nil)
-                        }
-                        Button {
-                            self.operationError = nil
-                            failedPlaylist = nil
-                        } label: {
-                            Image(systemName: "xmark")
-                        }
-                        .buttonStyle(.plain)
-                        .help("关闭错误提示")
-                        .accessibilityLabel("关闭错误提示")
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    Divider()
-                }
-
                 content
             }
             .navigationTitle("添加到歌单")
@@ -67,17 +40,20 @@ struct AddSongToPlaylistView: View {
                     } label: {
                         Image(systemName: "xmark")
                     }
-                    .disabled(addingPlaylistID != nil)
+                    .disabled(isAddingSong)
                     .help("关闭")
                     .accessibilityLabel("关闭")
                 }
             }
         }
         .frame(minWidth: 480, idealWidth: 540, minHeight: 420, idealHeight: 520)
-        .task {
-            guard phase == .idle else { return }
+        .task(id: "\(userID):\(model.currentUserID ?? 0):\(credentialRevision):\(song.id):\(retryRevision)") {
             await load()
         })
+    }
+
+    private var credentialRevision: UInt64 {
+        library.transport.credentialSnapshotValue().revision
     }
 
     private var content: AnyView {
@@ -96,7 +72,7 @@ struct AddSongToPlaylistView: View {
                 } description: {
                     Text(message)
                 } actions: {
-                    Button("重试") { Task { await load() } }
+                    Button("重试") { retryRevision += 1 }
                 }
             case let .loaded(playlists):
                 if playlists.isEmpty {
@@ -136,7 +112,7 @@ struct AddSongToPlaylistView: View {
                 Button {
                     add(to: item)
                 } label: {
-                    if addingPlaylistID == item.id {
+                    if isAdding(to: item.id) {
                         ProgressView()
                             .controlSize(.small)
                     } else {
@@ -144,7 +120,7 @@ struct AddSongToPlaylistView: View {
                     }
                 }
                 .buttonStyle(.borderless)
-                .disabled(addingPlaylistID != nil)
+                .disabled(isAddingSong)
                 .frame(width: 36, height: 36)
                 .help("添加到“\(item.playlist.name)”")
                 .accessibilityLabel("添加到\(item.playlist.name)")
@@ -155,67 +131,77 @@ struct AddSongToPlaylistView: View {
 
     @MainActor
     private func load() async {
+        let revision = credentialRevision
+        guard model.currentUserID == userID else { return }
         phase = .loading
-        operationError = nil
         do {
             var offset = 0
             var values: [MusicAvailablePlaylist] = []
             var seen = Set<Int64>()
             while true {
-                let page = try await extras.availablePlaylists(userID: userID, trackID: song.id, offset: offset)
+                let page = try await extras.availablePlaylists(
+                    userID: userID,
+                    trackID: song.id,
+                    offset: offset,
+                    expectedCredentialRevision: revision
+                )
+                try Task.checkCancellation()
+                guard model.currentUserID == userID,
+                      credentialRevision == revision
+                else { return }
                 let newValues = page.playlists.filter { seen.insert($0.id).inserted }
                 values.append(contentsOf: newValues)
-                guard page.hasMore, !page.playlists.isEmpty else { break }
-                offset += page.playlists.count
+                phase = .loaded(values)
+                guard page.hasMore, page.offset > offset,
+                      !newValues.isEmpty
+                else { break }
+                offset = page.offset
             }
-            try Task.checkCancellation()
-            phase = .loaded(values)
         } catch is CancellationError {
         } catch {
+            guard model.currentUserID == userID,
+                  credentialRevision == revision
+            else { return }
             phase = .failed(error.localizedDescription)
         }
     }
 
     private func add(to item: MusicAvailablePlaylist) {
-        addingPlaylistID = item.id
-        failedPlaylist = nil
-        operationError = nil
-        Task { @MainActor in
-            do {
-                try await library.addSongs([song.id], to: item.id)
-                addingPlaylistID = nil
-                onFinished(item.id, item.playlist.specialType == 5)
-                dismiss()
-            } catch is CancellationError {
-                addingPlaylistID = nil
-            } catch {
-                addingPlaylistID = nil
-                failedPlaylist = item
-                operationError = error.localizedDescription
-            }
+        model.addSongToPlaylist(
+            song.id,
+            playlistID: item.id,
+            isFavoritePlaylist: item.playlist.specialType == 5
+        )
+    }
+
+    private var isAddingSong: Bool {
+        model.pendingMutations.contains { key in
+            guard case let .playlistSong(_, songID) = key else { return false }
+            return songID == song.id
         }
+    }
+
+    private func isAdding(to playlistID: Int64) -> Bool {
+        model.pendingMutations.contains(.playlistSong(playlistID: playlistID, songID: song.id))
     }
 }
 
 struct RemoveSongFromPlaylistButton: View {
     let songID: Int64
     let playlistID: Int64
-    let library: LiveMusicLibrary
-    let onRemoved: () -> Void
-    let onFailed: (String) -> Void
+    let isFavoritePlaylist: Bool
+    @Bindable var model: AppModel
 
     init(
         songID: Int64,
         playlistID: Int64,
-        library: LiveMusicLibrary,
-        onRemoved: @escaping () -> Void,
-        onFailed: @escaping (String) -> Void
+        isFavoritePlaylist: Bool,
+        model: AppModel
     ) {
         self.songID = songID
         self.playlistID = playlistID
-        self.library = library
-        self.onRemoved = onRemoved
-        self.onFailed = onFailed
+        self.isFavoritePlaylist = isFavoritePlaylist
+        self.model = model
     }
 
     var body: some View {
@@ -224,18 +210,19 @@ struct RemoveSongFromPlaylistButton: View {
         } label: {
             Label("从歌单移除", systemImage: "trash")
         }
+        .disabled(model.pendingMutations.contains(key))
     }
 
     private func remove() {
-        Task { @MainActor in
-            do {
-                try await library.removeSongs([songID], from: playlistID)
-                onRemoved()
-            } catch is CancellationError {
-            } catch {
-                onFailed(error.localizedDescription)
-            }
-        }
+        model.removeSongFromPlaylist(
+            songID,
+            playlistID: playlistID,
+            isFavoritePlaylist: isFavoritePlaylist
+        )
+    }
+
+    private var key: LibraryMutationKey {
+        .playlistSong(playlistID: playlistID, songID: songID)
     }
 }
 

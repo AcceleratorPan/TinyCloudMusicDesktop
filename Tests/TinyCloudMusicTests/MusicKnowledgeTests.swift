@@ -79,7 +79,7 @@ private func verifyStyleFixtures() throws {
     }
 }
 
-private func verifySheetAndKnowledgeFixtures() throws {
+private func verifySheetAndKnowledgeFixtures() async throws {
     let sheets = MusicKnowledgeDecoder.sheets([
         "data": ["musicSheetSimpleInfoVOS": [[
             "id": 171_018,
@@ -117,13 +117,20 @@ private func verifySheetAndKnowledgeFixtures() throws {
           arrayURLs.first?.absoluteString == "https://p1.music.126.net/preview.jpg"
     else { throw MusicKnowledgeCheckError.failed }
 
-    let temporaryFile = try MusicSheetTemporaryFiles.write(Data("%PDF-test".utf8))
+    let temporaryRoot = FileManager.default.temporaryDirectory.appending(
+        path: UUID().uuidString,
+        directoryHint: .isDirectory
+    )
+    let worker = MusicSheetWorker(temporaryRoot: temporaryRoot)
+    defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+    try FileManager.default.createDirectory(at: temporaryRoot, withIntermediateDirectories: true)
+    let temporaryFile = temporaryRoot.appending(path: "expired.pdf")
+    try Data("%PDF-test".utf8).write(to: temporaryFile)
     guard FileManager.default.fileExists(atPath: temporaryFile.path) else {
         throw MusicKnowledgeCheckError.failed
     }
-    MusicSheetTemporaryFiles.cleanupExpired(now: Date().addingTimeInterval(25 * 60 * 60))
+    await worker.cleanupExpired(now: Date().addingTimeInterval(25 * 60 * 60))
     guard !FileManager.default.fileExists(atPath: temporaryFile.path) else {
-        MusicSheetTemporaryFiles.remove(temporaryFile)
         throw MusicKnowledgeCheckError.failed
     }
 
@@ -146,24 +153,24 @@ private func verifySheetAndKnowledgeFixtures() throws {
     try Data("%PDF-updated\n%%EOF".utf8).write(to: updatedPDF)
 
     let cacheRoot = downloadRoot.appending(path: "cache", directoryHint: .isDirectory)
-    let cachedPDF = try MusicSheetFiles.cachePDF(
+    let cachedPDF = try await worker.cachePDF(
         at: firstPDF,
         sheetID: sheets[0].id,
         cacheRoot: cacheRoot
     )
     guard cachedPDF.lastPathComponent == "171018.pdf",
-          MusicSheetFiles.cachedPDF(sheetID: sheets[0].id, cacheRoot: cacheRoot) == cachedPDF,
+          await worker.cachedPDF(sheetID: sheets[0].id, cacheRoot: cacheRoot) == cachedPDF,
           try Data(contentsOf: cachedPDF) == Data("%PDF-first\n%%EOF".utf8)
     else { throw MusicKnowledgeCheckError.failed }
 
-    let firstSave = try MusicSheetFiles.savePDF(at: firstPDF, song: song, sheet: sheets[0], to: downloadRoot)
-    let duplicateSave = try MusicSheetFiles.savePDF(at: updatedPDF, song: song, sheet: sheets[0], to: downloadRoot)
+    let firstSave = try await worker.savePDF(at: firstPDF, song: song, sheet: sheets[0], to: downloadRoot)
+    let duplicateSave = try await worker.savePDF(at: updatedPDF, song: song, sheet: sheets[0], to: downloadRoot)
     guard firstSave.saved,
           !duplicateSave.saved,
           firstSave.url == duplicateSave.url,
           firstSave.url.lastPathComponent == "【总谱】李荣浩 - 恋人 [171018].pdf",
           try Data(contentsOf: firstSave.url) == Data("%PDF-first\n%%EOF".utf8),
-          MusicSheetFiles.existingPDF(song: song, sheet: sheets[0], in: downloadRoot) == firstSave.url,
+          await worker.existingPDF(song: song, sheet: sheets[0], in: downloadRoot) == firstSave.url,
           MusicSheetFiles.fileName(
             song: song,
             sheet: MusicSheetSummary(id: 171_019, title: "总谱", instrument: "总谱", pageCount: 27)
@@ -171,7 +178,7 @@ private func verifySheetAndKnowledgeFixtures() throws {
     else { throw MusicKnowledgeCheckError.failed }
 
     try Data("damaged".utf8).write(to: firstSave.url)
-    let repairedSave = try MusicSheetFiles.savePDF(at: updatedPDF, song: song, sheet: sheets[0], to: downloadRoot)
+    let repairedSave = try await worker.savePDF(at: updatedPDF, song: song, sheet: sheets[0], to: downloadRoot)
     guard repairedSave.saved,
           try Data(contentsOf: repairedSave.url) == Data("%PDF-updated\n%%EOF".utf8)
     else { throw MusicKnowledgeCheckError.failed }
@@ -286,9 +293,9 @@ private func verifySheetAndKnowledgeFixtures() throws {
 #if MUSIC_KNOWLEDGE_CHECK
 @main
 private enum MusicKnowledgeCheck {
-    static func main() throws {
+    static func main() async throws {
         try verifyStyleFixtures()
-        try verifySheetAndKnowledgeFixtures()
+        try await verifySheetAndKnowledgeFixtures()
         print("Music knowledge check passed")
     }
 }
@@ -299,6 +306,6 @@ struct MusicKnowledgeTests {
     func styles() throws { try verifyStyleFixtures() }
 
     @Test("Sheet and knowledge content are safely decoded")
-    func sheetsAndKnowledge() throws { try verifySheetAndKnowledgeFixtures() }
+    func sheetsAndKnowledge() async throws { try await verifySheetAndKnowledgeFixtures() }
 }
 #endif

@@ -1,6 +1,49 @@
 import AppKit
 import SwiftUI
 
+struct PlaybackHistoryRefreshTracker<Key: Equatable> {
+    private(set) var lastSequence: UInt64 = 0
+    private var pending: [(key: Key, sequence: UInt64)] = []
+
+    @discardableResult
+    mutating func record(
+        _ event: PlaybackHistoryEvent,
+        credentialRevision: UInt64,
+        keys: [Key]
+    ) -> Bool {
+        guard event.credentialRevision == credentialRevision,
+              event.sequence > lastSequence
+        else { return false }
+        lastSequence = event.sequence
+        for key in keys {
+            if let index = pending.firstIndex(where: { $0.key == key }) {
+                pending[index].sequence = event.sequence
+            } else {
+                pending.append((key, event.sequence))
+            }
+        }
+        return true
+    }
+
+    func pendingSequence(for key: Key) -> UInt64? {
+        pending.first(where: { $0.key == key })?.sequence
+    }
+
+    @discardableResult
+    mutating func settle(_ key: Key, sequence: UInt64) -> Bool {
+        guard let index = pending.firstIndex(where: {
+            $0.key == key && $0.sequence == sequence
+        }) else { return false }
+        pending.remove(at: index)
+        return true
+    }
+
+    mutating func reset() {
+        lastSequence = 0
+        pending.removeAll()
+    }
+}
+
 struct SessionView: View {
     @Bindable private var controller: SessionController
     let showSuccess: (String) -> Void
@@ -36,7 +79,7 @@ struct SessionSettingsSections: View {
     }
 
     var body: AnyView {
-        AnyView(Group {
+        return AnyView(Group {
             Section("会话状态") {
                 Label(stateTitle, systemImage: stateSymbol)
                     .foregroundStyle(controller.state == .invalid || controller.state == .error ? .red : .primary)
@@ -172,6 +215,48 @@ struct SessionSettingsSections: View {
 
 }
 
+struct MusicLibraryLoadTrigger: Hashable, Sendable {
+    let accountID: Int64?
+    let credentialRevision: UInt64
+    let reloadRevision: UInt64
+}
+
+struct MusicLibraryLoadIdentity: Equatable, Sendable {
+    let generation: UInt64
+    let accountID: Int64?
+    let credentialRevision: UInt64
+}
+
+struct MusicLibraryLoadState: Sendable {
+    private(set) var generation: UInt64 = 0
+    private var consumedReloadRevision: UInt64 = 0
+
+    mutating func begin(_ trigger: MusicLibraryLoadTrigger) -> (MusicLibraryLoadIdentity, force: Bool) {
+        generation &+= 1
+        let force = trigger.reloadRevision != consumedReloadRevision
+        consumedReloadRevision = trigger.reloadRevision
+        return (identity(for: trigger), force)
+    }
+
+    func identity(for trigger: MusicLibraryLoadTrigger) -> MusicLibraryLoadIdentity {
+        MusicLibraryLoadIdentity(
+            generation: generation,
+            accountID: trigger.accountID,
+            credentialRevision: trigger.credentialRevision
+        )
+    }
+
+    func accepts(
+        _ identity: MusicLibraryLoadIdentity,
+        accountID: Int64?,
+        credentialRevision: UInt64
+    ) -> Bool {
+        identity.generation == generation
+            && identity.accountID == accountID
+            && identity.credentialRevision == credentialRevision
+    }
+}
+
 struct MusicLibraryView: View {
     @Bindable var model: AppModel
     let library: LiveMusicLibrary
@@ -197,6 +282,14 @@ struct MusicLibraryView: View {
     @State private var recentPlayedSong: Song?
     @State private var totalListeningSeconds: Int64?
     @State private var listeningPhase: LibraryPhase = .idle
+    @State private var listeningTask: Task<Void, Never>?
+    @State private var listeningTaskID: UUID?
+    @State private var listeningCredentialRevision: UInt64?
+    @State private var historyRefreshes = PlaybackHistoryRefreshTracker<PlaybackHistoryKind>()
+    @State private var isVisible = false
+    @State private var libraryLoadState = MusicLibraryLoadState()
+    @State private var libraryReloadRevision: UInt64 = 0
+    @State private var progressiveSnapshot: LibrarySnapshot?
 
     init(
         model: AppModel,
@@ -213,13 +306,19 @@ struct MusicLibraryView: View {
     }
 
     var body: AnyView { AnyView(content) }
-    private var playlistRefreshID: String {
-        "\(model.librarySnapshot?.user.id ?? 0):\(model.playlistContentRevision)"
+    private var libraryLoadTrigger: MusicLibraryLoadTrigger {
+        MusicLibraryLoadTrigger(
+            accountID: model.currentUserID,
+            credentialRevision: library.transport.credentialSnapshotValue().revision,
+            reloadRevision: libraryReloadRevision
+        )
     }
 
     private var content: AnyView {
-        AnyView(Group {
-            if let snapshot = model.librarySnapshot {
+        let loadTrigger = libraryLoadTrigger
+        let playlistRefreshID = "\(model.librarySnapshot?.user.id ?? 0):\(loadTrigger.credentialRevision):\(model.playlistContentRevision)"
+        return AnyView(Group {
+            if let snapshot = progressiveSnapshot ?? model.librarySnapshot {
                 libraryContent(snapshot)
             } else {
                 switch phase {
@@ -242,19 +341,34 @@ struct MusicLibraryView: View {
                     } description: {
                         Text(message)
                     } actions: {
-                        Button("重试") { Task { await load(force: true) } }
+                        Button("重试", action: reloadLibrary)
                     }
                 }
             }
         }
-        .navigationTitle("我的音乐")
-        .task(id: model.currentUserID) { await load() }
-        .task(id: playlistRefreshID) { await refreshPlaylistsIfNeeded() }
-        .task(id: player.playbackReportRevision) {
-            guard player.playbackReportRevision > 0,
-                  let userID = model.librarySnapshot?.user.id
-            else { return }
-            await loadListening(userID: userID, refreshUser: true)
+        .navigationTitle("我的")
+        .task(id: loadTrigger) {
+            let (identity, force) = libraryLoadState.begin(loadTrigger)
+            await load(identity: identity, force: force)
+        }
+        .task(id: playlistRefreshID) { await refreshPlaylistsIfNeeded(trigger: loadTrigger) }
+        .onAppear {
+            isVisible = true
+            consumeHistoryEvent(player.playbackHistoryEvent)
+        }
+        .onDisappear {
+            isVisible = false
+            listeningTask?.cancel()
+            listeningTask = nil
+            listeningTaskID = nil
+            listeningCredentialRevision = nil
+        }
+        .onChange(of: player.playbackHistoryEvent) { _, event in
+            consumeHistoryEvent(event)
+        }
+        .onChange(of: selectedSection) { _, section in
+            guard section == .listening else { return }
+            drainListeningRefresh()
         }
         .alert(
             "删除歌单？",
@@ -271,13 +385,18 @@ struct MusicLibraryView: View {
                 PlaylistOrderEditor(
                     playlists: snapshot.playlists.filter { $0.isUserEditable(by: snapshot.user.id) },
                     library: library,
-                    reload: { await load(force: true) },
+                    reload: { await loadForced() },
                     onSaved: { model.showToast("歌单顺序已保存") }
                 )
             }
         }
         .onChange(of: model.currentUserID) { _, _ in
             showingPlaylistOrder = false
+            progressiveSnapshot = nil
+            historyRefreshes.reset()
+            listeningTask?.cancel()
+            listeningTask = nil
+            listeningTaskID = nil
         })
     }
 
@@ -309,7 +428,7 @@ struct MusicLibraryView: View {
                     .frame(minHeight: 44)
                     Button("查看主页") { onOpenRoute(.user(snapshot.user.id)) }
                     Button {
-                        Task { await load(force: true) }
+                        reloadLibrary()
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
@@ -360,7 +479,9 @@ struct MusicLibraryView: View {
         if let totalListeningSeconds {
             values.append("累计 \(listeningDurationText(totalListeningSeconds))")
         }
-        return values.joined(separator: " · ")
+        return values
+            .map { $0.map(String.init).joined(separator: "\u{2060}") }
+            .joined(separator: " ")
     }
 
     private func recommendations(_ snapshot: LibrarySnapshot) -> AnyView {
@@ -491,7 +612,7 @@ struct MusicLibraryView: View {
                     Text(message).font(.caption).foregroundStyle(.secondary)
                     Button("重试") {
                         guard let userID = model.librarySnapshot?.user.id else { return }
-                        Task { await loadListening(userID: userID) }
+                        startListeningLoad(userID: userID)
                     }
                 }
                 .frame(maxWidth: .infinity, minHeight: 120)
@@ -556,7 +677,10 @@ struct MusicLibraryView: View {
                 } label: {
                     Label("排序", systemImage: "arrow.up.arrow.down")
                 }
-                .disabled(snapshot.playlists.filter { $0.isUserEditable(by: snapshot.user.id) }.count < 2)
+                .disabled(
+                    progressiveSnapshot != nil
+                        || snapshot.playlists.filter { $0.isUserEditable(by: snapshot.user.id) }.count < 2
+                )
             }
             if let playlistError {
                 Label(playlistError, systemImage: "exclamationmark.triangle")
@@ -728,30 +852,94 @@ struct MusicLibraryView: View {
     }
 
     @MainActor
-    private func load(force: Bool = false) async {
+    private func reloadLibrary() {
+        libraryReloadRevision &+= 1
+    }
+
+    @MainActor
+    private func loadForced() async {
+        let (identity, _) = libraryLoadState.begin(libraryLoadTrigger)
+        await load(identity: identity, force: true)
+    }
+
+    @MainActor
+    private func load(identity: MusicLibraryLoadIdentity, force: Bool) async {
         let playlistRevision = model.playlistContentRevision
+        guard acceptsLibraryLoad(identity) else { return }
         if !force, let snapshot = model.librarySnapshot {
+            progressiveSnapshot = nil
             phase = .loaded
-            await loadListening(userID: snapshot.user.id)
+            startListeningLoad(userID: snapshot.user.id)
             return
         }
-        if force { await library.invalidateCachedResponses(in: [.library, .detail, .playlistSummaries]) }
         playlistError = nil
         visibleRecommendationCount = 20
+        progressiveSnapshot = nil
         phase = .loading
         do {
-            let login = try await library.loginState()
+            let login = try await library.loginState(
+                forceRefresh: force,
+                expectedCredentialRevision: identity.credentialRevision
+            )
+            try Task.checkCancellation()
+            guard acceptsLibraryLoad(identity) else { return }
             guard case let .loggedIn(user) = login else {
+                progressiveSnapshot = nil
                 model.librarySnapshot = nil
                 phase = .loggedOut
                 return
             }
-            async let songs = library.dailyRecommendations()
-            async let playlists = library.userPlaylists(userID: user.id)
-            async let following = library.myFollowing()
-            let (loadedSongs, loadedPlaylists, loadedFollowing) = try await (songs, playlists, following)
-            let loadedRecommendedUsers = (try? await extras.recommendedUsers()) ?? []
+            async let songs = library.dailyRecommendations(
+                forceRefresh: force,
+                expectedCredentialRevision: identity.credentialRevision
+            )
+            async let following = library.myFollowing(
+                forceRefresh: force,
+                expectedCredentialRevision: identity.credentialRevision,
+                onUpdate: { values in
+                    publishLibraryProgress(
+                        user: user,
+                        identity: identity,
+                        playlistRevision: playlistRevision,
+                        following: values
+                    )
+                }
+            )
+            let loadedPlaylists: [Playlist]
+            if force {
+                loadedPlaylists = try await library.userPlaylists(
+                    userID: user.id,
+                    forceRefresh: true,
+                    expectedCredentialRevision: identity.credentialRevision,
+                    onUpdate: { values in
+                        publishLibraryProgress(
+                            user: user,
+                            identity: identity,
+                            playlistRevision: playlistRevision,
+                            playlists: values
+                        )
+                    }
+                )
+            } else {
+                loadedPlaylists = try await model.accountPlaylists(
+                    userID: user.id,
+                    credentialRevision: identity.credentialRevision,
+                    onUpdate: { values in
+                        publishLibraryProgress(
+                            user: user,
+                            identity: identity,
+                            playlistRevision: playlistRevision,
+                            playlists: values
+                        )
+                    }
+                )
+            }
+            let (loadedSongs, loadedFollowing) = try await (songs, following)
+            let loadedRecommendedUsers = (try? await extras.recommendedUsers(
+                expectedCredentialRevision: identity.credentialRevision
+            )) ?? []
             try Task.checkCancellation()
+            guard acceptsLibraryLoad(identity) else { return }
             model.storeLibrarySnapshot(LibrarySnapshot(
                 user: user,
                 songs: loadedSongs,
@@ -759,45 +947,144 @@ struct MusicLibraryView: View {
                 following: loadedFollowing,
                 recommendedUsers: loadedRecommendedUsers
             ), playlistRevision: playlistRevision)
+            progressiveSnapshot = nil
             phase = .loaded
-            await loadListening(userID: user.id)
+            startListeningLoad(userID: user.id)
         } catch is CancellationError {
             guard !Task.isCancelled else { return }
-            await load(force: force)
+            guard acceptsLibraryLoad(identity) else { return }
+            await load(identity: identity, force: force)
         } catch {
+            guard acceptsLibraryLoad(identity) else { return }
+            progressiveSnapshot = nil
             phase = .failed(error.localizedDescription)
         }
     }
 
+    private func acceptsLibraryLoad(_ identity: MusicLibraryLoadIdentity) -> Bool {
+        libraryLoadState.accepts(
+            identity,
+            accountID: model.currentUserID,
+            credentialRevision: library.transport.credentialSnapshotValue().revision
+        )
+    }
+
     @MainActor
-    private func refreshPlaylistsIfNeeded() async {
+    private func publishLibraryProgress(
+        user: MusicLibraryUser,
+        identity: MusicLibraryLoadIdentity,
+        playlistRevision: Int,
+        playlists: [Playlist]? = nil,
+        following: [MusicLibraryFollow]? = nil
+    ) {
+        guard acceptsLibraryLoad(identity), playlistRevision == model.playlistContentRevision else { return }
+        let current = progressiveSnapshot?.user.id == user.id
+            ? progressiveSnapshot
+            : (model.librarySnapshot?.user.id == user.id ? model.librarySnapshot : nil)
+        progressiveSnapshot = LibrarySnapshot(
+            user: user,
+            songs: current?.songs ?? [],
+            playlists: playlists ?? current?.playlists ?? [],
+            following: following ?? current?.following ?? [],
+            recommendedUsers: current?.recommendedUsers ?? []
+        )
+    }
+
+    @MainActor
+    private func refreshPlaylistsIfNeeded(trigger: MusicLibraryLoadTrigger) async {
         guard let snapshot = model.librarySnapshot, !model.cachedPlaylistsAreFresh() else { return }
+        let identity = libraryLoadState.identity(for: trigger)
         let revision = model.playlistContentRevision
         do {
             try await Task.sleep(for: .milliseconds(200))
-            let playlists = try await library.userPlaylists(userID: snapshot.user.id)
+            let playlists = try await library.userPlaylists(
+                userID: snapshot.user.id,
+                expectedCredentialRevision: identity.credentialRevision
+            )
             try Task.checkCancellation()
-            guard model.librarySnapshot?.user.id == snapshot.user.id else { return }
+            guard acceptsPlaylistRefresh(identity, userID: snapshot.user.id) else { return }
             if model.storeCachedPlaylists(playlists, playlistRevision: revision) {
                 playlistError = nil
             }
         } catch is CancellationError {
-            guard !Task.isCancelled else { return }
-            await refreshPlaylistsIfNeeded()
+            guard !Task.isCancelled,
+                  acceptsPlaylistRefresh(identity, userID: snapshot.user.id)
+            else { return }
+            await refreshPlaylistsIfNeeded(trigger: trigger)
         } catch {
+            guard acceptsPlaylistRefresh(identity, userID: snapshot.user.id) else { return }
             playlistError = error.localizedDescription
         }
     }
 
+    private func acceptsPlaylistRefresh(_ identity: MusicLibraryLoadIdentity, userID: Int64) -> Bool {
+        acceptsLibraryLoad(identity) && model.librarySnapshot?.user.id == userID
+    }
+
     @MainActor
-    private func loadListening(userID: Int64, refreshUser: Bool = false) async {
+    private func startListeningLoad(
+        userID: Int64,
+        forceRefresh: Bool = false,
+        refreshUser: Bool = false,
+        eventSequence: UInt64? = nil
+    ) {
+        let credentialRevision = library.transport.credentialSnapshotValue().revision
+        if listeningTask != nil, listeningCredentialRevision != credentialRevision {
+            listeningTask?.cancel()
+            listeningTask = nil
+            listeningTaskID = nil
+        }
+        guard listeningTask == nil else { return }
+        let taskID = UUID()
+        listeningTaskID = taskID
+        listeningCredentialRevision = credentialRevision
+        listeningTask = Task { @MainActor in
+            await loadListening(
+                userID: userID,
+                credentialRevision: credentialRevision,
+                forceRefresh: forceRefresh,
+                refreshUser: refreshUser,
+                eventSequence: eventSequence,
+                taskID: taskID
+            )
+        }
+    }
+
+    @MainActor
+    private func loadListening(
+        userID: Int64,
+        credentialRevision: UInt64,
+        forceRefresh: Bool,
+        refreshUser: Bool,
+        eventSequence: UInt64?,
+        taskID: UUID
+    ) async {
         listeningPhase = .loading
         totalListeningSeconds = nil
+        var settlesEvent = false
+        var discardsEvent = false
         do {
-            async let weekly = library.listeningRecords(userID: userID, period: .week)
-            async let allTime = library.listeningRecords(userID: userID, period: .allTime)
-            async let recent = library.recentlyPlayedSongs(limit: 1)
-            async let totalDuration = try? library.totalListeningDuration()
+            async let weekly = library.listeningRecords(
+                userID: userID,
+                period: .week,
+                forceRefresh: forceRefresh,
+                expectedCredentialRevision: credentialRevision
+            )
+            async let allTime = library.listeningRecords(
+                userID: userID,
+                period: .allTime,
+                forceRefresh: forceRefresh,
+                expectedCredentialRevision: credentialRevision
+            )
+            async let recent = library.recentlyPlayedSongs(
+                limit: 1,
+                forceRefresh: forceRefresh,
+                expectedCredentialRevision: credentialRevision
+            )
+            async let totalDuration = try? library.totalListeningDuration(
+                forceRefresh: forceRefresh,
+                expectedCredentialRevision: credentialRevision
+            )
             let (loadedWeekly, loadedAllTime, loadedRecent, loadedTotalDuration) = try await (
                 weekly,
                 allTime,
@@ -805,14 +1092,27 @@ struct MusicLibraryView: View {
                 totalDuration
             )
             try Task.checkCancellation()
+            guard listeningTaskID == taskID,
+                  model.currentUserID == userID,
+                  library.transport.credentialSnapshotValue().revision == credentialRevision
+            else {
+                discardsEvent = true
+                throw CancellationError()
+            }
             weeklyListeningRecords = loadedWeekly
             allTimeListeningRecords = loadedAllTime
             recentPlayedSong = loadedRecent.first
             totalListeningSeconds = loadedTotalDuration
             listeningPhase = .loaded
+            settlesEvent = true
 
             if refreshUser,
-               let user = try? await library.userInfo(userID: userID),
+               let user = try? await library.userInfo(
+                   userID: userID,
+                   forceRefresh: forceRefresh,
+                   expectedCredentialRevision: credentialRevision
+               ),
+               library.transport.credentialSnapshotValue().revision == credentialRevision,
                let snapshot = model.librarySnapshot {
                 model.librarySnapshot = LibrarySnapshot(
                     user: user,
@@ -824,8 +1124,48 @@ struct MusicLibraryView: View {
             }
         } catch is CancellationError {
         } catch {
-            listeningPhase = .failed(error.localizedDescription)
+            if model.currentUserID != userID
+                || library.transport.credentialSnapshotValue().revision != credentialRevision {
+                discardsEvent = true
+            } else {
+                listeningPhase = .failed(error.localizedDescription)
+                settlesEvent = true
+            }
         }
+        guard listeningTaskID == taskID else { return }
+        if (settlesEvent || discardsEvent), let eventSequence {
+            historyRefreshes.settle(.song, sequence: eventSequence)
+        }
+        listeningTask = nil
+        listeningTaskID = nil
+        listeningCredentialRevision = nil
+        drainListeningRefresh()
+    }
+
+    private func consumeHistoryEvent(_ event: PlaybackHistoryEvent?) {
+        guard let event, event.kind == .song,
+              historyRefreshes.record(
+                  event,
+                  credentialRevision: library.transport.credentialSnapshotValue().revision,
+                  keys: [.song]
+              )
+        else { return }
+        drainListeningRefresh()
+    }
+
+    private func drainListeningRefresh() {
+        guard isVisible,
+              selectedSection == .listening,
+              listeningTask == nil,
+              let userID = model.librarySnapshot?.user.id,
+              let sequence = historyRefreshes.pendingSequence(for: .song)
+        else { return }
+        startListeningLoad(
+            userID: userID,
+            forceRefresh: true,
+            refreshUser: true,
+            eventSequence: sequence
+        )
     }
 
     private func listeningDurationText(_ seconds: Int64) -> String {
@@ -839,20 +1179,32 @@ struct MusicLibraryView: View {
 
     private func createPlaylist() {
         let name = playlistName
+        let credentialRevision = library.transport.credentialSnapshotValue().revision
         creationError = nil
         isCreatingPlaylist = true
         Task { @MainActor in
             do {
                 _ = try await library.createPlaylist(
                     name: name,
-                    privacy: privatePlaylist ? .privatePlaylist : .publicPlaylist
+                    privacy: privatePlaylist ? .privatePlaylist : .publicPlaylist,
+                    expectedCredentialRevision: credentialRevision
                 )
+                try Task.checkCancellation()
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    throw CancellationError()
+                }
                 playlistName = ""
                 privatePlaylist = false
                 isCreatingPlaylist = false
                 model.showToast("歌单已创建")
-                await load(force: true)
+                await loadForced()
+            } catch is CancellationError {
+                isCreatingPlaylist = false
             } catch {
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    isCreatingPlaylist = false
+                    return
+                }
                 creationError = error.localizedDescription
                 isCreatingPlaylist = false
             }
@@ -860,16 +1212,30 @@ struct MusicLibraryView: View {
     }
 
     private func deletePlaylist(_ playlist: Playlist) {
+        let credentialRevision = library.transport.credentialSnapshotValue().revision
         playlistError = nil
         deletingPlaylistID = playlist.id
         Task { @MainActor in
             do {
-                try await library.deletePlaylist(playlist.id)
+                try await library.deletePlaylist(
+                    playlist.id,
+                    expectedCredentialRevision: credentialRevision
+                )
+                try Task.checkCancellation()
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    throw CancellationError()
+                }
                 playlistToDelete = nil
                 deletingPlaylistID = nil
                 model.showToast("歌单已删除")
-                await load(force: true)
+                await loadForced()
+            } catch is CancellationError {
+                deletingPlaylistID = nil
             } catch {
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    deletingPlaylistID = nil
+                    return
+                }
                 playlistError = error.localizedDescription
                 deletingPlaylistID = nil
             }
@@ -955,16 +1321,34 @@ private struct PlaylistOrderEditor: View {
 
     private func save() {
         guard !isSaving, draft.map(\.id) != original.map(\.id) else { return }
+        let credentialRevision = library.transport.credentialSnapshotValue().revision
         errorMessage = nil
         isSaving = true
         saveTask = Task { @MainActor in
             do {
-                try await library.updatePlaylistOrder(draft.map(\.id))
+                try await library.updatePlaylistOrder(
+                    draft.map(\.id),
+                    expectedCredentialRevision: credentialRevision
+                )
+                try Task.checkCancellation()
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    throw CancellationError()
+                }
                 await reload()
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    throw CancellationError()
+                }
                 onSaved()
                 dismiss()
             } catch is CancellationError {
+                isSaving = false
+                saveTask = nil
             } catch {
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    isSaving = false
+                    saveTask = nil
+                    return
+                }
                 errorMessage = error.localizedDescription
                 isSaving = false
                 saveTask = nil
@@ -981,7 +1365,11 @@ struct ListeningHistoryView: View {
     @State private var selectedKind = RecentPlaybackKind.song
     @State private var history = RecentPlaybackState()
     @State private var tasks: [RecentPlaybackKind: Task<Void, Never>] = [:]
-    @State private var pendingRefreshes: Set<RecentPlaybackKind> = []
+    @State private var taskIDs: [RecentPlaybackKind: UUID] = [:]
+    @State private var fallbackLoads: [RecentPlaybackKind: RecentPlaybackLoad] = [:]
+    @State private var historyRefreshes = PlaybackHistoryRefreshTracker<RecentPlaybackKind>()
+    @State private var isVisible = false
+    @FocusState private var isKindPickerFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -996,35 +1384,45 @@ struct ListeningHistoryView: View {
                     .padding(.horizontal, 24)
                     .padding(.vertical, 12)
                 Divider()
-                ZStack {
-                    ForEach(RecentPlaybackKind.allCases, id: \.self) { kind in
-                        playbackContent(kind)
-                            .opacity(kind == selectedKind ? 1 : 0)
-                            .allowsHitTesting(kind == selectedKind)
-                            .accessibilityHidden(kind != selectedKind)
-                    }
-                }
+                playbackContent(selectedKind)
+                    .id(selectedKind)
             }
         }
         .navigationTitle("最近播放")
         .toolbar {
             ToolbarItem {
                 Button { startLoad(selectedKind, force: true) } label: {
-                    Image(systemName: "arrow.clockwise")
+                    if tasks[selectedKind] != nil {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                    }
                 }
                 .help("刷新播放历史")
-                .accessibilityLabel("刷新播放历史")
-                .disabled(model.currentUserID == nil || history.load(for: selectedKind).isLoading)
+                .accessibilityLabel(tasks[selectedKind] == nil ? "刷新播放历史" : "正在刷新播放历史")
+                .disabled(model.currentUserID == nil || tasks[selectedKind] != nil)
             }
         }
-        .task(id: model.currentUserID) { reset(accountID: model.currentUserID) }
-        .onChange(of: selectedKind) { _, kind in startLoad(kind) }
-        .onChange(of: player.playbackReportRevision) { oldValue, newValue in
-            guard newValue > oldValue else { return }
-            let kinds: [RecentPlaybackKind] = player.lastPlaybackReportWasPodcast
-                ? [.voice, .podcast]
-                : [.song]
-            for kind in kinds { startLoad(kind, force: true) }
+        .task(id: "\(model.currentUserID ?? 0):\(playerAccountCredentialRevision)") {
+            reset(accountID: model.currentUserID)
+        }
+        .onAppear {
+            isVisible = true
+            consumeHistoryEvent(player.playbackHistoryEvent)
+            drainRefresh(for: selectedKind)
+        }
+        .onDisappear {
+            isVisible = false
+            for kind in Array(tasks.keys) { cancelLoad(kind) }
+        }
+        .onChange(of: selectedKind) { oldKind, kind in
+            cancelLoad(oldKind)
+            drainRefresh(for: kind)
+            if tasks[kind] == nil { startLoad(kind) }
+            restorePickerFocus(for: kind)
+        }
+        .onChange(of: player.playbackHistoryEvent) { _, event in
+            consumeHistoryEvent(event)
         }
     }
 
@@ -1039,6 +1437,7 @@ struct ListeningHistoryView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .frame(minWidth: 560, maxWidth: 680)
+            .focused($isKindPickerFocused)
 
             Picker("播放类型", selection: $selectedKind) {
                 ForEach(RecentPlaybackKind.allCases, id: \.self) { kind in
@@ -1047,6 +1446,7 @@ struct ListeningHistoryView: View {
             }
             .pickerStyle(.menu)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .focused($isKindPickerFocused)
         }
     }
 
@@ -1150,19 +1550,25 @@ struct ListeningHistoryView: View {
     private func reset(accountID: Int64?) {
         tasks.values.forEach { $0.cancel() }
         tasks.removeAll()
-        pendingRefreshes.removeAll()
+        taskIDs.removeAll()
+        fallbackLoads.removeAll()
+        historyRefreshes.reset()
         history.reset(accountID: accountID)
         selectedKind = .song
-        if accountID != nil { startLoad(.song) }
+        if accountID != nil {
+            consumeHistoryEvent(player.playbackHistoryEvent)
+            if tasks[.song] == nil { startLoad(.song) }
+        }
     }
 
     @MainActor
-    private func startLoad(_ kind: RecentPlaybackKind, force: Bool = false) {
+    private func startLoad(
+        _ kind: RecentPlaybackKind,
+        force: Bool = false,
+        eventSequence: UInt64? = nil
+    ) {
         guard let accountID = model.currentUserID else { return }
-        if tasks[kind] != nil {
-            if force { pendingRefreshes.insert(kind) }
-            return
-        }
+        guard tasks[kind] == nil else { return }
         if !force {
             switch history.load(for: kind) {
             case .loading, .loaded: return
@@ -1171,47 +1577,165 @@ struct ListeningHistoryView: View {
         }
 
         let generation = history.generation
-        history.setLoading(kind)
+        let previousLoad = history.load(for: kind)
+        fallbackLoads[kind] = previousLoad
+        if case .loaded = previousLoad, force {
+        } else {
+            history.setLoading(kind)
+        }
+        let taskID = UUID()
+        let credentialRevision = playerAccountCredentialRevision
+        taskIDs[kind] = taskID
         tasks[kind] = Task { @MainActor in
             defer {
-                if history.generation == generation, model.currentUserID == accountID {
+                if taskIDs[kind] == taskID {
                     tasks[kind] = nil
-                    if pendingRefreshes.remove(kind) != nil { startLoad(kind, force: true) }
+                    taskIDs[kind] = nil
+                    fallbackLoads[kind] = nil
+                    drainRefresh(for: kind)
                 }
             }
             do {
-                if force { await library.invalidateCachedResponses(in: [.library]) }
-                let content = try await load(kind)
+                let content = try await load(
+                    kind,
+                    forceRefresh: force,
+                    expectedCredentialRevision: credentialRevision
+                )
                 try Task.checkCancellation()
-                guard model.currentUserID == accountID, history.accept(
+                guard taskIDs[kind] == taskID, model.currentUserID == accountID else { return }
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    if let eventSequence { historyRefreshes.settle(kind, sequence: eventSequence) }
+                    return
+                }
+                guard history.accept(
                     .loaded(content),
                     for: kind,
                     generation: generation,
                     accountID: accountID
                 ) else { return }
+                if let eventSequence { historyRefreshes.settle(kind, sequence: eventSequence) }
             } catch is CancellationError {
-                guard model.currentUserID == accountID,
-                      history.accept(.idle, for: kind, generation: generation, accountID: accountID)
+                guard taskIDs[kind] == taskID,
+                      model.currentUserID == accountID,
+                      history.accept(
+                          previousLoad,
+                          for: kind,
+                          generation: generation,
+                          accountID: accountID
+                      )
                 else { return }
             } catch {
-                guard model.currentUserID == accountID, history.accept(
+                guard taskIDs[kind] == taskID, model.currentUserID == accountID else { return }
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    if let eventSequence { historyRefreshes.settle(kind, sequence: eventSequence) }
+                    _ = history.accept(
+                        previousLoad,
+                        for: kind,
+                        generation: generation,
+                        accountID: accountID
+                    )
+                    return
+                }
+                guard history.accept(
                     .failed(error.localizedDescription),
                     for: kind,
                     generation: generation,
                     accountID: accountID
                 ) else { return }
+                if let eventSequence { historyRefreshes.settle(kind, sequence: eventSequence) }
             }
         }
     }
 
-    private func load(_ kind: RecentPlaybackKind) async throws -> RecentPlaybackContent {
+    private var playerAccountCredentialRevision: UInt64 {
+        library.transport.credentialSnapshotValue().revision
+    }
+
+    private func load(
+        _ kind: RecentPlaybackKind,
+        forceRefresh: Bool,
+        expectedCredentialRevision: UInt64
+    ) async throws -> RecentPlaybackContent {
         switch kind {
-        case .song: .songs(try await library.recentlyPlayedSongs())
-        case .album: .albums(try await library.recentlyPlayedAlbums())
-        case .playlist: .playlists(try await library.recentlyPlayedPlaylists())
-        case .video: .media(try await library.recentlyPlayedVideos())
-        case .voice: .media(try await library.recentlyPlayedVoices())
-        case .podcast: .media(try await library.recentlyPlayedPodcasts())
+        case .song:
+            .songs(try await library.recentlyPlayedSongs(
+                forceRefresh: forceRefresh,
+                expectedCredentialRevision: expectedCredentialRevision
+            ))
+        case .album:
+            .albums(try await library.recentlyPlayedAlbums(
+                forceRefresh: forceRefresh,
+                expectedCredentialRevision: expectedCredentialRevision
+            ))
+        case .playlist:
+            .playlists(try await library.recentlyPlayedPlaylists(
+                forceRefresh: forceRefresh,
+                expectedCredentialRevision: expectedCredentialRevision
+            ))
+        case .video:
+            .media(try await library.recentlyPlayedVideos(
+                forceRefresh: forceRefresh,
+                expectedCredentialRevision: expectedCredentialRevision
+            ))
+        case .voice:
+            .media(try await library.recentlyPlayedVoices(
+                forceRefresh: forceRefresh,
+                expectedCredentialRevision: expectedCredentialRevision
+            ))
+        case .podcast:
+            .media(try await library.recentlyPlayedPodcasts(
+                forceRefresh: forceRefresh,
+                expectedCredentialRevision: expectedCredentialRevision
+            ))
+        }
+    }
+
+    @MainActor
+    private func cancelLoad(_ kind: RecentPlaybackKind) {
+        tasks[kind]?.cancel()
+        tasks[kind] = nil
+        taskIDs[kind] = nil
+        guard let fallback = fallbackLoads.removeValue(forKey: kind),
+              let accountID = model.currentUserID
+        else { return }
+        _ = history.accept(
+            fallback,
+            for: kind,
+            generation: history.generation,
+            accountID: accountID
+        )
+    }
+
+    @MainActor
+    private func consumeHistoryEvent(_ event: PlaybackHistoryEvent?) {
+        guard let event else { return }
+        let kinds: [RecentPlaybackKind] = switch event.kind {
+        case .song: [.song]
+        case .podcast: [.voice, .podcast]
+        }
+        guard historyRefreshes.record(
+            event,
+            credentialRevision: playerAccountCredentialRevision,
+            keys: kinds
+        ) else { return }
+        drainRefresh(for: selectedKind)
+    }
+
+    @MainActor
+    private func drainRefresh(for kind: RecentPlaybackKind) {
+        guard isVisible,
+              selectedKind == kind,
+              tasks[kind] == nil,
+              let sequence = historyRefreshes.pendingSequence(for: kind)
+        else { return }
+        startLoad(kind, force: true, eventSequence: sequence)
+    }
+
+    private func restorePickerFocus(for kind: RecentPlaybackKind) {
+        Task { @MainActor in
+            await Task.yield()
+            guard isVisible, selectedKind == kind else { return }
+            isKindPickerFocused = true
         }
     }
 }
@@ -1458,6 +1982,7 @@ struct CommentsView: View {
     private func submitComment() {
         let content = trimmedComment
         guard currentUserID != nil, !content.isEmpty, !isSubmitting else { return }
+        let credentialRevision = library.transport.credentialSnapshotValue().revision
         isSubmitting = true
         writeTask = Task { @MainActor in
             defer {
@@ -1465,8 +1990,15 @@ struct CommentsView: View {
                 writeTask = nil
             }
             do {
-                let serverComment = try await library.addComment(songID: songID, content: content)
+                let serverComment = try await library.addComment(
+                    songID: songID,
+                    content: content,
+                    expectedCredentialRevision: credentialRevision
+                )
                 try Task.checkCancellation()
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    throw CancellationError()
+                }
                 commentText = ""
                 let comment = confirmedComment(
                     serverComment,
@@ -1896,12 +2428,21 @@ private struct CommentThreadRow: View {
             }
         }
         .sheet(item: $replyTarget) { target in
-            CommentReplySheet(comment: target, emojiPictureIDs: emojiPictureIDs) { content in
+            CommentReplySheet(
+                comment: target,
+                emojiPictureIDs: emojiPictureIDs,
+                currentCredentialRevision: { library.transport.credentialSnapshotValue().revision }
+            ) { content, credentialRevision in
                 let serverComment = try await library.replyToComment(
                     songID: comment.songID,
                     commentID: target.id,
-                    content: content
+                    content: content,
+                    expectedCredentialRevision: credentialRevision
                 )
+                try Task.checkCancellation()
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    throw CancellationError()
+                }
                 let reply = confirmedComment(
                     serverComment,
                     songID: comment.songID,
@@ -2028,14 +2569,20 @@ private struct CommentThreadRow: View {
     private func toggleLiked(_ target: MusicComment) {
         guard currentUserID != nil, writeTasks[target.id] == nil else { return }
         let liked = !target.isLiked
+        let credentialRevision = library.transport.credentialSnapshotValue().revision
         writeTasks[target.id] = Task { @MainActor in
             defer { writeTasks[target.id] = nil }
             do {
                 try await library.setCommentLiked(
                     songID: comment.songID,
                     commentID: target.id,
-                    liked: liked
+                    liked: liked,
+                    expectedCredentialRevision: credentialRevision
                 )
+                try Task.checkCancellation()
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    throw CancellationError()
+                }
                 let updated = target.settingLiked(liked)
                 if target.id == comment.id {
                     onCommentChanged(updated)
@@ -2054,10 +2601,19 @@ private struct CommentThreadRow: View {
     private func deleteComment(_ target: MusicComment) {
         guard currentUserID == target.userID, writeTasks[target.id] == nil else { return }
         deleteTarget = nil
+        let credentialRevision = library.transport.credentialSnapshotValue().revision
         writeTasks[target.id] = Task { @MainActor in
             defer { writeTasks[target.id] = nil }
             do {
-                try await library.deleteComment(songID: comment.songID, commentID: target.id)
+                try await library.deleteComment(
+                    songID: comment.songID,
+                    commentID: target.id,
+                    expectedCredentialRevision: credentialRevision
+                )
+                try Task.checkCancellation()
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    throw CancellationError()
+                }
                 onWriteSucceeded("评论已删除")
                 if target.id == comment.id {
                     onCommentDeleted(target.id)
@@ -2127,7 +2683,8 @@ private struct CommentThreadRow: View {
 private struct CommentReplySheet: View {
     let comment: MusicComment
     let emojiPictureIDs: [String: String]
-    let submit: (String) async throws -> Void
+    let currentCredentialRevision: () -> UInt64
+    let submit: (String, UInt64) async throws -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var content = ""
@@ -2179,6 +2736,7 @@ private struct CommentReplySheet: View {
     private func submitReply() {
         let value = trimmedContent
         guard !value.isEmpty, !isSubmitting else { return }
+        let credentialRevision = currentCredentialRevision()
         isSubmitting = true
         errorMessage = nil
         task = Task { @MainActor in
@@ -2187,7 +2745,7 @@ private struct CommentReplySheet: View {
                 task = nil
             }
             do {
-                try await submit(value)
+                try await submit(value, credentialRevision)
                 dismiss()
             } catch is CancellationError {
             } catch {

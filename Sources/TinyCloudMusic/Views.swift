@@ -137,14 +137,68 @@ private struct SongArtistLinkRow: View {
 
 private struct SessionChangeIdentity: Equatable {
     let state: SessionState
-    let credentialRevision: Int
+    let credentialRevision: UInt64
+}
+
+struct CacheConfigurationSnapshot: Equatable {
+    let playbackQuality: AudioQuality
+    let cacheRoot: URL
+    let revision: UInt64
+
+    init(playbackQuality: AudioQuality, cacheRoot: URL, revision: UInt64) {
+        self.playbackQuality = playbackQuality
+        self.cacheRoot = cacheRoot.standardizedFileURL
+        self.revision = revision
+    }
+}
+
+struct CacheConfigurationFanout: Equatable {
+    let snapshot: CacheConfigurationSnapshot
+    let configuresPlayer: Bool
+    let configuresArtwork: Bool
+
+    func apply(
+        configurePlayer: (AudioQuality, URL) -> Void,
+        configureArtwork: (URL) -> Void
+    ) {
+        if configuresPlayer {
+            configurePlayer(snapshot.playbackQuality, snapshot.cacheRoot)
+        }
+        if configuresArtwork {
+            configureArtwork(snapshot.cacheRoot)
+        }
+    }
+}
+
+struct CacheConfigurationFanoutState {
+    private var applied: CacheConfigurationSnapshot
+
+    init(initial: CacheConfigurationSnapshot) {
+        applied = initial
+    }
+
+    mutating func update(to snapshot: CacheConfigurationSnapshot) -> CacheConfigurationFanout {
+        let configuresPlayer = snapshot.playbackQuality != applied.playbackQuality
+            || snapshot.cacheRoot != applied.cacheRoot
+        let configuresArtwork = snapshot.revision != applied.revision
+            || snapshot.cacheRoot != applied.cacheRoot
+        applied = snapshot
+        return CacheConfigurationFanout(
+            snapshot: snapshot,
+            configuresPlayer: configuresPlayer,
+            configuresArtwork: configuresArtwork
+        )
+    }
 }
 
 struct RootView: View {
     @Bindable var model: AppModel
     @Bindable var player: PlayerController
+    let initialCacheConfiguration: CacheConfigurationSnapshot
     let openNowPlaying: () -> Void
+    let start: @MainActor () async -> Bool
     @State private var isStarting = true
+    @State private var cacheConfigurationState: CacheConfigurationFanoutState?
 
     // ponytail: type erasure bounds clean-build module emission; remove only if render profiling warrants it.
     var body: AnyView { AnyView(content) }
@@ -168,17 +222,19 @@ struct RootView: View {
         .tint(.red)
         .preferredColorScheme(model.settings.appearance.colorScheme)
         .task {
-            if let session = model.session {
-                await session.restore()
+            let canLoad = await start()
+            guard !Task.isCancelled else { return }
+            if canLoad, model.session != nil {
                 await model.refreshAccountState()
             }
-            if model.homeSlots.allSatisfy({ $0.load == .idle }) {
+            if canLoad, model.homeSlots.allSatisfy({ $0.load == .idle }) {
                 model.loadHome()
             }
             isStarting = false
         }
         .onChange(of: sessionChangeIdentity) { _, identity in
             guard !isStarting else { return }
+            if let identity { player.setAccountCredentialRevision(identity.credentialRevision) }
             Task {
                 await model.refreshAccountState()
                 guard sessionChangeIdentity == identity else { return }
@@ -189,12 +245,8 @@ struct RootView: View {
             guard let phase, case .recoveryAvailable = phase else { return }
             model.isListenTogetherPresented = true
         }
-        .onChange(of: model.settings.playbackQuality) { _, quality in
-            player.configure(playbackQuality: quality, cacheRoot: model.cacheFolderURL)
-        }
-        .onChange(of: model.settings.cacheBookmark) { _, _ in
-            player.configure(playbackQuality: model.settings.playbackQuality, cacheRoot: model.cacheFolderURL)
-            ArtworkPipeline.shared.configure(cacheRoot: model.cacheFolderURL)
+        .onChange(of: cacheConfiguration, initial: true) { _, configuration in
+            applyCacheConfiguration(configuration)
         }
         .onChange(of: model.settings.crossfadeDuration) { _, duration in
             player.setCrossfadeDuration(duration)
@@ -223,16 +275,7 @@ struct RootView: View {
                     userID: userID,
                     extras: extras,
                     library: library,
-                    onFinished: { playlistID, isFavoritePlaylist in
-                        model.songPlaylistMembershipDidChange(
-                            song.id,
-                            playlistID: playlistID,
-                            isFavoritePlaylist: isFavoritePlaylist,
-                            containsSong: true
-                        )
-                        model.playlistPickerSong = nil
-                        model.showToast("已加入歌单")
-                    }
+                    model: model
                 )
             } else {
                 ContentUnavailableView(
@@ -266,6 +309,26 @@ struct RootView: View {
         }
     }
 
+    private var cacheConfiguration: CacheConfigurationSnapshot {
+        CacheConfigurationSnapshot(
+            playbackQuality: model.settings.playbackQuality,
+            cacheRoot: model.cacheFolderURL,
+            revision: model.cacheConfigurationRevision
+        )
+    }
+
+    private func applyCacheConfiguration(_ configuration: CacheConfigurationSnapshot) {
+        var state = cacheConfigurationState ?? CacheConfigurationFanoutState(
+            initial: initialCacheConfiguration
+        )
+        let fanout = state.update(to: configuration)
+        cacheConfigurationState = state
+        fanout.apply(
+            configurePlayer: { player.configure(playbackQuality: $0, cacheRoot: $1) },
+            configureArtwork: { ArtworkPipeline.shared.configure(cacheRoot: $0) }
+        )
+    }
+
     private var listenTogetherPhase: ListenTogetherPhase? {
         model.listenTogether?.phase
     }
@@ -296,6 +359,7 @@ private struct PrimaryContentView: View {
                     currentUserID: model.currentUserID,
                     subscriptionOverrides: model.videoSubscriptionOverrides,
                     subscriptionRevision: model.videoSubscriptionRevision,
+                    loadedSubscriptionRevision: model.loadedVideoSubscriptionRevision,
                     onOpenRoute: model.open,
                     onLogin: { model.selectSidebar(.session) },
                     onSubscriptionsLoaded: model.recordVideoSubscriptions
@@ -548,7 +612,7 @@ private struct SidebarView: View {
                 Label("私人 FM", systemImage: "radio")
                     .tag(SidebarItem.personalFM)
                 Section("资料库") {
-                    Label("我的音乐", systemImage: "music.note.list")
+                    Label("我的", systemImage: "music.note.list")
                         .tag(SidebarItem.library)
                     Label("最近播放", systemImage: "clock.arrow.circlepath")
                         .tag(SidebarItem.history)
@@ -579,7 +643,7 @@ private struct HomeView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 34) {
+            LazyVStack(alignment: .leading, spacing: 34) {
                 HStack(spacing: 12) {
                     Image(systemName: "sparkles")
                         .font(.system(size: 17, weight: .semibold))
@@ -1166,6 +1230,7 @@ struct SongContextMenu: View {
                 systemImage: model.likedSongIDs.contains(song.id) ? "heart.slash" : "heart"
             )
         }
+        .disabled(model.pendingMutations.contains(.songLike(song.id)))
         Button { model.download(song) } label: {
             Label("下载", systemImage: "arrow.down.circle")
         }
@@ -1285,6 +1350,7 @@ private struct ArtistDetailContent: View {
                     artistID: artist.id,
                     extras: extras,
                     library: library,
+                    model: model,
                     knowledgeSection: model.knowledgeLibrary.map { knowledge in
                         AnyView(MusicKnowledgeSection(
                             resource: .artist(artist.id),
@@ -1295,9 +1361,6 @@ private struct ArtistDetailContent: View {
                         ))
                     },
                     onOpenRoute: { model.open($0) },
-                    onFollowChanged: {
-                        model.showToast($0 ? "已关注歌手" : "已取消关注歌手")
-                    },
                     songList: AnyView(
                         ArtistSongList(
                             artistID: artist.id,
@@ -1414,6 +1477,7 @@ private struct AlbumDetailContent: View {
                 Label(subscriptionTitle, systemImage: isSubscribed ? "star.slash" : "star")
             }
             .buttonStyle(.bordered)
+            .disabled(model.pendingMutations.contains(.albumSubscription(album.id)))
         })
     }
 }
@@ -1725,6 +1789,7 @@ private struct PlaylistDetailContent: View {
                     Label(subscriptionTitle, systemImage: isSubscribed ? "star.slash" : "star")
                 }
                 .buttonStyle(.bordered)
+                .disabled(model.pendingMutations.contains(.playlistSubscription(playlist.id)))
             }
             if playlist.isUserEditable(by: model.currentUserID), model.library != nil {
                 Menu {
@@ -1835,14 +1900,27 @@ private struct PlaylistDetailContent: View {
 
     private func makePublic() {
         guard let library = model.library, !isPublishing, playlist.isPrivate else { return }
+        let credentialRevision = library.transport.credentialSnapshotValue().revision
         isPublishing = true
         managementError = nil
         publishTask = Task { @MainActor in
             do {
-                try await library.makePlaylistPublic(playlist.id)
+                try await library.makePlaylistPublic(
+                    playlist.id,
+                    expectedCredentialRevision: credentialRevision
+                )
+                try Task.checkCancellation()
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    throw CancellationError()
+                }
                 model.showToast("歌单已设为公开")
                 do {
                     _ = try await model.reloadPlaylist(playlist.id)
+                    guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                        throw CancellationError()
+                    }
+                } catch is CancellationError {
+                    throw CancellationError()
                 } catch {
                     managementError = "歌单已设为公开，但重新读取失败：\(error.localizedDescription)"
                 }
@@ -1972,6 +2050,7 @@ private struct PlaylistMetadataEditor: View {
     private func save() {
         let changes = draft.changes(from: playlist)
         guard !changes.isEmpty, !draft.normalizedName.isEmpty, !isSaving else { return }
+        let credentialRevision = library.transport.credentialSnapshotValue().revision
         errorMessage = nil
         isSaving = true
         saveTask = Task { @MainActor in
@@ -1981,23 +2060,52 @@ private struct PlaylistMetadataEditor: View {
                     try Task.checkCancellation()
                     switch change {
                     case let .name(name):
-                        try await library.updatePlaylistName(playlist.id, name: name)
+                        try await library.updatePlaylistName(
+                            playlist.id,
+                            name: name,
+                            expectedCredentialRevision: credentialRevision
+                        )
                     case let .description(description):
-                        try await library.updatePlaylistDescription(playlist.id, description: description)
+                        try await library.updatePlaylistDescription(
+                            playlist.id,
+                            description: description,
+                            expectedCredentialRevision: credentialRevision
+                        )
                     case let .tags(tags):
-                        try await library.updatePlaylistTags(playlist.id, tags: tags)
+                        try await library.updatePlaylistTags(
+                            playlist.id,
+                            tags: tags,
+                            expectedCredentialRevision: credentialRevision
+                        )
+                    }
+                    guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                        throw CancellationError()
                     }
                     completed += 1
                 }
             } catch is CancellationError {
+                isSaving = false
+                saveTask = nil
                 return
             } catch {
-                await recover(from: error, completed: completed)
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    isSaving = false
+                    saveTask = nil
+                    return
+                }
+                await recover(
+                    from: error,
+                    completed: completed,
+                    credentialRevision: credentialRevision
+                )
                 return
             }
 
             do {
                 let refreshed = try await reloadPlaylist()
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    throw CancellationError()
+                }
                 let rejected = changes.filter { !$0.isReflected(in: refreshed) }
                 guard rejected.isEmpty else {
                     draft = PlaylistMetadataDraft(playlist: refreshed)
@@ -2015,7 +2123,14 @@ private struct PlaylistMetadataEditor: View {
                 saveTask = nil
                 onSaved()
             } catch is CancellationError {
+                isSaving = false
+                saveTask = nil
             } catch {
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    isSaving = false
+                    saveTask = nil
+                    return
+                }
                 errorMessage = "内容已保存，但重新读取失败：\(error.localizedDescription)"
                 isSaving = false
                 saveTask = nil
@@ -2024,15 +2139,29 @@ private struct PlaylistMetadataEditor: View {
     }
 
     @MainActor
-    private func recover(from saveError: Error, completed: Int) async {
+    private func recover(
+        from saveError: Error,
+        completed: Int,
+        credentialRevision: UInt64
+    ) async {
         do {
             draft = PlaylistMetadataDraft(playlist: try await reloadPlaylist())
+            guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                throw CancellationError()
+            }
             errorMessage = completed > 0
                 ? "部分内容可能已保存，已重新读取当前歌单。\n\(saveError.localizedDescription)"
                 : saveError.localizedDescription
         } catch is CancellationError {
+            isSaving = false
+            saveTask = nil
             return
         } catch {
+            guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                isSaving = false
+                saveTask = nil
+                return
+            }
             errorMessage = completed > 0
                 ? "部分内容可能已保存，重新读取失败：\(error.localizedDescription)"
                 : "\(saveError.localizedDescription)\n重新读取失败：\(error.localizedDescription)"
@@ -2107,19 +2236,37 @@ private struct PlaylistCoverConfirmation: View {
 
     private func save() {
         guard !isSaving else { return }
+        let credentialRevision = library.transport.credentialSnapshotValue().revision
         isSaving = true
         errorMessage = nil
         saveTask = Task { @MainActor in
             do {
                 if !uploadCompleted {
-                    try await library.updatePlaylistCover(playlistID, cover: cover)
+                    try await library.updatePlaylistCover(
+                        playlistID,
+                        cover: cover,
+                        expectedCredentialRevision: credentialRevision
+                    )
+                    guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                        throw CancellationError()
+                    }
                     uploadCompleted = true
                 }
                 try await reload()
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    throw CancellationError()
+                }
                 onSaved()
                 dismiss()
             } catch is CancellationError {
+                isSaving = false
+                saveTask = nil
             } catch {
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    isSaving = false
+                    saveTask = nil
+                    return
+                }
                 errorMessage = uploadCompleted
                     ? "封面已更新，但重新读取失败：\(error.localizedDescription)"
                     : error.localizedDescription
@@ -2263,19 +2410,37 @@ private struct PlaylistSongOrderEditor: View {
 
     private func save() {
         guard !isSaving, writeCompleted || draft != original else { return }
+        let credentialRevision = library.transport.credentialSnapshotValue().revision
         isSaving = true
         saveError = nil
         saveTask = Task { @MainActor in
             do {
                 if !writeCompleted {
-                    try await library.updatePlaylistSongOrder(playlistID, trackIDs: draft)
+                    try await library.updatePlaylistSongOrder(
+                        playlistID,
+                        trackIDs: draft,
+                        expectedCredentialRevision: credentialRevision
+                    )
+                    guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                        throw CancellationError()
+                    }
                     writeCompleted = true
                 }
                 try await reload()
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    throw CancellationError()
+                }
                 onSaved()
                 dismiss()
             } catch is CancellationError {
+                isSaving = false
+                saveTask = nil
             } catch {
+                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    isSaving = false
+                    saveTask = nil
+                    return
+                }
                 saveError = writeCompleted
                     ? "顺序已保存，但重新读取失败：\(error.localizedDescription)"
                     : error.localizedDescription
@@ -2375,6 +2540,7 @@ private struct UserDetailContent: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(.red)
+            .disabled(model.pendingMutations.contains(.userFollow(user.id)))
         )
     }
 }
@@ -2610,22 +2776,13 @@ struct SongList: View {
                             model: model,
                             player: player
                         )
-                        if allowsSongRemoval, let playlistID, let library = model.library {
+                        if allowsSongRemoval, let playlistID {
                             Divider()
                             RemoveSongFromPlaylistButton(
                                 songID: song.id,
                                 playlistID: playlistID,
-                                library: library,
-                                onRemoved: {
-                                    model.songPlaylistMembershipDidChange(
-                                        song.id,
-                                        playlistID: playlistID,
-                                        isFavoritePlaylist: playlistIsFavorite,
-                                        containsSong: false
-                                    )
-                                    model.showToast("已从歌单移除")
-                                },
-                                onFailed: { model.libraryMessage = "移除失败：\($0)" }
+                                isFavoritePlaylist: playlistIsFavorite,
+                                model: model
                             )
                         }
                     }
@@ -2668,8 +2825,21 @@ struct LoadMoreTrigger: View {
     }
 }
 
+private func cacheClearFailure(
+    _ name: String,
+    operation: @escaping @Sendable () async throws -> Void
+) async -> String? {
+    do {
+        try await operation()
+        return nil
+    } catch {
+        return "\(name)：\(error.localizedDescription)"
+    }
+}
+
 struct SettingsView: View {
     @Bindable var model: AppModel
+    @Bindable var player: PlayerController
     @State private var choosingDownloadFolder = false
     @State private var choosingVideoDownloadFolder = false
     @State private var choosingImageFolder = false
@@ -2679,6 +2849,8 @@ struct SettingsView: View {
     @State private var musicU = ""
     @State private var isVerifyingMusicU = false
     @State private var musicUError: String?
+    @State private var crossfadeDraft: TimeInterval?
+    @State private var isClearingCache = false
 
     var body: AnyView { AnyView(content) }
 
@@ -2732,11 +2904,16 @@ struct SettingsView: View {
             Section("播放") {
                 LabeledContent("歌曲过渡") {
                     HStack(spacing: 10) {
-                        Slider(value: crossfadeDurationBinding, in: 0...12, step: 1)
+                        Slider(
+                            value: crossfadeDurationBinding,
+                            in: 0...12,
+                            step: 1,
+                            onEditingChanged: { if !$0 { commitCrossfade() } }
+                        )
                             .frame(width: 220)
-                        Text(model.settings.crossfadeDuration == 0
+                        Text(displayedCrossfadeDuration == 0
                              ? "关闭"
-                             : "\(Int(model.settings.crossfadeDuration)) 秒")
+                             : "\(Int(displayedCrossfadeDuration)) 秒")
                             .monospacedDigit()
                             .frame(width: 48, alignment: .trailing)
                     }
@@ -2773,9 +2950,14 @@ struct SettingsView: View {
                     Button(role: .destructive) {
                         showingClearCacheConfirmation = true
                     } label: {
-                        Label("清除缓存", systemImage: "trash")
+                        if isClearingCache {
+                            Label("正在清除", systemImage: "hourglass")
+                        } else {
+                            Label("清除缓存", systemImage: "trash")
+                        }
                     }
-                    .accessibilityLabel("清除缓存")
+                    .disabled(isClearingCache)
+                    .accessibilityLabel(isClearingCache ? "正在清除缓存" : "清除缓存")
                 }
             }
 
@@ -2882,7 +3064,8 @@ struct SettingsView: View {
             Button("好") { model.settingsMessage = nil }
         } message: {
             Text(model.settingsMessage ?? "")
-        })
+        }
+        .onDisappear { commitCrossfade() })
     }
 
     private var appearanceBinding: Binding<Appearance> {
@@ -2919,7 +3102,24 @@ struct SettingsView: View {
     }
 
     private var crossfadeDurationBinding: Binding<TimeInterval> {
-        Binding(get: { model.settings.crossfadeDuration }, set: { model.setCrossfadeDuration($0) })
+        Binding(
+            get: { displayedCrossfadeDuration },
+            set: {
+                crossfadeDraft = $0
+                player.setCrossfadeDuration($0)
+            }
+        )
+    }
+
+    private var displayedCrossfadeDuration: TimeInterval {
+        crossfadeDraft ?? model.settings.crossfadeDuration
+    }
+
+    private func commitCrossfade() {
+        guard let crossfadeDraft else { return }
+        self.crossfadeDraft = nil
+        guard crossfadeDraft != model.settings.crossfadeDuration else { return }
+        model.setCrossfadeDuration(crossfadeDraft)
     }
 
     private func folderControls(path: String, url: URL, choose: @escaping () -> Void) -> AnyView {
@@ -2983,17 +3183,31 @@ struct SettingsView: View {
     }
 
     private func clearCache() {
-        ArtworkPipeline.shared.pipeline.cache.removeAll()
-        let caches = ["StreamCache", "DownloadCache"].map {
-            model.cacheFolderURL.appending(path: $0, directoryHint: .isDirectory)
-        }
-        do {
-            for cache in caches where FileManager.default.fileExists(atPath: cache.path) {
-                try FileManager.default.removeItem(at: cache)
+        guard !isClearingCache else { return }
+        let downloads = model.downloads
+        let cacheRoot = model.cacheFolderURL
+        isClearingCache = true
+        Task { @MainActor in
+            async let playerFailure = cacheClearFailure("播放缓存") {
+                try await player.clearCache()
             }
-            model.showToast("缓存已清除")
-        } catch {
-            model.settingsMessage = "清除缓存失败：\(error.localizedDescription)"
+            async let downloadFailure = cacheClearFailure("下载缓存") {
+                if let downloads { try await downloads.clearCache() }
+            }
+            async let sheetFailure = cacheClearFailure("琴谱缓存") {
+                try await MusicSheetWorker.shared.clearCache(at: cacheRoot)
+            }
+            async let artworkFailure = cacheClearFailure("图片缓存") {
+                await ArtworkPipeline.shared.clearCache()
+            }
+            let failures = await (playerFailure, downloadFailure, sheetFailure, artworkFailure)
+            let messages = [failures.0, failures.1, failures.2, failures.3].compactMap { $0 }
+            isClearingCache = false
+            if messages.isEmpty {
+                model.showToast("缓存已清除")
+            } else {
+                model.settingsMessage = "部分缓存清除失败：\n" + messages.joined(separator: "\n")
+            }
         }
     }
 
@@ -3060,8 +3274,11 @@ private struct PlayerBar: View {
                     if !song.isPodcastEpisode {
                         PlayerIconButton(
                             symbol: model.likedSongIDs.contains(song.id) ? "heart.fill" : "heart",
-                            label: model.likedSongIDs.contains(song.id) ? "取消喜欢" : "喜欢",
-                            isActive: model.likedSongIDs.contains(song.id)
+                            label: model.pendingMutations.contains(.songLike(song.id))
+                                ? "正在更新喜欢状态"
+                                : (model.likedSongIDs.contains(song.id) ? "取消喜欢" : "喜欢"),
+                            isActive: model.likedSongIDs.contains(song.id),
+                            isDisabled: model.pendingMutations.contains(.songLike(song.id))
                         ) {
                             model.toggleSongLiked(song.id)
                         }

@@ -28,7 +28,10 @@ private actor MutablePlaylistRepository: MusicRepository {
     func cancelNextDetailRequest() { cancellationsRemaining += 1 }
     func detailRequestCount() -> Int { requestCount }
 
-    func detail(for route: Route) async throws -> DetailContent {
+    func detail(
+        for route: Route,
+        expectedCredentialRevision: UInt64?
+    ) async throws -> DetailContent {
         requestCount += 1
         if cancellationsRemaining > 0 {
             cancellationsRemaining -= 1
@@ -37,7 +40,10 @@ private actor MutablePlaylistRepository: MusicRepository {
         return detailValue
     }
 
-    func homeSection(id: String) async throws -> HomeSection { throw AppError.invalidRoute }
+    func homeSection(
+        id: String,
+        expectedCredentialRevision: UInt64
+    ) async throws -> HomeSection { throw AppError.invalidRoute }
     func search(query: String, scope: SearchScope, offset: Int, limit: Int) async throws -> SearchPage {
         throw AppError.invalidRoute
     }
@@ -50,12 +56,24 @@ private actor MutablePlaylistRepository: MusicRepository {
         throw AppError.invalidRoute
     }
     func songQualityDetails(for songID: Int64) async throws -> [SongQualityDetail] { [] }
-    func recordPlaybackStart(for songID: Int64, sourceID: Int64, totalSeconds: Int) async throws {}
+    func recordPlaybackStart(
+        for songID: Int64,
+        sourceID: Int64,
+        totalSeconds: Int,
+        expectedCredentialRevision: UInt64
+    ) async throws {}
     func recordPlayback(
         for songID: Int64,
         sourceID: Int64,
         playedSeconds: Int,
-        totalSeconds: Int
+        totalSeconds: Int,
+        expectedCredentialRevision: UInt64
+    ) async throws {}
+    func recordPodcastPlayback(
+        for episodeID: Int64,
+        positionMilliseconds: Int,
+        completed: Bool,
+        expectedCredentialRevision: UInt64
     ) async throws {}
 }
 
@@ -536,9 +554,11 @@ struct CoreTests {
         model.videoSubscriptionDidChange(video, subscribed: false)
         #expect(model.videoSubscriptionOverrides[video] == false)
         #expect(model.videoSubscriptionRevision == 1)
+        #expect(model.loadedVideoSubscriptionRevision == 0)
 
         model.recordVideoSubscriptions([video])
         #expect(model.videoSubscriptionOverrides[video] == false)
+        #expect(model.loadedVideoSubscriptionRevision == 1)
     }
 
     @Test("Playlist summaries expire by TTL and reject stale refreshes")

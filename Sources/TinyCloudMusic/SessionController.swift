@@ -25,119 +25,148 @@ enum QRLoginStatus: Equatable, Sendable {
     }
 }
 
+enum SessionOperationError: LocalizedError, Equatable, Sendable {
+    case superseded
+
+    var errorDescription: String? { "会话操作已被更新的操作取代" }
+}
+
 @MainActor
 @Observable
 final class SessionController {
     typealias Validator = @Sendable (SessionCredentials) async throws -> Bool
     typealias VIPValidator = @Sendable (String) async throws -> Bool
     typealias BeforeLogout = @MainActor @Sendable () async -> Void
+    typealias PersistCredentials = @Sendable (SessionCredentials?) throws -> Void
+    typealias GuestRegistrar = @Sendable () async throws -> NeteaseAuthenticationContext
+
+    private struct QRFlow {
+        let key: String
+        let operation: UInt64
+        let context: NeteaseAuthenticationContext
+    }
 
     private(set) var state: SessionState = .guest
     private(set) var isVIPVerified = false
-    private(set) var credentialRevision = 0
-    @ObservationIgnored private(set) var credentials: SessionCredentials?
-    @ObservationIgnored private let store: CredentialStore
+    var credentialRevision: UInt64 { credentialSnapshot.load().revision }
+    var credentials: SessionCredentials? {
+        guard case let .authenticated(credentials) = credentialSnapshot.load().state else { return nil }
+        return credentials
+    }
+
+    @ObservationIgnored let credentialSnapshot: CredentialSnapshot
     @ObservationIgnored private let transport: EAPITransport
     @ObservationIgnored private let validator: Validator
     @ObservationIgnored private let vipValidator: VIPValidator
-    @ObservationIgnored private var generation = 0
+    @ObservationIgnored private let persistCredentials: PersistCredentials
+    @ObservationIgnored private let guestRegistrar: GuestRegistrar
+    @ObservationIgnored private var operationGeneration: UInt64 = 0
+    @ObservationIgnored private var qrFlow: QRFlow?
     @ObservationIgnored var beforeLogout: BeforeLogout?
 
     init(
         store: CredentialStore,
+        credentialSnapshot: CredentialSnapshot? = nil,
         transport: EAPITransport = EAPITransport(),
         validator: @escaping Validator,
-        vipValidator: @escaping VIPValidator
+        vipValidator: @escaping VIPValidator,
+        persistCredentials: PersistCredentials? = nil,
+        guestRegistrar: GuestRegistrar? = nil
     ) {
-        self.store = store
         self.transport = transport
+        self.credentialSnapshot = credentialSnapshot ?? transport.credentialSnapshot
         self.validator = validator
         self.vipValidator = vipValidator
+        self.persistCredentials = persistCredentials ?? { credentials in
+            if let credentials {
+                try store.save(credentials)
+            } else {
+                try store.delete()
+            }
+        }
+        self.guestRegistrar = guestRegistrar ?? { try await transport.registerAnonymous() }
+        state = Self.sessionState(for: self.credentialSnapshot.load().state)
     }
 
     func restore() async {
-        generation += 1
-        let currentGeneration = generation
+        let operation = beginOperation()
+        let initial = credentialSnapshot.load()
         var vipVerified = false
+
         do {
-            guard var credentials = try store.load() else {
+            switch initial.state {
+            case .unavailable:
+                state = .error
+                return
+            case .guest:
                 let guest = try await registerGuest(musicU: "")
-                guard currentGeneration == generation else { return }
-                try store.save(guest)
-                self.credentials = guest
-                state = .guest
-                isVIPVerified = false
-                credentialRevision &+= 1
+                try requireCurrent(operation)
+                _ = try commit(guest, state: .guest, vipVerified: false)
                 return
-            }
-            if credentials.deviceID.isEmpty {
-                credentials = try SessionCredentials(
-                    cookie: credentials.cookie,
-                    musicU: credentials.musicU,
-                    deviceID: XEAPICodec.generateDeviceID()
-                )
-                try store.save(credentials)
-            }
-
-            if !credentials.musicU.isEmpty {
-                let validationResult: Bool?
-                do {
-                    validationResult = try await vipValidator(credentials.musicU)
-                } catch {
-                    validationResult = nil
+            case let .authenticated(stored):
+                var current = stored
+                if current.deviceID.isEmpty {
+                    current = try SessionCredentials(
+                        cookie: current.cookie,
+                        musicU: current.musicU,
+                        deviceID: XEAPICodec.generateDeviceID()
+                    )
                 }
-                guard currentGeneration == generation else { return }
-                if validationResult == false {
-                    guard let updated = try removingMusicU(from: credentials) else {
-                        let guest = try await registerGuest(musicU: "")
-                        guard currentGeneration == generation else { return }
-                        try store.save(guest)
-                        self.credentials = guest
-                        state = .guest
-                        isVIPVerified = false
-                        credentialRevision &+= 1
-                        return
+
+                if !current.musicU.isEmpty {
+                    let validationResult: Bool?
+                    do {
+                        validationResult = try await vipValidator(current.musicU)
+                    } catch {
+                        validationResult = nil
                     }
-                    credentials = updated
-                } else if validationResult == true {
-                    vipVerified = true
+                    try requireCurrent(operation)
+                    if validationResult == false {
+                        if current.cookie.isEmpty {
+                            let guest = try await registerGuest(musicU: "")
+                            try requireCurrent(operation)
+                            _ = try commit(guest, state: .guest, vipVerified: false)
+                            return
+                        }
+                        current = try credentialsRemovingMusicU(from: current)
+                    } else if validationResult == true {
+                        vipVerified = true
+                    }
+                }
+
+                if current.cookie.isEmpty {
+                    let guest = try await registerGuest(musicU: current.musicU)
+                    try requireCurrent(operation)
+                    _ = try commit(guest, state: .guest, vipVerified: vipVerified)
+                    return
+                }
+                if NeteaseCookieHeader.isGuest(current.cookie) {
+                    if current != stored {
+                        _ = try commit(current, state: .guest, vipVerified: vipVerified)
+                    } else {
+                        state = .guest
+                        isVIPVerified = vipVerified
+                    }
+                    return
+                }
+
+                let isValid = try await validator(current)
+                try requireCurrent(operation)
+                if !isValid {
+                    let guest = try await registerGuest(musicU: current.musicU)
+                    try requireCurrent(operation)
+                    _ = try commit(guest, state: .guest, vipVerified: vipVerified)
+                } else if current != stored {
+                    _ = try commit(current, state: .authenticated, vipVerified: vipVerified)
+                } else {
+                    state = .authenticated
+                    isVIPVerified = vipVerified
                 }
             }
-
-            guard !credentials.cookie.isEmpty else {
-                let guest = try await registerGuest(musicU: credentials.musicU)
-                guard currentGeneration == generation else { return }
-                try store.save(guest)
-                self.credentials = guest
-                state = .guest
-                isVIPVerified = vipVerified
-                credentialRevision &+= 1
-                return
-            }
-            if NeteaseCookieHeader.isGuest(credentials.cookie) {
-                self.credentials = credentials
-                state = .guest
-                isVIPVerified = vipVerified
-                return
-            }
-            let isValid = try await validator(credentials)
-            guard currentGeneration == generation else { return }
-            if !isValid {
-                let guest = try await registerGuest(musicU: credentials.musicU)
-                guard currentGeneration == generation else { return }
-                try store.save(guest)
-                self.credentials = guest
-                state = .guest
-                isVIPVerified = vipVerified
-                credentialRevision &+= 1
-                return
-            }
-            self.credentials = credentials
-            state = .authenticated
-            isVIPVerified = vipVerified
+        } catch SessionOperationError.superseded {
+        } catch is CancellationError {
         } catch {
-            guard currentGeneration == generation else { return }
-            credentials = nil
+            guard isCurrent(operation) else { return }
             state = .error
             isVIPVerified = vipVerified
         }
@@ -145,43 +174,29 @@ final class SessionController {
 
     @discardableResult
     func save(cookie: String) async -> Bool {
-        generation += 1
-        let currentGeneration = generation
-        let previousCredentials = credentials ?? (try? store.load())
+        let operation = beginOperation()
         let previousState = state
+        let previousVIP = isVIPVerified
         do {
-            let deviceID = try previousCredentials?.deviceID.isEmpty == false
-                ? previousCredentials!.deviceID
-                : XEAPICodec.generateDeviceID()
-            let loginCredentials = try SessionCredentials(cookie: cookie, musicU: "", deviceID: deviceID)
-            let isValid = try await validator(loginCredentials)
-            try Task.checkCancellation()
-            guard currentGeneration == generation, isValid else { return false }
-            let musicU = try (credentials?.musicU ?? store.load()?.musicU ?? "")
-            let updated = try SessionCredentials(
-                cookie: loginCredentials.cookie,
-                musicU: musicU,
-                deviceID: deviceID
-            )
-            try store.save(updated)
-            credentials = updated
-            state = .authenticated
-            isVIPVerified = isVIPVerified && !musicU.isEmpty
-            credentialRevision &+= 1
-            await transport.invalidateAllCachedResponses()
-            return true
+            return try await commitLogin(cookie: cookie, operation: operation)
         } catch CredentialStoreError.emptyCredentials {
             return false
+        } catch SessionOperationError.superseded {
+            return false
+        } catch is CancellationError {
+            return false
         } catch {
-            guard currentGeneration == generation else { return false }
-            credentials = previousCredentials
-            state = previousCredentials == nil ? .error : previousState
+            guard isCurrent(operation) else { return false }
+            state = credentialSnapshot.load().state == .unavailable ? .error : previousState
+            isVIPVerified = previousVIP
             return false
         }
     }
 
     func requestQRLoginKey() async throws -> String {
-        let context = try await authenticationContext()
+        let operation = beginOperation()
+        let context = try await authenticationContext(operation: operation)
+        try requireCurrent(operation)
         let response = try await transport.requestAuthentication(
             EAPIEndpoint(
                 "/eapi/login/qrcode/unikey",
@@ -191,16 +206,20 @@ final class SessionController {
             payload: ["type": 3],
             context: context
         )
-        let root = try decodedJSONObject(response.data)
+        try requireCurrent(operation)
+        let root = try decodedJSONObject(response.object)
         let nestedKey = root.object("data").string("unikey")
         let key = nestedKey.isEmpty ? root.string("unikey") : nestedKey
         guard !key.isEmpty else { throw EAPIError.missingData("unikey") }
+        qrFlow = QRFlow(key: key, operation: operation, context: context)
         return key
     }
 
     func checkQRLogin(key: String) async throws -> QRLoginStatus {
         guard !key.isEmpty else { throw EAPIError.invalidPayload }
-        let context = try await authenticationContext()
+        guard let flow = qrFlow, flow.key == key, isCurrent(flow.operation) else {
+            throw SessionOperationError.superseded
+        }
         let response = try await transport.requestAuthentication(
             EAPIEndpoint(
                 "/eapi/login/qrcode/client/login",
@@ -208,12 +227,11 @@ final class SessionController {
                 host: "https://interface.music.163.com"
             ),
             payload: ["key": key, "type": 3],
-            context: context,
+            context: flow.context,
             userAgent: "pc"
         )
-        guard let root = try JSONSerialization.jsonObject(with: response.data) as? [String: Any] else {
-            throw EAPIError.invalidResponse
-        }
+        try requireCurrent(flow)
+        let root = response.object
         let code = root.int("code")
         guard let status = QRLoginStatus(code: code) else {
             let message = root.string("message")
@@ -225,22 +243,29 @@ final class SessionController {
         }) else {
             throw EAPIError.missingData("Set-Cookie")
         }
-        let merged = NeteaseCookieHeader.merging(context.cookie, with: response.cookies)
-        guard await save(cookie: merged) else {
-            throw EAPIError.service(code: code, message: "登录凭据验证或保存失败")
+        let merged = NeteaseCookieHeader.merging(flow.context.cookie, with: response.cookies)
+        qrFlow = nil
+        do {
+            guard try await commitLogin(cookie: merged, operation: flow.operation) else {
+                throw EAPIError.service(code: code, message: "登录凭据验证或保存失败")
+            }
+        } catch {
+            if isCurrent(flow.operation) { state = .error }
+            throw error
         }
         return .succeeded
     }
 
     @discardableResult
     func refresh() async throws -> Bool {
-        guard let current = try storedCredentials(),
+        let operation = beginOperation()
+        guard let current = credentials,
               !current.cookie.isEmpty,
               !NeteaseCookieHeader.isGuest(current.cookie)
         else {
             throw EAPIError.service(code: 301, message: "请先登录")
         }
-        let context = try authenticationContext(for: current)
+        let context = authenticationContext(for: current)
         let response = try await transport.requestAuthentication(
             EAPIEndpoint(
                 "/eapi/login/token/refresh",
@@ -250,20 +275,46 @@ final class SessionController {
             payload: [:],
             context: context
         )
-        _ = try decodedJSONObject(response.data)
+        try requireCurrent(operation)
+        _ = try decodedJSONObject(response.object)
         guard response.cookies.contains(where: {
             NeteaseCookieHeader.accepts($0) && !NeteaseCookieHeader.isExpired($0)
         }) else {
             throw EAPIError.missingData("新的会话 Cookie")
         }
-        return await save(cookie: NeteaseCookieHeader.merging(current.cookie, with: response.cookies))
+        return try await commitLogin(
+            cookie: NeteaseCookieHeader.merging(current.cookie, with: response.cookies),
+            operation: operation,
+            deviceID: current.deviceID
+        )
     }
 
     func logout() async -> String? {
+        let operation = beginOperation()
+        let previous = credentials
         await beforeLogout?()
+        guard isCurrent(operation) else { return nil }
+
+        do {
+            if let previous, !previous.musicU.isEmpty {
+                let retained = try SessionCredentials(
+                    cookie: "",
+                    musicU: previous.musicU,
+                    deviceID: previous.deviceID
+                )
+                _ = try commit(retained, state: .guest, vipVerified: isVIPVerified)
+            } else {
+                _ = try commitGuest(state: .guest)
+            }
+        } catch {
+            state = .error
+            return "本地会话清理失败，请重试。"
+        }
+
+        await transport.invalidateAllCachedResponses()
+        guard isCurrent(operation) else { return nil }
         var warning: String?
-        let current = try? storedCredentials()
-        if let current, !current.cookie.isEmpty, !NeteaseCookieHeader.isGuest(current.cookie) {
+        if let previous, !previous.cookie.isEmpty, !NeteaseCookieHeader.isGuest(previous.cookie) {
             do {
                 let response = try await transport.requestAuthentication(
                     EAPIEndpoint(
@@ -272,18 +323,16 @@ final class SessionController {
                         host: "https://interface.music.163.com"
                     ),
                     payload: [:],
-                    context: try authenticationContext(for: current)
+                    context: authenticationContext(for: previous)
                 )
-                _ = try decodedJSONObject(response.data)
+                _ = try decodedJSONObject(response.object)
             } catch {
                 warning = "服务器退出失败：\(error.localizedDescription)"
             }
         }
-        clear()
-        await transport.invalidateAllCachedResponses()
-        if state == .error { return "本地会话清理失败，请重试。" }
+        guard isCurrent(operation) else { return warning }
         do {
-            _ = try await authenticationContext()
+            _ = try await authenticationContext(operation: operation)
         } catch {
             return warning ?? "游客登录失败：\(error.localizedDescription)"
         }
@@ -292,173 +341,214 @@ final class SessionController {
 
     @discardableResult
     func verifyAndSaveMusicU(_ value: String) async throws -> Bool {
-        generation += 1
-        let currentGeneration = generation
+        let operation = beginOperation()
         let musicU = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !musicU.isEmpty else { return false }
+        let current = credentials
 
-        do {
-            let isValid = try await vipValidator(musicU)
-            guard currentGeneration == generation else { return false }
-            guard isValid else { return false }
-
-            let current = try credentials ?? store.load()
-            let cookie = current?.cookie ?? ""
-            let deviceID = try current?.deviceID.isEmpty == false
-                ? current!.deviceID
-                : XEAPICodec.generateDeviceID()
-            let updated = try SessionCredentials(cookie: cookie, musicU: musicU, deviceID: deviceID)
-            try store.save(updated)
-            credentials = updated
-            isVIPVerified = true
-            credentialRevision &+= 1
-            return true
-        } catch {
-            guard currentGeneration == generation else { return false }
-            throw error
-        }
-    }
-
-    private func clear() {
-        generation += 1
-        let vipWasVerified = isVIPVerified
-        do {
-            let current = try credentials ?? store.load()
-            let musicU = current?.musicU ?? ""
-            let deviceID = current?.deviceID ?? ""
-            if musicU.isEmpty {
-                try store.delete()
-                credentials = nil
-            } else {
-                let updated = try SessionCredentials(cookie: "", musicU: musicU, deviceID: deviceID)
-                try store.save(updated)
-                credentials = updated
-            }
-            state = .guest
-            isVIPVerified = vipWasVerified && !musicU.isEmpty
-            credentialRevision &+= 1
-        } catch {
-            credentials = nil
-            state = .error
-            isVIPVerified = false
-            credentialRevision &+= 1
-        }
+        let isValid = try await vipValidator(musicU)
+        try requireCurrent(operation)
+        guard isValid else { return false }
+        let cookie = current?.cookie ?? ""
+        let deviceID = try current?.deviceID.isEmpty == false
+            ? current!.deviceID
+            : XEAPICodec.generateDeviceID()
+        let updated = try SessionCredentials(cookie: cookie, musicU: musicU, deviceID: deviceID)
+        _ = try commit(updated, state: Self.sessionState(for: .authenticated(updated)), vipVerified: true)
+        return true
     }
 
     @discardableResult
-    func invalidate(_ issue: SessionCredentialIssue) -> Bool {
-        generation += 1
+    func invalidate(_ event: SessionCredentialIssueEvent) -> Bool {
+        guard event.credentialRevision == credentialRevision else { return false }
+        _ = beginOperation()
         do {
-            guard let current = try (credentials ?? store.load()) else { return false }
-            switch issue {
+            guard let current = credentials else { return false }
+            switch event.issue {
             case .cookie:
                 guard !current.cookie.isEmpty else { return false }
                 if current.musicU.isEmpty {
-                    try store.delete()
-                    credentials = nil
+                    _ = try commitGuest(state: .invalid)
                 } else {
                     let updated = try SessionCredentials(
                         cookie: "",
                         musicU: current.musicU,
                         deviceID: current.deviceID
                     )
-                    try store.save(updated)
-                    credentials = updated
+                    _ = try commit(updated, state: .invalid, vipVerified: isVIPVerified)
                 }
-                state = .invalid
             case .musicU:
                 guard !current.musicU.isEmpty else { return false }
-                credentials = try removingMusicU(from: current)
-                isVIPVerified = false
+                if current.cookie.isEmpty {
+                    _ = try commitGuest(state: .guest)
+                } else {
+                    let updated = try credentialsRemovingMusicU(from: current)
+                    _ = try commit(
+                        updated,
+                        state: Self.sessionState(for: .authenticated(updated)),
+                        vipVerified: false
+                    )
+                }
             }
-            credentialRevision &+= 1
             return true
         } catch {
             state = .error
             isVIPVerified = false
-            credentialRevision &+= 1
             return true
         }
     }
 
     @discardableResult
+    func invalidate(_ issue: SessionCredentialIssue) -> Bool {
+        invalidate(SessionCredentialIssueEvent(issue: issue, credentialRevision: credentialRevision))
+    }
+
+    @discardableResult
     func clearMusicU() -> Bool {
-        generation += 1
+        _ = beginOperation()
         do {
-            guard let current = try (credentials ?? store.load()) else {
+            guard let current = credentials, !current.musicU.isEmpty else {
                 isVIPVerified = false
-                credentialRevision &+= 1
                 return true
             }
-            credentials = try removingMusicU(from: current)
-            isVIPVerified = false
-            credentialRevision &+= 1
+            if current.cookie.isEmpty {
+                _ = try commitGuest(state: .guest)
+            } else {
+                let updated = try credentialsRemovingMusicU(from: current)
+                _ = try commit(
+                    updated,
+                    state: Self.sessionState(for: .authenticated(updated)),
+                    vipVerified: false
+                )
+            }
             return true
         } catch {
             state = .error
-            credentialRevision &+= 1
             return false
         }
     }
 
-    private func removingMusicU(from credentials: SessionCredentials) throws -> SessionCredentials? {
-        guard !credentials.cookie.isEmpty else {
-            try store.delete()
-            return nil
-        }
-        let updated = try SessionCredentials(
-            cookie: credentials.cookie,
-            musicU: "",
-            deviceID: credentials.deviceID
-        )
-        try store.save(updated)
-        return updated
-    }
-
-    private func authenticationContext() async throws -> NeteaseAuthenticationContext {
-        let current = try storedCredentials()
-        if let current,
-           !current.cookie.isEmpty,
-           state == .authenticated || NeteaseCookieHeader.isGuest(current.cookie) {
-            return try authenticationContext(for: current)
-        }
-        let guest = try await registerGuest(musicU: current?.musicU ?? "")
+    private func commitLogin(
+        cookie: String,
+        operation: UInt64,
+        deviceID suppliedDeviceID: String? = nil
+    ) async throws -> Bool {
+        let previous = credentials
+        let deviceID = try suppliedDeviceID?.isEmpty == false
+            ? suppliedDeviceID!
+            : (previous?.deviceID.isEmpty == false ? previous!.deviceID : XEAPICodec.generateDeviceID())
+        let loginCredentials = try SessionCredentials(cookie: cookie, musicU: "", deviceID: deviceID)
+        let isValid = try await validator(loginCredentials)
         try Task.checkCancellation()
-        try store.save(guest)
-        credentials = guest
-        state = .guest
-        credentialRevision &+= 1
-        return try authenticationContext(for: guest)
+        try requireCurrent(operation)
+        guard isValid else { return false }
+        let musicU = previous?.musicU ?? ""
+        let updated = try SessionCredentials(
+            cookie: loginCredentials.cookie,
+            musicU: musicU,
+            deviceID: deviceID
+        )
+        _ = try commit(updated, state: .authenticated, vipVerified: isVIPVerified && !musicU.isEmpty)
+        await transport.invalidateAllCachedResponses()
+        try requireCurrent(operation)
+        return true
     }
 
-    private func authenticationContext(
-        for credentials: SessionCredentials
-    ) throws -> NeteaseAuthenticationContext {
-        if !credentials.deviceID.isEmpty {
-            return NeteaseAuthenticationContext(cookie: credentials.cookie, deviceID: credentials.deviceID)
+    private func authenticationContext(operation: UInt64) async throws -> NeteaseAuthenticationContext {
+        switch credentialSnapshot.load().state {
+        case .unavailable:
+            throw CredentialUnavailable()
+        case .guest:
+            let guest = try await registerGuest(musicU: "")
+            try requireCurrent(operation)
+            _ = try commit(guest, state: .guest, vipVerified: false)
+            return authenticationContext(for: guest)
+        case let .authenticated(current):
+            if !current.cookie.isEmpty {
+                if !current.deviceID.isEmpty { return authenticationContext(for: current) }
+                let updated = try SessionCredentials(
+                    cookie: current.cookie,
+                    musicU: current.musicU,
+                    deviceID: XEAPICodec.generateDeviceID()
+                )
+                _ = try commit(
+                    updated,
+                    state: Self.sessionState(for: .authenticated(updated)),
+                    vipVerified: isVIPVerified
+                )
+                return authenticationContext(for: updated)
+            }
+            let guest = try await registerGuest(musicU: current.musicU)
+            try requireCurrent(operation)
+            _ = try commit(guest, state: .guest, vipVerified: isVIPVerified)
+            return authenticationContext(for: guest)
         }
-        let updated = try SessionCredentials(
+    }
+
+    private func authenticationContext(for credentials: SessionCredentials) -> NeteaseAuthenticationContext {
+        NeteaseAuthenticationContext(
             cookie: credentials.cookie,
-            musicU: credentials.musicU,
-            deviceID: XEAPICodec.generateDeviceID()
+            deviceID: credentials.deviceID.isEmpty ? (try? XEAPICodec.generateDeviceID()) ?? "" : credentials.deviceID
         )
-        try store.save(updated)
-        self.credentials = updated
-        return NeteaseAuthenticationContext(cookie: updated.cookie, deviceID: updated.deviceID)
     }
 
     private func registerGuest(musicU: String) async throws -> SessionCredentials {
-        let guest = try await transport.registerAnonymous()
-        let updated = try SessionCredentials(
-            cookie: guest.cookie,
-            musicU: musicU,
-            deviceID: guest.deviceID
-        )
-        return updated
+        let guest = try await guestRegistrar()
+        return try SessionCredentials(cookie: guest.cookie, musicU: musicU, deviceID: guest.deviceID)
     }
 
-    private func storedCredentials() throws -> SessionCredentials? {
-        if let credentials { return credentials }
-        return try store.load()
+    private func credentialsRemovingMusicU(from credentials: SessionCredentials) throws -> SessionCredentials {
+        try SessionCredentials(cookie: credentials.cookie, musicU: "", deviceID: credentials.deviceID)
+    }
+
+    @discardableResult
+    private func commit(
+        _ credentials: SessionCredentials,
+        state: SessionState,
+        vipVerified: Bool
+    ) throws -> CredentialSnapshotValue {
+        try persistCredentials(credentials)
+        let value = credentialSnapshot.store(.authenticated(credentials))
+        self.state = state
+        isVIPVerified = vipVerified && !credentials.musicU.isEmpty
+        return value
+    }
+
+    @discardableResult
+    private func commitGuest(state: SessionState) throws -> CredentialSnapshotValue {
+        try persistCredentials(nil)
+        let value = credentialSnapshot.store(.guest)
+        self.state = state
+        isVIPVerified = false
+        return value
+    }
+
+    private func beginOperation() -> UInt64 {
+        operationGeneration += 1
+        qrFlow = nil
+        return operationGeneration
+    }
+
+    private func isCurrent(_ operation: UInt64) -> Bool {
+        operation == operationGeneration
+    }
+
+    private func requireCurrent(_ operation: UInt64) throws {
+        guard isCurrent(operation) else { throw SessionOperationError.superseded }
+    }
+
+    private func requireCurrent(_ flow: QRFlow) throws {
+        guard isCurrent(flow.operation), qrFlow?.key == flow.key, qrFlow?.operation == flow.operation else {
+            throw SessionOperationError.superseded
+        }
+    }
+
+    private static func sessionState(for state: CredentialSnapshotState) -> SessionState {
+        switch state {
+        case .unavailable: .error
+        case .guest: .guest
+        case let .authenticated(credentials):
+            credentials.cookie.isEmpty || NeteaseCookieHeader.isGuest(credentials.cookie) ? .guest : .authenticated
+        }
     }
 }

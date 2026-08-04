@@ -138,6 +138,10 @@ struct CredentialStore: Sendable {
         )
     }
 
+    func loadSnapshotState() throws -> CredentialSnapshotState {
+        try load().map(CredentialSnapshotState.authenticated) ?? .guest
+    }
+
     func delete() throws {
         let status = SecItemDelete(baseQuery as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {

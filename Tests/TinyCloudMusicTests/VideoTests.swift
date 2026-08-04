@@ -337,6 +337,20 @@ private func verifyVideoCredentialFallback() async throws {
         ))
     }
 
+    let unavailableLibrary = LiveVideoLibrary(transport: EAPITransport(
+        credentialSnapshot: CredentialSnapshot()
+    ))
+    var unavailableLoadCount = 0
+    do {
+        _ = try await unavailableLibrary.playbackSource(720, available: [720]) { _, _ in
+            unavailableLoadCount += 1
+            throw VideoCheckError.failed
+        }
+        throw VideoCheckError.failed
+    } catch is CredentialUnavailable {
+    }
+    guard unavailableLoadCount == 0 else { throw VideoCheckError.failed }
+
     VideoPlaybackCredentialProtocol.reset(vip: [.success(720, "from-vip.mp4")])
     let directVIP = try await library().mvPlaybackSource(
         id: 42,

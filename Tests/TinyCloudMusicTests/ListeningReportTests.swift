@@ -182,19 +182,81 @@ private func verifyListeningMissingFixture() throws {
     else { throw ListeningReportCheckError.failed }
 }
 
+private func verifyListeningNestedFixture() throws {
+    let data = Data(#"{"code":200,"data":{"outer":{"level2":{"level3":{"level4":{"title":"Nested report","reportTitle":"Wrong report title","totalDuration":3600,"songCount":12,"totalSongCount":99,"albumCount":2,"previousEndTime":"1719705600000","level5":{"dayCount":365}}}}},"ranking":{"topSongBlock":{"playCount":88,"songItems":[{"songId":46,"songName":"Nested Song","artists":[{"id":15,"name":"Nested Artist"}],"albumId":16,"albumName":"Nested Album","playCount":8}]}},"rankEntryMetadata":{"songId":999,"artistCount":77}}}"#.utf8)
+    guard let fixture = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        throw ListeningReportCheckError.failed
+    }
+    let report = LiveMusicLibrary().decodeListeningReport(
+        fixture,
+        period: .week
+    )
+    guard report.title == "Nested report",
+          report.metrics == [
+              ListeningMetric(kind: .duration, value: .number(3_600)),
+              ListeningMetric(kind: .songs, value: .number(12)),
+              ListeningMetric(kind: .albums, value: .number(2))
+          ],
+          report.topSongs.map(\.id) == [46],
+          report.topSongs.first?.playCount == 8,
+          report.previousEndTime == 1_719_705_600_000
+    else { throw ListeningReportCheckError.failed }
+}
+
+private func verifyLegacyAnnualFixture() throws {
+    let fixture = try listeningFixture("annual-report-legacy-userdata")
+    let report = LiveMusicLibrary().decodeAnnualListeningReport(
+        fixture,
+        year: 2019
+    )
+    guard report.year == 2019,
+          report.overviewMetrics == [
+              ListeningMetric(kind: .duration, value: .number(3_600)),
+              ListeningMetric(kind: .plays, value: .number(12))
+          ],
+          report.sections.map(\.id) == ["annual-playlist"],
+          report.sections.first?.tracks.first?.song.id == 9_001,
+          report.sections.first?.tracks.first?.song.name == "Synthetic legacy track"
+    else { throw ListeningReportCheckError.failed }
+
+    let middle = LiveMusicLibrary().decodeAnnualListeningReport(
+        try fixtureObject(fixture, "middleYearFixture"),
+        year: 2022
+    )
+    guard middle.year == 2022,
+          middle.overviewMetrics == [
+              ListeningMetric(kind: .duration, value: .number(7_200)),
+              ListeningMetric(kind: .plays, value: .number(42))
+          ],
+          middle.sections.map(\.id) == ["annual-song"],
+          middle.sections.first?.tracks.first?.song.id == 9_101,
+          middle.sections.first?.tracks.first?.song.name == "Synthetic middle-year track",
+          middle.sections.first?.tracks.first?.caption == "Middle Artist"
+    else { throw ListeningReportCheckError.failed }
+}
+
 private func verifyInvalidListeningPeriods() async throws {
     do {
-        _ = try await LiveMusicLibrary().listeningSongRank(period: .year)
+        _ = try await LiveMusicLibrary().listeningSongRank(
+            period: .year,
+            expectedCredentialRevision: 0
+        )
         throw ListeningReportCheckError.failed
     } catch EAPIError.invalidPayload {
     }
     do {
-        _ = try await LiveMusicLibrary().realtimeListeningReport(period: .year)
+        _ = try await LiveMusicLibrary().realtimeListeningReport(
+            period: .year,
+            expectedCredentialRevision: 0
+        )
         throw ListeningReportCheckError.failed
     } catch EAPIError.invalidPayload {
     }
     do {
-        _ = try await LiveMusicLibrary().annualListeningReport(year: 2025)
+        _ = try await LiveMusicLibrary().annualListeningReport(
+            year: 2025,
+            expectedCredentialRevision: 0
+        )
         throw ListeningReportCheckError.failed
     } catch EAPIError.invalidPayload {
     }
@@ -207,6 +269,8 @@ private enum ListeningReportCheck {
         try verifyListeningSuccessFixture()
         try verifyListeningEmptyFixture()
         try verifyListeningMissingFixture()
+        try verifyListeningNestedFixture()
+        try verifyLegacyAnnualFixture()
         try await verifyInvalidListeningPeriods()
         print("Listening footprint fixture check passed")
     }
@@ -223,7 +287,70 @@ struct ListeningReportTests {
     @Test("Missing and unsafe values are ignored")
     func missingFixture() throws { try verifyListeningMissingFixture() }
 
+    @Test("Nested searches preserve priority and depth")
+    func nestedFixture() throws { try verifyListeningNestedFixture() }
+
+    @Test("Synthetic legacy and middle-year responses preserve known fields and ignore unknown fields")
+    func legacyAnnualFixture() throws { try verifyLegacyAnnualFixture() }
+
+    @Test("Legacy and current annual reports use their versioned endpoint paths")
+    func annualEndpointContract() async throws {
+        AnnualReportEndpointProtocol.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [AnnualReportEndpointProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let library = LiveMusicLibrary(transport: EAPITransport(
+            session: session,
+            cookie: "MUSIC_A=synthetic-fixture",
+            musicU: ""
+        ))
+
+        let revision = library.transport.credentialSnapshotValue().revision
+        _ = try await library.annualListeningReport(
+            year: 2019,
+            expectedCredentialRevision: revision
+        )
+        _ = try await library.annualListeningReport(
+            year: 2020,
+            expectedCredentialRevision: revision
+        )
+        #expect(AnnualReportEndpointProtocol.paths == [
+            "/eapi/activity/summary/annual/2019/userdata",
+            "/eapi/activity/summary/annual/2020/data"
+        ])
+    }
+
     @Test("Unsupported periods fail before networking")
     func invalidPeriods() async throws { try await verifyInvalidListeningPeriods() }
+}
+
+private final class AnnualReportEndpointProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var requestedPaths: [String] = []
+
+    static var paths: [String] { lock.withLock { requestedPaths } }
+
+    static func reset() {
+        lock.withLock { requestedPaths = [] }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.lock.withLock { Self.requestedPaths.append(request.url?.path ?? "") }
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"code":200,"data":{}}"#.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 #endif

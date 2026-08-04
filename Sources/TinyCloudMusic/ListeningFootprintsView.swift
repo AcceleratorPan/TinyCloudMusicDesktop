@@ -1,3 +1,4 @@
+import Observation
 import SwiftUI
 
 struct ListeningFootprintsView: View {
@@ -9,18 +10,26 @@ struct ListeningFootprintsView: View {
     @State private var states = Dictionary(
         uniqueKeysWithValues: FootprintPeriod.allCases.map { ($0, FootprintPeriodState()) }
     )
-    @State private var generations: [FootprintPeriod: Int] = [:]
-    @State private var tasks: [FootprintPeriod: Task<Void, Never>] = [:]
+    @State private var loadOwner = FootprintLoadOwner()
     @State private var selectedAnnualYear: Int?
-    @State private var annualReport: AnnualListeningReport?
-    @State private var annualReportError: String?
-    @State private var isLoadingAnnualReport = false
-    @State private var annualReportGeneration = 0
+    @State private var annualLoader = AnnualReportLoader()
     @State private var annualReportReload = 0
-    @State private var consumedAnnualReportReload = 0
+    @State private var loadedRootIdentity: FootprintRootTaskID?
+    @State private var historyRefresh = FootprintHistoryRefreshState()
     @ScaledMetric(relativeTo: .largeTitle) private var annualKeywordFontSize = 56.0
 
     var body: some View {
+        let rootIdentity = FootprintRootTaskID(
+            accountID: model.currentUserID,
+            credentialRevision: credentialRevision
+        )
+        let annualIdentity = AnnualReportTaskID(
+            accountID: model.currentUserID,
+            credentialRevision: credentialRevision,
+            period: selectedPeriod,
+            year: selectedAnnualYear,
+            reload: annualReportReload
+        )
         Group {
             if model.currentUserID == nil {
                 ContentUnavailableView(
@@ -48,19 +57,24 @@ struct ListeningFootprintsView: View {
                 .disabled(model.currentUserID == nil || activeState.isLoading)
             }
         }
-        .task(id: model.currentUserID) { reset(accountID: model.currentUserID) }
-        .task(id: AnnualReportTaskID(
-            accountID: model.currentUserID,
-            period: selectedPeriod,
-            year: selectedAnnualYear,
-            reload: annualReportReload
-        )) { await loadAnnualReport() }
-        .onChange(of: selectedPeriod) { _, period in loadIfNeeded(period) }
-        .onChange(of: player.playbackReportRevision) { oldValue, newValue in
-            guard newValue > oldValue, !activeState.pages.isEmpty else { return }
-            refresh()
+        .task(id: rootIdentity) {
+            await waitForFootprintLoad(reset(identity: rootIdentity))
         }
-        .onDisappear { tasks.values.forEach { $0.cancel() } }
+        .task(id: annualIdentity) { await loadAnnualReport(identity: annualIdentity) }
+        .onChange(of: selectedPeriod) { oldPeriod, period in
+            switchPeriod(from: oldPeriod, to: period)
+        }
+        .onChange(of: player.playbackHistoryEvent) { _, event in
+            consumeHistoryEvent(event)
+        }
+        .onAppear {
+            historyRefresh.setVisible(true)
+            guard loadedRootIdentity == rootIdentity else { return }
+            consumeHistoryEvent(player.playbackHistoryEvent)
+            drainHistoryRefresh()
+            loadIfNeeded(selectedPeriod)
+        }
+        .onDisappear { suspendLoads() }
     }
 
     private var periodPicker: some View {
@@ -259,13 +273,13 @@ struct ListeningFootprintsView: View {
                 description: Text("当前仅提供年度听歌足迹摘要。")
             )
             .frame(maxWidth: .infinity, minHeight: 180)
-        } else if isLoadingAnnualReport {
+        } else if annualLoader.state.isLoading {
             HStack(spacing: 10) {
                 ProgressView().controlSize(.small)
                 Text("正在加载年度报告…").foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, minHeight: 120)
-        } else if let annualReportError {
+        } else if let annualReportError = annualLoader.state.error {
             HStack(spacing: 12) {
                 Label("年度报告不可用", systemImage: "wifi.exclamationmark")
                 Text(annualReportError)
@@ -277,26 +291,40 @@ struct ListeningFootprintsView: View {
             }
             .padding(16)
             .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
-        } else if let annualReport, annualReport.year == selectedAnnualYear {
+        } else if let annualReport = annualLoader.state.report, annualReport.year == selectedAnnualYear {
             if annualReport.sections.isEmpty {
                 ContentUnavailableView("该年度暂无报告内容", systemImage: "doc.text")
                     .frame(maxWidth: .infinity, minHeight: 180)
             } else {
                 let hasDiscoveries = annualReport.sections.contains { $0.id == "discoveries" }
                 let sections = annualReport.sections.filter { $0.id != "genres" || !hasDiscoveries }
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
-                        if section.id == "discoveries" {
-                            annualDiscoverySection(
-                                section,
-                                genres: annualReport.sections.first(where: { $0.id == "genres" })
-                            )
-                        } else {
-                            annualSection(section)
+                VStack(alignment: .leading, spacing: 16) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
+                            if section.id == "discoveries" {
+                                annualDiscoverySection(
+                                    section,
+                                    genres: annualReport.sections.first(where: { $0.id == "genres" })
+                                )
+                            } else {
+                                annualSection(section)
+                            }
+                            if index < sections.count - 1 {
+                                Divider().padding(.vertical, 28)
+                            }
                         }
-                        if index < sections.count - 1 {
-                            Divider().padding(.vertical, 28)
+                    }
+                    if let annualEnrichmentError = annualLoader.state.enrichmentError {
+                        HStack(spacing: 10) {
+                            Label("部分歌曲信息未补全", systemImage: "info.circle")
+                            Text(annualEnrichmentError)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                            Spacer()
+                            Button("重试") { annualReportReload &+= 1 }
                         }
+                        .padding(.vertical, 8)
                     }
                 }
             }
@@ -1003,78 +1031,79 @@ struct ListeningFootprintsView: View {
         states[selectedPeriod] ?? FootprintPeriodState()
     }
 
-    @MainActor
-    private func reset(accountID: Int64?) {
-        tasks.values.forEach { $0.cancel() }
-        tasks = [:]
-        generations = [:]
-        states = Dictionary(uniqueKeysWithValues: FootprintPeriod.allCases.map { ($0, FootprintPeriodState()) })
-        annualReportGeneration &+= 1
-        selectedAnnualYear = nil
-        annualReport = nil
-        annualReportError = nil
-        isLoadingAnnualReport = false
-        annualReportReload = 0
-        consumedAnnualReportReload = 0
-        guard accountID != nil else { return }
-        startLoad(selectedPeriod, cursor: nil)
+    private var credentialRevision: UInt64 {
+        if let session = model.session {
+            _ = session.state // Credential commits publish state with the snapshot revision.
+            return session.credentialRevision
+        }
+        return library.transport.credentialSnapshotValue().revision
     }
 
     @MainActor
-    private func loadIfNeeded(_ period: FootprintPeriod) {
+    @discardableResult
+    private func reset(identity: FootprintRootTaskID) -> Task<Void, Never>? {
+        guard loadedRootIdentity != identity else {
+            let historyTask = consumeHistoryEvent(player.playbackHistoryEvent)
+            if historyRefresh.pendingSequence(for: selectedPeriod) == nil {
+                return historyTask ?? loadIfNeeded(selectedPeriod)
+            } else {
+                return historyTask ?? drainHistoryRefresh()
+            }
+        }
+        loadedRootIdentity = identity
+        loadOwner.cancelAll()
+        states = Dictionary(uniqueKeysWithValues: FootprintPeriod.allCases.map { ($0, FootprintPeriodState()) })
+        selectedAnnualYear = nil
+        annualLoader.reset()
+        annualReportReload = 0
+        historyRefresh.resetEvents()
+        guard identity.accountID != nil else { return nil }
+        let historyTask = consumeHistoryEvent(player.playbackHistoryEvent)
+        if historyRefresh.pendingSequence(for: selectedPeriod) == nil {
+            return historyTask ?? startLoad(selectedPeriod, cursor: nil)
+        } else {
+            return historyTask ?? drainHistoryRefresh()
+        }
+    }
+
+    @MainActor
+    @discardableResult
+    private func loadIfNeeded(_ period: FootprintPeriod) -> Task<Void, Never>? {
+        if historyRefresh.pendingSequence(for: period) != nil {
+            return drainHistoryRefresh()
+        }
         guard model.currentUserID != nil,
               states[period]?.pages.isEmpty != false,
               states[period]?.isLoading != true
-        else { return }
-        startLoad(period, cursor: nil)
+        else { return nil }
+        return startLoad(period, cursor: nil)
     }
 
     @MainActor
-    private func loadAnnualReport() async {
-        annualReportGeneration &+= 1
-        let generation = annualReportGeneration
-        annualReport = nil
-        annualReportError = nil
-        isLoadingAnnualReport = false
-        guard selectedPeriod == .year,
-              let year = selectedAnnualYear,
-              AnnualListeningReportDecoder.supportedYears.contains(year),
-              let accountID = model.currentUserID
-        else { return }
-
-        let forceRefresh = annualReportReload != consumedAnnualReportReload
-        consumedAnnualReportReload = annualReportReload
-        isLoadingAnnualReport = true
-        defer {
-            if annualReportGeneration == generation { isLoadingAnnualReport = false }
-        }
-        do {
-            let loaded = try await library.annualListeningReport(
-                year: year,
-                forceRefresh: forceRefresh
-            )
-            let songIDs = Set(loaded.sections.flatMap { section in
-                section.tracks.compactMap { track in
-                    track.song.album.artwork.remoteURL == nil || track.song.artists.isEmpty ? track.song.id : nil
-                }
-            }).sorted()
-            let detailedSongs = songIDs.isEmpty
-                ? []
-                : (try? await model.repository.songs(ids: songIDs)) ?? []
-            let report = replacingSongs(in: loaded, with: detailedSongs)
-            try Task.checkCancellation()
-            guard annualReportGeneration == generation,
-                  selectedAnnualYear == year,
-                  model.currentUserID == accountID
-            else { return }
-            annualReport = report
-        } catch is CancellationError {
-        } catch {
-            guard annualReportGeneration == generation,
-                  selectedAnnualYear == year,
-                  model.currentUserID == accountID
-            else { return }
-            annualReportError = error.localizedDescription
+    private func loadAnnualReport(identity: AnnualReportTaskID) async {
+        guard let task = annualLoader.start(
+            year: identity.year,
+            accountID: identity.accountID,
+            credentialRevision: identity.credentialRevision,
+            reload: identity.reload,
+            canLoad: identity.period == .year
+                && identity.year.map { AnnualListeningReportDecoder.supportedYears.contains($0) } == true,
+            currentYear: { selectedAnnualYear },
+            currentAccountID: { model.currentUserID },
+            currentCredentialRevision: { library.transport.credentialSnapshotValue().revision },
+            report: { year, forceRefresh in
+                try await library.annualListeningReport(
+                    year: year,
+                    forceRefresh: forceRefresh,
+                    expectedCredentialRevision: identity.credentialRevision
+                )
+            },
+            songs: { ids in try await model.repository.songs(ids: ids) }
+        ) else { return }
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
         }
     }
 
@@ -1089,10 +1118,11 @@ struct ListeningFootprintsView: View {
     @MainActor
     private func returnToCurrent() {
         guard var state = states[selectedPeriod], let first = state.pages.first else { return }
-        tasks[selectedPeriod]?.cancel()
-        generations[selectedPeriod, default: 0] &+= 1
+        loadOwner.invalidate(selectedPeriod)
         state.pages = [first]
+        state.seenCursors = []
         state.isLoading = false
+        state.pendingCursor = nil
         state.failedCursor = nil
         state.error = nil
         states[selectedPeriod] = state
@@ -1100,50 +1130,119 @@ struct ListeningFootprintsView: View {
 
     private func canLoadPrevious(_ page: FootprintPage) -> Bool {
         guard let cursor = page.previousCursor else { return false }
-        return !activeState.pages.contains { $0.cursor == cursor }
+        return !activeState.seenCursors.contains(cursor)
     }
 
     @MainActor
+    @discardableResult
     private func startLoad(
         _ period: FootprintPeriod,
         cursor: ListeningReportCursor?,
-        force: Bool = false
-    ) {
-        guard let accountID = model.currentUserID else { return }
+        force: Bool = false,
+        historyEventSequence: UInt64? = nil
+    ) -> Task<Void, Never>? {
+        guard let accountID = model.currentUserID else { return nil }
+        let credentialRevision = library.transport.credentialSnapshotValue().revision
         var state = states[period] ?? FootprintPeriodState()
-        guard !state.isLoading || state.pendingCursor != cursor else { return }
-        tasks[period]?.cancel()
-        generations[period, default: 0] &+= 1
-        let generation = generations[period, default: 0]
-        state.isLoading = true
-        state.pendingCursor = cursor
-        state.failedCursor = nil
-        state.error = nil
+        guard !state.isLoading || state.pendingCursor != cursor else { return nil }
+        state.begin(cursor: cursor)
         states[period] = state
 
-        tasks[period] = Task { @MainActor in
-            do {
-                let page = try await loadPage(period, cursor: cursor, force: force)
-                try Task.checkCancellation()
-                guard generations[period] == generation, model.currentUserID == accountID else { return }
+        return loadOwner.start(
+            period: period,
+            accountID: accountID,
+            credentialRevision: credentialRevision,
+            currentAccountID: { model.currentUserID },
+            currentCredentialRevision: { library.transport.credentialSnapshotValue().revision },
+            load: {
+                try await loadPage(
+                    period,
+                    cursor: cursor,
+                    force: force,
+                    expectedCredentialRevision: credentialRevision
+                )
+            },
+            success: { page, _ in
                 accept(page, for: period)
-            } catch is CancellationError {
-            } catch {
-                guard generations[period] == generation, model.currentUserID == accountID else { return }
+                settleHistoryEvent(period, sequence: historyEventSequence)
+            },
+            failure: { error, _ in
                 var failed = states[period] ?? FootprintPeriodState()
-                failed.isLoading = false
-                failed.pendingCursor = nil
-                failed.failedCursor = cursor
-                failed.error = error.localizedDescription
+                failed.fail(cursor: cursor, message: error.localizedDescription)
                 states[period] = failed
+                settleHistoryEvent(period, sequence: historyEventSequence)
+            },
+            finish: { identity in
+                var finished = states[identity.period] ?? FootprintPeriodState()
+                finished.cancel()
+                states[identity.period] = finished
+                if identity.period == selectedPeriod { drainHistoryRefresh() }
             }
+        )
+    }
+
+    @MainActor
+    @discardableResult
+    private func consumeHistoryEvent(_ event: PlaybackHistoryEvent?) -> Task<Void, Never>? {
+        historyRefresh.consume(
+            event,
+            credentialRevision: library.transport.credentialSnapshotValue().revision,
+            hasAccount: model.currentUserID != nil
+        )
+        return drainHistoryRefresh()
+    }
+
+    @MainActor
+    @discardableResult
+    private func drainHistoryRefresh() -> Task<Void, Never>? {
+        guard let sequence = historyRefresh.nextSequence(
+            for: selectedPeriod,
+            isLoading: activeState.isLoading,
+            hasAccount: model.currentUserID != nil
+        ) else { return nil }
+        if selectedPeriod == .year, activeState.pages.last?.cursor == nil {
+            annualReportReload &+= 1
         }
+        return startLoad(
+            selectedPeriod,
+            cursor: activeState.pages.last?.cursor,
+            force: true,
+            historyEventSequence: sequence
+        )
+    }
+
+    @MainActor
+    private func settleHistoryEvent(_ period: FootprintPeriod, sequence: UInt64?) {
+        guard let sequence else { return }
+        historyRefresh.settle(period, sequence: sequence)
+    }
+
+    @MainActor
+    private func suspendLoads() {
+        historyRefresh.setVisible(false)
+        annualLoader.cancel()
+        for period in loadOwner.cancelAll() {
+            var state = states[period] ?? FootprintPeriodState()
+            state.cancel()
+            states[period] = state
+        }
+    }
+
+    @MainActor
+    private func switchPeriod(from oldPeriod: FootprintPeriod, to period: FootprintPeriod) {
+        if loadOwner.cancel(oldPeriod) {
+            var state = states[oldPeriod] ?? FootprintPeriodState()
+            state.cancel()
+            states[oldPeriod] = state
+        }
+        loadIfNeeded(period)
     }
 
     private func loadPage(
         _ period: FootprintPeriod,
         cursor: ListeningReportCursor?,
-        force: Bool
+        force: Bool,
+        expectedCredentialRevision: UInt64
     ) async throws -> FootprintPage {
         switch period {
         case .today:
@@ -1151,39 +1250,57 @@ struct ListeningFootprintsView: View {
                 cursor: nil,
                 title: "今日听歌",
                 metrics: [],
-                ranks: try await library.todayListeningRank(forceRefresh: force),
+                ranks: try await library.todayListeningRank(
+                    forceRefresh: force,
+                    expectedCredentialRevision: expectedCredentialRevision
+                ),
                 yearFootprints: [],
                 previousCursor: nil
             )
         case .week, .month:
             let reportPeriod = period.reportPeriod!
-            async let report = library.listeningReport(
-                period: reportPeriod,
+            let sources = try await loadFootprintSources(
                 cursor: cursor,
-                forceRefresh: force
+                report: {
+                    try await library.listeningReport(
+                        period: reportPeriod,
+                        cursor: cursor,
+                        forceRefresh: force,
+                        expectedCredentialRevision: expectedCredentialRevision
+                    )
+                },
+                ranks: {
+                    try await library.listeningSongRank(
+                        period: reportPeriod,
+                        cursor: cursor,
+                        forceRefresh: force,
+                        expectedCredentialRevision: expectedCredentialRevision
+                    )
+                },
+                realtime: {
+                    try await library.realtimeListeningReport(
+                        period: reportPeriod,
+                        forceRefresh: force,
+                        expectedCredentialRevision: expectedCredentialRevision
+                    )
+                }
             )
-            async let ranks = library.listeningSongRank(
-                period: reportPeriod,
-                cursor: cursor,
-                forceRefresh: force
-            )
-            let realtime: ListeningReport? = if cursor == nil {
-                try await library.realtimeListeningReport(period: reportPeriod, forceRefresh: force)
-            } else {
-                nil
-            }
-            let (loadedReport, loadedRanks) = try await (report, ranks)
             return FootprintPage(
                 cursor: cursor,
-                title: loadedReport.title,
-                metrics: mergedMetrics(realtime?.metrics ?? [], loadedReport.metrics),
-                ranks: loadedRanks.isEmpty ? loadedReport.topSongs : loadedRanks,
+                title: sources.report.title,
+                metrics: mergedMetrics(sources.realtime?.metrics ?? [], sources.report.metrics),
+                ranks: sources.ranks.isEmpty ? sources.report.topSongs : sources.ranks,
                 yearFootprints: [],
-                previousCursor: loadedReport.previousCursor
+                previousCursor: sources.report.previousCursor
             )
         case .year:
             if cursor != nil {
-                let report = try await library.listeningReport(period: .year, cursor: cursor, forceRefresh: force)
+                let report = try await library.listeningReport(
+                    period: .year,
+                    cursor: cursor,
+                    forceRefresh: force,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
                 return FootprintPage(
                     cursor: cursor,
                     title: report.title,
@@ -1193,7 +1310,10 @@ struct ListeningFootprintsView: View {
                     previousCursor: report.previousCursor
                 )
             }
-            let footprints = try await library.yearListeningFootprints(forceRefresh: force)
+            let footprints = try await library.yearListeningFootprints(
+                forceRefresh: force,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
             return FootprintPage(
                 cursor: nil,
                 title: "年度听歌足迹",
@@ -1208,10 +1328,15 @@ struct ListeningFootprintsView: View {
     @MainActor
     private func accept(_ page: FootprintPage, for period: FootprintPeriod) {
         var state = states[period] ?? FootprintPeriodState()
-        if let index = state.pages.firstIndex(where: { $0.cursor == page.cursor }) {
-            state.pages = Array(state.pages.prefix(index)) + [page]
-        } else if page.cursor == nil || state.pages.last?.previousCursor == page.cursor {
-            state.pages.append(page)
+        if page.cursor == nil {
+            state.pages = [page]
+            state.seenCursors = []
+        } else if state.pages.last?.cursor == page.cursor {
+            state.pages[state.pages.count - 1] = page
+        } else if let cursor = page.cursor,
+                  state.pages.last?.previousCursor == cursor,
+                  state.seenCursors.insert(cursor).inserted {
+            state.pages = [state.pages.first, page].compactMap { $0 }
         } else {
             return
         }
@@ -1220,13 +1345,13 @@ struct ListeningFootprintsView: View {
         state.failedCursor = nil
         state.error = nil
         states[period] = state
-        tasks[period] = nil
         if period == .year, page.cursor == nil {
             let years = annualYears(page.yearFootprints)
-            if selectedAnnualYear.map({ years.contains($0) }) != true {
-                selectedAnnualYear = page.yearFootprints.first?.year
-                    ?? years.first(where: AnnualListeningReportDecoder.supportedYears.contains)
-            }
+            selectedAnnualYear = AnnualReportSelection.defaultYear(
+                current: selectedAnnualYear,
+                footprints: page.yearFootprints,
+                sortedYears: years
+            )
         }
     }
 
@@ -1238,7 +1363,9 @@ struct ListeningFootprintsView: View {
         year: Int,
         footprints: [YearListeningFootprint]
     ) -> [ListeningMetric] {
-        if annualReport?.year == year { return annualReport?.overviewMetrics ?? [] }
+        if annualLoader.state.report?.year == year {
+            return annualLoader.state.report?.overviewMetrics ?? []
+        }
         guard let footprint = footprints.first(where: { $0.year == year }) else {
             return []
         }
@@ -1250,37 +1377,6 @@ struct ListeningFootprintsView: View {
 
     private func annualArtworkURL(_ section: AnnualReportSection) -> URL? {
         section.artworkURL ?? section.tracks.lazy.compactMap { $0.song.album.artwork.remoteURL }.first
-    }
-
-    private func replacingSongs(
-        in report: AnnualListeningReport,
-        with songs: [Song]
-    ) -> AnnualListeningReport {
-        let songsByID = Dictionary(songs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        guard !songsByID.isEmpty else { return report }
-        return AnnualListeningReport(
-            year: report.year,
-            overviewMetrics: report.overviewMetrics,
-            sections: report.sections.map { section in
-                AnnualReportSection(
-                    id: section.id,
-                    title: section.title,
-                    subtitle: section.subtitle,
-                    artworkURL: section.artworkURL,
-                    metrics: section.metrics,
-                    details: section.details,
-                    items: section.items,
-                    tracks: section.tracks.map { track in
-                        AnnualReportTrack(
-                            id: track.id,
-                            song: songsByID[track.song.id] ?? track.song,
-                            caption: track.caption,
-                            playCount: track.playCount
-                        )
-                    }
-                )
-            }
-        )
     }
 
     private func listeningMetric(_ kind: ListeningMetricKind, in metrics: [ListeningMetric]) -> Int64? {
@@ -1418,7 +1514,7 @@ private struct AnnualGenreShare: Identifiable {
     var id: String { name }
 }
 
-private enum FootprintPeriod: String, CaseIterable {
+enum FootprintPeriod: String, CaseIterable, Sendable {
     case today, week, month, year
 
     var title: String {
@@ -1440,7 +1536,7 @@ private enum FootprintPeriod: String, CaseIterable {
     }
 }
 
-private struct FootprintPage {
+struct FootprintPage {
     let cursor: ListeningReportCursor?
     let title: String
     let metrics: [ListeningMetric]
@@ -1449,16 +1545,545 @@ private struct FootprintPage {
     let previousCursor: ListeningReportCursor?
 }
 
-private struct FootprintPeriodState {
+struct FootprintPeriodState {
     var pages: [FootprintPage] = []
+    var seenCursors = Set<ListeningReportCursor>()
     var pendingCursor: ListeningReportCursor?
     var failedCursor: ListeningReportCursor?
     var isLoading = false
     var error: String?
+
+    mutating func begin(cursor: ListeningReportCursor?) {
+        isLoading = true
+        pendingCursor = cursor
+        failedCursor = nil
+        error = nil
+    }
+
+    mutating func cancel() {
+        isLoading = false
+        pendingCursor = nil
+    }
+
+    mutating func fail(cursor: ListeningReportCursor?, message: String) {
+        cancel()
+        failedCursor = cursor
+        error = message
+    }
+}
+
+struct FootprintLoadIdentity: Equatable, Sendable {
+    let period: FootprintPeriod
+    let generation: Int
+    let accountID: Int64
+    let credentialRevision: UInt64
+
+    func isCurrent(generation: Int?, accountID: Int64?, credentialRevision: UInt64) -> Bool {
+        self.generation == generation
+            && self.accountID == accountID
+            && self.credentialRevision == credentialRevision
+    }
+}
+
+private struct FootprintRootTaskID: Hashable {
+    let accountID: Int64?
+    let credentialRevision: UInt64
+}
+
+@MainActor
+final class FootprintLoadOwner {
+    private var generations: [FootprintPeriod: Int] = [:]
+    private var tasks: [FootprintPeriod: Task<Void, Never>] = [:]
+    private var taskIDs: [FootprintPeriod: UUID] = [:]
+
+    isolated deinit { tasks.values.forEach { $0.cancel() } }
+
+    func hasTask(for period: FootprintPeriod) -> Bool { tasks[period] != nil }
+
+    @discardableResult
+    func start(
+        period: FootprintPeriod,
+        accountID: Int64,
+        credentialRevision: UInt64,
+        currentAccountID: @escaping @MainActor @Sendable () -> Int64?,
+        currentCredentialRevision: @escaping @MainActor @Sendable () -> UInt64,
+        load: @escaping @MainActor @Sendable () async throws -> FootprintPage,
+        success: @escaping @MainActor @Sendable (FootprintPage, FootprintLoadIdentity) -> Void,
+        failure: @escaping @MainActor @Sendable (Error, FootprintLoadIdentity) -> Void,
+        finish: @escaping @MainActor @Sendable (FootprintLoadIdentity) -> Void
+    ) -> Task<Void, Never> {
+        tasks[period]?.cancel()
+        generations[period, default: 0] &+= 1
+        let identity = FootprintLoadIdentity(
+            period: period,
+            generation: generations[period, default: 0],
+            accountID: accountID,
+            credentialRevision: credentialRevision
+        )
+        let taskID = UUID()
+        taskIDs[period] = taskID
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.taskIDs[period] == taskID,
+                   self.generations[period] == identity.generation {
+                    self.tasks[period] = nil
+                    self.taskIDs[period] = nil
+                    finish(identity)
+                }
+            }
+            do {
+                let page = try await load()
+                try Task.checkCancellation()
+                guard self.accepts(
+                    identity,
+                    currentAccountID: currentAccountID(),
+                    currentCredentialRevision: currentCredentialRevision()
+                ) else { return }
+                success(page, identity)
+            } catch is CancellationError {
+            } catch {
+                guard self.accepts(
+                    identity,
+                    currentAccountID: currentAccountID(),
+                    currentCredentialRevision: currentCredentialRevision()
+                ) else { return }
+                failure(error, identity)
+            }
+        }
+        tasks[period] = task
+        return task
+    }
+
+    @discardableResult
+    func cancel(_ period: FootprintPeriod) -> Bool {
+        guard let task = tasks.removeValue(forKey: period) else { return false }
+        task.cancel()
+        taskIDs[period] = nil
+        generations[period, default: 0] &+= 1
+        return true
+    }
+
+    func invalidate(_ period: FootprintPeriod) {
+        tasks.removeValue(forKey: period)?.cancel()
+        taskIDs[period] = nil
+        generations[period, default: 0] &+= 1
+    }
+
+    @discardableResult
+    func cancelAll() -> Set<FootprintPeriod> {
+        let active = Set(tasks.keys)
+        tasks.values.forEach { $0.cancel() }
+        tasks = [:]
+        taskIDs = [:]
+        FootprintPeriod.allCases.forEach { generations[$0, default: 0] &+= 1 }
+        return active
+    }
+
+    private func accepts(
+        _ identity: FootprintLoadIdentity,
+        currentAccountID: Int64?,
+        currentCredentialRevision: UInt64
+    ) -> Bool {
+        identity.isCurrent(
+            generation: generations[identity.period],
+            accountID: currentAccountID,
+            credentialRevision: currentCredentialRevision
+        )
+    }
+}
+
+@MainActor
+func waitForFootprintLoad(_ task: Task<Void, Never>?) async {
+    guard let task else { return }
+    await withTaskCancellationHandler {
+        await task.value
+    } onCancel: {
+        task.cancel()
+    }
+}
+
+struct FootprintHistoryRefreshState: Sendable {
+    private var isVisible = false
+    private var lastSequence: UInt64?
+    private var pendingSequences: [FootprintPeriod: UInt64] = [:]
+
+    mutating func setVisible(_ visible: Bool) {
+        isVisible = visible
+    }
+
+    mutating func resetEvents() {
+        lastSequence = nil
+        pendingSequences = [:]
+    }
+
+    mutating func consume(
+        _ event: PlaybackHistoryEvent?,
+        credentialRevision: UInt64,
+        hasAccount: Bool
+    ) {
+        guard let event, event.sequence > (lastSequence ?? 0) else { return }
+        lastSequence = event.sequence
+        guard event.credentialRevision == credentialRevision, hasAccount else { return }
+        for period in FootprintPeriod.allCases {
+            pendingSequences[period] = event.sequence
+        }
+    }
+
+    func pendingSequence(for period: FootprintPeriod) -> UInt64? {
+        pendingSequences[period]
+    }
+
+    func nextSequence(for period: FootprintPeriod, isLoading: Bool, hasAccount: Bool) -> UInt64? {
+        guard isVisible, hasAccount, !isLoading else { return nil }
+        return pendingSequences[period]
+    }
+
+    mutating func settle(_ period: FootprintPeriod, sequence: UInt64) {
+        guard pendingSequences[period] == sequence else { return }
+        pendingSequences.removeValue(forKey: period)
+    }
+}
+
+struct FootprintSources: Sendable {
+    let report: ListeningReport
+    let ranks: [ListeningRankEntry]
+    let realtime: ListeningReport?
+}
+
+func loadFootprintSources(
+    cursor: ListeningReportCursor?,
+    report: @escaping @Sendable () async throws -> ListeningReport,
+    ranks: @escaping @Sendable () async throws -> [ListeningRankEntry],
+    realtime: @escaping @Sendable () async throws -> ListeningReport
+) async throws -> FootprintSources {
+    async let loadedReport = report()
+    async let loadedRanks = ranks()
+    let loadedRealtime: ListeningReport? = if cursor == nil { try await realtime() } else { nil }
+    let (reportValue, rankValues) = try await (loadedReport, loadedRanks)
+    return FootprintSources(report: reportValue, ranks: rankValues, realtime: loadedRealtime)
+}
+
+struct AnnualReportSelection {
+    static func defaultYear(
+        current: Int?,
+        footprints: [YearListeningFootprint],
+        sortedYears: [Int]? = nil
+    ) -> Int? {
+        let years = sortedYears ?? footprints.map(\.year).sorted(by: >)
+        if current.map({ years.contains($0) }) == true { return current }
+        return footprints.first?.year
+            ?? years.first(where: AnnualListeningReportDecoder.supportedYears.contains)
+    }
+}
+
+struct AnnualReportLoadIdentity: Equatable, Sendable {
+    let generation: Int
+    let year: Int
+    let accountID: Int64
+    let credentialRevision: UInt64
+}
+
+struct AnnualReportPhaseState: Sendable {
+    private(set) var report: AnnualListeningReport?
+    private(set) var error: String?
+    private(set) var enrichmentError: String?
+    private(set) var isLoading = false
+    private(set) var generation = 0
+    private var consumedReload = 0
+
+    mutating func reset() {
+        generation &+= 1
+        report = nil
+        error = nil
+        enrichmentError = nil
+        isLoading = false
+        consumedReload = 0
+    }
+
+    mutating func cancel() {
+        generation &+= 1
+        isLoading = false
+    }
+
+    mutating func begin(
+        year: Int?,
+        accountID: Int64?,
+        credentialRevision: UInt64,
+        reload: Int,
+        canLoad: Bool
+    ) -> (AnnualReportLoadIdentity, forceRefresh: Bool)? {
+        generation &+= 1
+        error = nil
+        enrichmentError = nil
+        isLoading = false
+        guard canLoad, let year, let accountID else { return nil }
+        if report?.year != year { report = nil }
+        let forceRefresh = reload != consumedReload
+        consumedReload = reload
+        isLoading = true
+        return (AnnualReportLoadIdentity(
+            generation: generation,
+            year: year,
+            accountID: accountID,
+            credentialRevision: credentialRevision
+        ), forceRefresh)
+    }
+
+    @discardableResult
+    mutating func commitBase(
+        _ report: AnnualListeningReport,
+        identity: AnnualReportLoadIdentity,
+        currentYear: Int?,
+        currentAccountID: Int64?,
+        currentCredentialRevision: UInt64
+    ) -> Bool {
+        guard accepts(
+            identity,
+            currentYear: currentYear,
+            currentAccountID: currentAccountID,
+            currentCredentialRevision: currentCredentialRevision
+        ) else {
+            return false
+        }
+        self.report = report
+        isLoading = false
+        return true
+    }
+
+    mutating func commitEnrichment(
+        _ report: AnnualListeningReport,
+        identity: AnnualReportLoadIdentity,
+        currentYear: Int?,
+        currentAccountID: Int64?,
+        currentCredentialRevision: UInt64
+    ) {
+        guard accepts(
+            identity,
+            currentYear: currentYear,
+            currentAccountID: currentAccountID,
+            currentCredentialRevision: currentCredentialRevision
+        ) else { return }
+        self.report = report
+    }
+
+    mutating func commitEnrichmentFailure(
+        _ message: String,
+        identity: AnnualReportLoadIdentity,
+        currentYear: Int?,
+        currentAccountID: Int64?,
+        currentCredentialRevision: UInt64
+    ) {
+        guard accepts(
+            identity,
+            currentYear: currentYear,
+            currentAccountID: currentAccountID,
+            currentCredentialRevision: currentCredentialRevision
+        ) else { return }
+        enrichmentError = message
+    }
+
+    mutating func commitFailure(
+        _ message: String,
+        identity: AnnualReportLoadIdentity,
+        currentYear: Int?,
+        currentAccountID: Int64?,
+        currentCredentialRevision: UInt64
+    ) {
+        guard accepts(
+            identity,
+            currentYear: currentYear,
+            currentAccountID: currentAccountID,
+            currentCredentialRevision: currentCredentialRevision
+        ) else { return }
+        error = message
+    }
+
+    mutating func finish(
+        _ identity: AnnualReportLoadIdentity
+    ) {
+        guard generation == identity.generation else { return }
+        isLoading = false
+    }
+
+    private func accepts(
+        _ identity: AnnualReportLoadIdentity,
+        currentYear: Int?,
+        currentAccountID: Int64?,
+        currentCredentialRevision: UInt64
+    ) -> Bool {
+        generation == identity.generation
+            && currentYear == identity.year
+            && currentAccountID == identity.accountID
+            && currentCredentialRevision == identity.credentialRevision
+    }
+}
+
+@MainActor
+@Observable
+final class AnnualReportLoader {
+    private(set) var state = AnnualReportPhaseState()
+
+    @ObservationIgnored private var currentYear: Int?
+    @ObservationIgnored private var currentAccountID: Int64?
+    @ObservationIgnored private var loadedCredentialRevision: UInt64?
+    @ObservationIgnored private var task: Task<Void, Never>?
+    @ObservationIgnored private var taskID: UUID?
+
+    var hasTask: Bool { task != nil }
+
+    isolated deinit { task?.cancel() }
+
+    @discardableResult
+    func start(
+        year: Int?,
+        accountID: Int64?,
+        credentialRevision: UInt64,
+        reload: Int,
+        canLoad: Bool,
+        currentYear: @escaping @MainActor @Sendable () -> Int?,
+        currentAccountID: @escaping @MainActor @Sendable () -> Int64?,
+        currentCredentialRevision: @escaping @MainActor @Sendable () -> UInt64,
+        report: @escaping @MainActor @Sendable (Int, Bool) async throws -> AnnualListeningReport,
+        songs: @escaping @MainActor @Sendable ([Int64]) async throws -> [Song]
+    ) -> Task<Void, Never>? {
+        task?.cancel()
+        task = nil
+        taskID = nil
+        if self.currentAccountID != accountID || loadedCredentialRevision != credentialRevision { state.reset() }
+        self.currentYear = year
+        self.currentAccountID = accountID
+        loadedCredentialRevision = credentialRevision
+        guard let (identity, forceRefresh) = state.begin(
+            year: year,
+            accountID: accountID,
+            credentialRevision: credentialRevision,
+            reload: reload,
+            canLoad: canLoad
+        ) else { return nil }
+
+        let taskID = UUID()
+        self.taskID = taskID
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.taskID == taskID {
+                    self.state.finish(
+                        identity
+                    )
+                    self.task = nil
+                    self.taskID = nil
+                }
+            }
+            do {
+                let loaded = try await report(identity.year, forceRefresh)
+                try Task.checkCancellation()
+                guard self.state.commitBase(
+                    loaded,
+                    identity: identity,
+                    currentYear: currentYear(),
+                    currentAccountID: currentAccountID(),
+                    currentCredentialRevision: currentCredentialRevision()
+                ) else { return }
+
+                let songIDs = Set(loaded.sections.flatMap { section in
+                    section.tracks.compactMap { track in
+                        track.song.album.artwork.remoteURL == nil || track.song.artists.isEmpty
+                            ? track.song.id
+                            : nil
+                    }
+                }).sorted()
+                guard !songIDs.isEmpty else { return }
+                let detailedSongs: [Song]
+                do {
+                    detailedSongs = try await songs(songIDs)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    self.state.commitEnrichmentFailure(
+                        error.localizedDescription,
+                        identity: identity,
+                        currentYear: currentYear(),
+                        currentAccountID: currentAccountID(),
+                        currentCredentialRevision: currentCredentialRevision()
+                    )
+                    return
+                }
+                try Task.checkCancellation()
+                self.state.commitEnrichment(
+                    replacingAnnualReportSongs(in: loaded, with: detailedSongs),
+                    identity: identity,
+                    currentYear: currentYear(),
+                    currentAccountID: currentAccountID(),
+                    currentCredentialRevision: currentCredentialRevision()
+                )
+            } catch is CancellationError {
+            } catch {
+                self.state.commitFailure(
+                    error.localizedDescription,
+                    identity: identity,
+                    currentYear: currentYear(),
+                    currentAccountID: currentAccountID(),
+                    currentCredentialRevision: currentCredentialRevision()
+                )
+            }
+        }
+        self.task = task
+        return task
+    }
+
+    func cancel() {
+        task?.cancel()
+        task = nil
+        taskID = nil
+        state.cancel()
+    }
+
+    func reset() {
+        task?.cancel()
+        task = nil
+        taskID = nil
+        currentYear = nil
+        currentAccountID = nil
+        loadedCredentialRevision = nil
+        state.reset()
+    }
+}
+
+func replacingAnnualReportSongs(
+    in report: AnnualListeningReport,
+    with songs: [Song]
+) -> AnnualListeningReport {
+    let songsByID = Dictionary(songs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+    guard !songsByID.isEmpty else { return report }
+    return AnnualListeningReport(
+        year: report.year,
+        overviewMetrics: report.overviewMetrics,
+        sections: report.sections.map { section in
+            AnnualReportSection(
+                id: section.id,
+                title: section.title,
+                subtitle: section.subtitle,
+                artworkURL: section.artworkURL,
+                metrics: section.metrics,
+                details: section.details,
+                items: section.items,
+                tracks: section.tracks.map { track in
+                    AnnualReportTrack(
+                        id: track.id,
+                        song: songsByID[track.song.id] ?? track.song,
+                        caption: track.caption,
+                        playCount: track.playCount
+                    )
+                }
+            )
+        }
+    )
 }
 
 private struct AnnualReportTaskID: Hashable {
     let accountID: Int64?
+    let credentialRevision: UInt64
     let period: FootprintPeriod
     let year: Int?
     let reload: Int

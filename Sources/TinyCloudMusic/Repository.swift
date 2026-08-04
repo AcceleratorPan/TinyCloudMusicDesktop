@@ -62,28 +62,63 @@ struct PlaybackUnavailableError: LocalizedError, Equatable, Sendable {
     var errorDescription: String? { reason }
 }
 
+enum PlaybackHistoryKind: Equatable, Sendable {
+    case song
+    case podcast
+}
+
+struct PlaybackHistoryEvent: Equatable, Sendable {
+    let sequence: UInt64
+    let credentialRevision: UInt64
+    let kind: PlaybackHistoryKind
+}
+
 protocol MusicRepository: Sendable {
     var homeDescriptors: [HomeSectionDescriptor] { get }
-    func homeSection(id: String) async throws -> HomeSection
+    var currentCredentialRevision: UInt64 { get }
+    func homeSection(
+        id: String,
+        expectedCredentialRevision: UInt64
+    ) async throws -> HomeSection
     func search(query: String, scope: SearchScope, offset: Int, limit: Int) async throws -> SearchPage
-    func detail(for route: Route) async throws -> DetailContent
+    func detail(
+        for route: Route,
+        expectedCredentialRevision: UInt64?
+    ) async throws -> DetailContent
     func songs(ids: [Int64]) async throws -> [Song]
     func lyrics(for songID: Int64) async throws -> SongLyrics
     func playbackSource(for songID: Int64, quality: AudioQuality) async throws -> PlaybackSource
     func playbackSource(for songID: Int64, level: String) async throws -> PlaybackSource
     func songQualityDetails(for songID: Int64) async throws -> [SongQualityDetail]
     func heartModeSongs(seedSongID: Int64, playlistID: Int64?, startSongID: Int64) async throws -> [Song]
-    func recordPlaybackStart(for songID: Int64, sourceID: Int64, totalSeconds: Int) async throws
+    func recordPlaybackStart(
+        for songID: Int64,
+        sourceID: Int64,
+        totalSeconds: Int,
+        expectedCredentialRevision: UInt64
+    ) async throws
     func recordPlayback(
         for songID: Int64,
         sourceID: Int64,
         playedSeconds: Int,
-        totalSeconds: Int
+        totalSeconds: Int,
+        expectedCredentialRevision: UInt64
     ) async throws
-    func recordPodcastPlayback(for episodeID: Int64, positionMilliseconds: Int, completed: Bool) async throws
+    func recordPodcastPlayback(
+        for episodeID: Int64,
+        positionMilliseconds: Int,
+        completed: Bool,
+        expectedCredentialRevision: UInt64
+    ) async throws
 }
 
 extension MusicRepository {
+    var currentCredentialRevision: UInt64 { 0 }
+
+    func detail(for route: Route) async throws -> DetailContent {
+        try await detail(for: route, expectedCredentialRevision: nil)
+    }
+
     func audioURL(for songID: Int64, quality: AudioQuality) async throws -> URL {
         try await playbackSource(for: songID, quality: quality).url
     }
@@ -95,8 +130,6 @@ extension MusicRepository {
     func heartModeSongs(seedSongID: Int64, playlistID: Int64?, startSongID: Int64) async throws -> [Song] {
         throw AppError.unavailable("心动模式暂时不可用")
     }
-
-    func recordPodcastPlayback(for episodeID: Int64, positionMilliseconds: Int, completed: Bool) async throws {}
 }
 
 struct AuthorizedTransportRequest: Sendable {
@@ -124,7 +157,10 @@ struct FixtureMusicRepository: MusicRepository {
         HomeSectionDescriptor(id: "new", title: "新鲜发行")
     ]
 
-    func homeSection(id: String) async throws -> HomeSection {
+    func homeSection(
+        id: String,
+        expectedCredentialRevision: UInt64
+    ) async throws -> HomeSection {
         try await Task.sleep(for: .milliseconds(id == "daily" ? 140 : id == "moods" ? 260 : 380))
         switch id {
         case "daily":
@@ -208,7 +244,10 @@ struct FixtureMusicRepository: MusicRepository {
         return SearchPage(items: Array(matches[start..<end]), offset: start, hasMore: end < matches.count)
     }
 
-    func detail(for route: Route) async throws -> DetailContent {
+    func detail(
+        for route: Route,
+        expectedCredentialRevision: UInt64?
+    ) async throws -> DetailContent {
         try await Task.sleep(for: .milliseconds(180))
         switch route {
         case let .artist(id):
@@ -258,13 +297,26 @@ struct FixtureMusicRepository: MusicRepository {
         throw AppError.unavailable("演示数据不包含音质信息")
     }
 
-    func recordPlaybackStart(for songID: Int64, sourceID: Int64, totalSeconds: Int) async throws {}
+    func recordPlaybackStart(
+        for songID: Int64,
+        sourceID: Int64,
+        totalSeconds: Int,
+        expectedCredentialRevision: UInt64
+    ) async throws {}
 
     func recordPlayback(
         for songID: Int64,
         sourceID: Int64,
         playedSeconds: Int,
-        totalSeconds: Int
+        totalSeconds: Int,
+        expectedCredentialRevision: UInt64
+    ) async throws {}
+
+    func recordPodcastPlayback(
+        for episodeID: Int64,
+        positionMilliseconds: Int,
+        completed: Bool,
+        expectedCredentialRevision: UInt64
     ) async throws {}
 }
 

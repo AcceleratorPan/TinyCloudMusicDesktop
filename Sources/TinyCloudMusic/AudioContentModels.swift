@@ -121,12 +121,12 @@ struct PodcastPage: Equatable, Sendable {
 
     func appending(_ next: Self) -> Self {
         var ids = Set(podcasts.map(\.id))
-        let values = podcasts + next.podcasts.filter { ids.insert($0.id).inserted }
+        let additions = next.podcasts.filter { ids.insert($0.id).inserted }
         let progressed = next.nextOffset > nextOffset
         return Self(
-            podcasts: values,
+            podcasts: podcasts + additions,
             nextOffset: max(nextOffset, next.nextOffset),
-            hasMore: next.hasMore && progressed
+            hasMore: next.hasMore && progressed && !additions.isEmpty
         )
     }
 }
@@ -138,12 +138,12 @@ struct PodcastEpisodePage: Equatable, Sendable {
 
     func appending(_ next: Self) -> Self {
         var ids = Set(episodes.map(\.id))
-        let values = episodes + next.episodes.filter { ids.insert($0.id).inserted }
+        let additions = next.episodes.filter { ids.insert($0.id).inserted }
         let progressed = next.nextOffset > nextOffset
         return Self(
-            episodes: values,
+            episodes: episodes + additions,
             nextOffset: max(nextOffset, next.nextOffset),
-            hasMore: next.hasMore && progressed
+            hasMore: next.hasMore && progressed && !additions.isEmpty
         )
     }
 }
@@ -194,7 +194,7 @@ struct BroadcastChannel: Identifiable, Equatable, Sendable {
     }
 }
 
-struct BroadcastCursor: Equatable, Sendable {
+struct BroadcastCursor: Hashable, Sendable {
     static let initial = Self(lastID: "0", score: "-1")
 
     let lastID: String
@@ -205,16 +205,68 @@ struct BroadcastChannelPage: Equatable, Sendable {
     let channels: [BroadcastChannel]
     let nextCursor: BroadcastCursor
     let hasMore: Bool
+    private let seenCursors: Set<BroadcastCursor>
+
+    init(
+        channels: [BroadcastChannel],
+        nextCursor: BroadcastCursor,
+        hasMore: Bool,
+        seenCursors: Set<BroadcastCursor> = []
+    ) {
+        self.channels = channels
+        self.nextCursor = nextCursor
+        self.hasMore = hasMore
+        self.seenCursors = seenCursors.union([nextCursor])
+    }
 
     func appending(_ next: Self) -> Self {
         var ids = Set(channels.map(\.id))
-        let values = channels + next.channels.filter { ids.insert($0.id).inserted }
+        let additions = next.channels.filter { ids.insert($0.id).inserted }
         let progressed = next.nextCursor != nextCursor
+        let cycles = seenCursors.contains(next.nextCursor)
         return Self(
-            channels: values,
-            nextCursor: progressed ? next.nextCursor : nextCursor,
-            hasMore: next.hasMore && progressed
+            channels: channels + additions,
+            nextCursor: progressed && !cycles ? next.nextCursor : nextCursor,
+            hasMore: next.hasMore && progressed && !cycles && !additions.isEmpty,
+            seenCursors: seenCursors.union(next.seenCursors)
         )
+    }
+}
+
+enum PodcastEpisodeEndpointFallback {
+    static func shouldFallback(after error: Error) -> Bool {
+        guard let error = error as? EAPIError else { return false }
+        switch error {
+        case .http(404), .http(410), .service(code: 404, _), .service(code: 410, _):
+            return true
+        case .missingData("program"):
+            return true
+        default:
+            return false
+        }
+    }
+
+    static func load(
+        primary: () async throws -> PodcastEpisode,
+        fallback: () async throws -> PodcastEpisode
+    ) async throws -> PodcastEpisode {
+        do {
+            return try await primary()
+        } catch {
+            guard shouldFallback(after: error) else { throw error }
+            return try await fallback()
+        }
+    }
+}
+
+enum PodcastLyricLocator {
+    static func currentLineID(
+        in lines: [LyricLine],
+        at milliseconds: Int64,
+        lookup: ([LyricLine], Int64) -> Int? = { LRCParser.currentLineIndex(in: $0, at: $1) }
+    ) -> Int64? {
+        guard let index = lookup(lines, milliseconds), lines.indices.contains(index) else { return nil }
+        return lines[index].id
     }
 }
 
@@ -351,11 +403,12 @@ enum AudioContentDecoder {
         let episodes = values.compactMap {
             decodeEpisode($0, podcastID: podcastID, decodeSong: decodeSong)
         }
+        let uniqueEpisodes = deduplicated(episodes)
         let explicitMore = firstBool(in: [root, data], keys: ["more", "hasMore"])
         return PodcastEpisodePage(
-            episodes: deduplicated(episodes),
+            episodes: uniqueEpisodes,
             nextOffset: offset + values.count,
-            hasMore: explicitMore ?? (values.count == limit)
+            hasMore: (explicitMore ?? (values.count == limit)) && !uniqueEpisodes.isEmpty
         )
     }
 
@@ -363,11 +416,12 @@ enum AudioContentDecoder {
         let data = root.object("data")
         let values = firstArray(in: [root, data], keys: ["djRadios", "radios", "podcasts", "voiceLists", "voicelists", "list"])
         let decoded = values.compactMap(decodePodcast)
+        let uniquePodcasts = deduplicated(decoded)
         let explicitMore = firstBool(in: [root, data], keys: ["more", "hasMore"])
         return PodcastPage(
-            podcasts: deduplicated(decoded),
+            podcasts: uniquePodcasts,
             nextOffset: offset + values.count,
-            hasMore: explicitMore ?? (values.count == limit)
+            hasMore: (explicitMore ?? (values.count == limit)) && !uniquePodcasts.isEmpty
         )
     }
 
@@ -421,7 +475,8 @@ enum AudioContentDecoder {
         return BroadcastChannelPage(
             channels: deduplicated(channels),
             nextCursor: hasServerCursor ? next : currentCursor,
-            hasMore: hasServerCursor && (explicitMore ?? (values.count == limit))
+            hasMore: hasServerCursor && (explicitMore ?? (values.count == limit)),
+            seenCursors: [currentCursor]
         )
     }
 

@@ -196,7 +196,7 @@ enum EAPICheck {
                 musicU: "vip-token"
             ) == nil
         )
-        let defaultCredentials = EAPITransport().credentials()
+        let defaultCredentials = try EAPITransport().credentials()
         precondition(defaultCredentials.cookie.isEmpty && defaultCredentials.musicU.isEmpty)
         let storedCredentials = try SessionCredentials(
             cookie: "MUSIC_U=stored-token",
@@ -204,12 +204,18 @@ enum EAPICheck {
             deviceID: "stored-device"
         )
         let storedTransport = EAPITransport(loadStoredCredentials: { storedCredentials })
-        let injectedCredentials = storedTransport.credentials()
+        let injectedCredentials = try storedTransport.credentials()
         precondition(injectedCredentials.cookie == "MUSIC_U=stored-token")
         precondition(injectedCredentials.musicU == "stored-vip-token")
-        let playbackCredentials = storedTransport.playbackCredentials()
+        let credentialRevision = storedTransport.credentialSnapshotValue().revision
+        let playbackCredentials = try storedTransport.playbackCredentials(
+            expectedCredentialRevision: credentialRevision
+        )
         precondition(playbackCredentials.deviceID == "stored-device")
-        precondition(playbackCredentials.clientID == storedTransport.playbackCredentials().clientID)
+        let repeatedPlaybackCredentials = try storedTransport.playbackCredentials(
+            expectedCredentialRevision: credentialRevision
+        )
+        precondition(playbackCredentials.clientID == repeatedPlaybackCredentials.clientID)
         let playbackUpload = try NCBLPlaybackReport.upload(
             cookie: playbackCredentials.cookie,
             deviceID: playbackCredentials.deviceID,
@@ -225,7 +231,7 @@ enum EAPICheck {
             NeteaseCookieHeader.value(named: "WNMCID", in: playbackCookie)
                 == playbackCredentials.clientID
         )
-        let explicitCredentials = EAPITransport(
+        let explicitCredentials = try EAPITransport(
             cookie: "",
             musicU: nil,
             loadStoredCredentials: { preconditionFailure("Explicit credentials must bypass storage") }

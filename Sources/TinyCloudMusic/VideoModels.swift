@@ -131,12 +131,12 @@ struct VideoSubscriptionPage: Equatable, Sendable {
 
     func appending(_ next: Self) -> Self {
         var ids = Set(items.map(\.id))
-        let values = items + next.items.filter { ids.insert($0.id).inserted }
+        let additions = next.items.filter { ids.insert($0.id).inserted }
         let progressed = next.nextOffset > nextOffset
         return Self(
-            items: values,
+            items: items + additions,
             nextOffset: max(nextOffset, next.nextOffset),
-            hasMore: next.hasMore && progressed
+            hasMore: next.hasMore && progressed && !additions.isEmpty
         )
     }
 }

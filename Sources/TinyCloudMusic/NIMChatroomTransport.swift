@@ -19,6 +19,28 @@ enum NIMChatroomError: LocalizedError {
 }
 
 @MainActor
+protocol NIMRuntime: AnyObject {
+    func activate(
+        owner: UUID,
+        generation: UInt64,
+        eventSink: @escaping @Sendable (NIMNativeEvent) -> Void
+    ) async throws
+    func deactivate(owner: UUID, generation: UInt64)
+    func prepareChatroom(roomID: Int64, owner: UUID, generation: UInt64) throws
+    func login(
+        appKey: String,
+        accountID: String,
+        token: String,
+        owner: UUID,
+        generation: UInt64
+    ) throws
+    func requestChatroomEnter(owner: UUID, generation: UInt64) throws
+    func disconnect(owner: UUID, generation: UInt64) async
+    func reserveShutdown(owner: UUID) -> Bool
+    func shutdown(owner: UUID) async
+}
+
+@MainActor
 final class NIMChatroomTransport {
     var onEvent: ((NIMChatroomEvent) -> Void)?
 
@@ -28,14 +50,30 @@ final class NIMChatroomTransport {
     private static let connectionTimeout: Duration = .seconds(20)
 
     private let ownerID = UUID()
-    private let runtime: NIMNativeRuntime
-    private var generation = 0
+    private let runtime: any NIMRuntime
+    private let connectionTimeout: Duration
+    private var nextOperationGeneration: UInt64 = 0
+    private var activeOperationGeneration: UInt64?
+    private var sessionGeneration: Int?
     private var connectContinuation: CheckedContinuation<Void, Error>?
     private var timeoutTask: Task<Void, Never>?
+    private var teardownTask: Task<Void, Never>?
+    private var teardownTaskID: UUID?
     private var isDisconnecting = false
+    private var isTerminal = false
+    private var shutdownTask: Task<Void, Never>?
+    var beforeConnectCancellation: ((UInt64) async -> Void)?
+    var afterConnectCancellation: ((UInt64) -> Void)?
+    var afterNativeEvent: ((UInt64) -> Void)?
 
     init() {
-        runtime = .shared
+        runtime = NIMNativeRuntime.shared
+        connectionTimeout = Self.connectionTimeout
+    }
+
+    init(runtime: any NIMRuntime, connectionTimeout: Duration = .seconds(20)) {
+        self.runtime = runtime
+        self.connectionTimeout = connectionTimeout
     }
 
     func connect(
@@ -43,66 +81,144 @@ final class NIMChatroomTransport {
         credentials: ListenTogetherRealtimeCredentials,
         generation: Int
     ) async throws {
+        guard !isTerminal else { throw NIMChatroomError.unavailable }
         guard let nativeRoomID = Int64(roomID), nativeRoomID > 0 else {
             throw NIMChatroomError.connectionFailed(stage: "room-id")
         }
-        await disconnect()
-        self.generation = generation
+        await disconnectCurrent()
+        guard !isTerminal else { throw NIMChatroomError.unavailable }
+        try Task.checkCancellation()
+        let operationGeneration = reserveOperationGeneration()
+        activeOperationGeneration = operationGeneration
+        sessionGeneration = generation
         isDisconnecting = false
 
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                connectContinuation = continuation
-                do {
-                    try runtime.activate(owner: ownerID) { [weak self] event in
-                        Task { @MainActor [weak self] in self?.receive(event) }
-                    }
-                    try runtime.prepareChatroom(roomID: nativeRoomID, owner: ownerID)
-                    try runtime.login(
-                        appKey: Self.loginAppKey,
-                        accountID: credentials.accountID,
-                        token: credentials.token
+        do {
+            try await runtime.activate(owner: ownerID, generation: operationGeneration) { [weak self] event in
+                Task { @MainActor [weak self] in
+                    await self?.receive(
+                        event,
+                        operationGeneration: operationGeneration,
+                        sessionGeneration: generation
                     )
-                    timeoutTask = Task { @MainActor [weak self] in
-                        do {
-                            try await Task.sleep(for: Self.connectionTimeout)
-                        } catch {
-                            return
-                        }
-                        self?.finishConnect(.failure(
-                            NIMChatroomError.connectionFailed(stage: "timeout")
-                        ))
-                    }
-                } catch {
-                    finishConnect(.failure(error))
                 }
             }
-        } onCancel: {
-            Task { @MainActor [weak self] in
-                self?.finishConnect(.failure(CancellationError()))
+            guard !isTerminal else { throw NIMChatroomError.unavailable }
+            try runtime.prepareChatroom(
+                roomID: nativeRoomID,
+                owner: ownerID,
+                generation: operationGeneration
+            )
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    connectContinuation = continuation
+                    do {
+                        try runtime.login(
+                            appKey: Self.loginAppKey,
+                            accountID: credentials.accountID,
+                            token: credentials.token,
+                            owner: ownerID,
+                            generation: operationGeneration
+                        )
+                        timeoutTask = Task { @MainActor [weak self, connectionTimeout] in
+                            do {
+                                try await Task.sleep(for: connectionTimeout)
+                            } catch {
+                                return
+                            }
+                            await self?.finishConnect(.failure(
+                                NIMChatroomError.connectionFailed(stage: "timeout")
+                            ), operationGeneration: operationGeneration)
+                        }
+                    } catch {
+                        Task { @MainActor [weak self] in
+                            await self?.finishConnect(
+                                .failure(error),
+                                operationGeneration: operationGeneration
+                            )
+                        }
+                    }
+                }
+            } onCancel: {
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    await self.beforeConnectCancellation?(operationGeneration)
+                    await self.cancelConnect(operationGeneration: operationGeneration)
+                    self.afterConnectCancellation?(operationGeneration)
+                }
             }
+        } catch {
+            await teardownOperation(
+                operationGeneration,
+                continuationResult: .failure(error)
+            )
+            throw error
         }
     }
 
+    func disconnect(generation: Int) async {
+        guard sessionGeneration == generation else { return }
+        await disconnectCurrent()
+    }
+
     func disconnect() async {
+        await disconnectCurrent()
+    }
+
+    func shutdown() async {
+        if let shutdownTask {
+            await shutdownTask.value
+            return
+        }
+        isTerminal = true
+        let ownsRuntimeShutdown = runtime.reserveShutdown(owner: ownerID)
+        let task = Task { @MainActor [self] in
+            await disconnectCurrent()
+            await waitForNativeTeardown()
+            if ownsRuntimeShutdown { await runtime.shutdown(owner: ownerID) }
+        }
+        shutdownTask = task
+        await task.value
+    }
+
+    private func disconnectCurrent() async {
+        await waitForNativeTeardown()
+        guard let operationGeneration = activeOperationGeneration else { return }
+        await teardownOperation(
+            operationGeneration,
+            continuationResult: .failure(CancellationError())
+        )
+    }
+
+    private func teardownOperation(
+        _ operationGeneration: UInt64,
+        continuationResult: Result<Void, Error>
+    ) async {
+        guard activeOperationGeneration == operationGeneration else { return }
+        activeOperationGeneration = nil
+        sessionGeneration = nil
         isDisconnecting = true
         timeoutTask?.cancel()
         timeoutTask = nil
-        if let continuation = connectContinuation {
-            connectContinuation = nil
-            continuation.resume(throwing: CancellationError())
+        let continuation = connectContinuation
+        connectContinuation = nil
+        let taskID = UUID()
+        let task = Task { @MainActor [ownerID, runtime] in
+            await runtime.disconnect(owner: ownerID, generation: operationGeneration)
+            runtime.deactivate(owner: ownerID, generation: operationGeneration)
         }
-        runtime.disconnect(owner: ownerID)
+        teardownTaskID = taskID
+        teardownTask = task
+        await task.value
+        if teardownTaskID == taskID {
+            teardownTask = nil
+            teardownTaskID = nil
+        }
+        continuation?.resume(with: continuationResult)
+    }
 
-        // Logout is asynchronous. Waiting briefly prevents a reconnect from racing the old session.
-        for _ in 0..<40 where runtime.isLoggedIn {
-            do {
-                try await Task.sleep(for: .milliseconds(50))
-            } catch {
-                break
-            }
-        }
-        runtime.deactivate(owner: ownerID)
+    private func waitForNativeTeardown() async {
+        if let teardownTask { await teardownTask.value }
     }
 
     nonisolated static func bundledNativeSDKURLs() -> [URL]? {
@@ -113,68 +229,104 @@ final class NIMChatroomTransport {
         return urls.count == names.count ? urls : nil
     }
 
-    private func receive(_ event: NIMNativeEvent) {
+    private func receive(
+        _ event: NIMNativeEvent,
+        operationGeneration: UInt64,
+        sessionGeneration: Int
+    ) async {
+        defer { afterNativeEvent?(operationGeneration) }
+        guard activeOperationGeneration == operationGeneration,
+              self.sessionGeneration == sessionGeneration
+        else { return }
         switch event {
         case let .login(raw):
             guard let value = Self.object(from: raw),
                   let code = Self.integer(value["err_code"]),
                   let step = Self.integer(value["login_step"])
             else {
-                finishConnect(.failure(NIMChatroomError.connectionFailed(stage: "nim-login-response")))
+                await finishConnect(
+                    .failure(NIMChatroomError.connectionFailed(stage: "nim-login-response")),
+                    operationGeneration: operationGeneration
+                )
                 return
             }
             if code == 200, step == 3 {
                 do {
-                    try runtime.requestChatroomEnter(owner: ownerID)
+                    try runtime.requestChatroomEnter(
+                        owner: ownerID,
+                        generation: operationGeneration
+                    )
                 } catch {
-                    finishConnect(.failure(error))
+                    await finishConnect(.failure(error), operationGeneration: operationGeneration)
                 }
             } else if code != 200, step >= 3 {
                 if connectContinuation != nil {
-                    finishConnect(.failure(NIMChatroomError.connectionFailed(stage: "nim-login-\(code)")))
+                    await finishConnect(
+                        .failure(NIMChatroomError.connectionFailed(stage: "nim-login-\(code)")),
+                        operationGeneration: operationGeneration
+                    )
                 } else if !isDisconnecting {
-                    onEvent?(.status(0, generation: generation))
+                    onEvent?(.status(0, generation: sessionGeneration))
                 }
             }
 
         case let .chatroomEnter(step, code):
             if code == 200, step == 5 {
-                finishConnect(.success(()))
-                onEvent?(.status(5, generation: generation))
+                await finishConnect(.success(()), operationGeneration: operationGeneration)
+                onEvent?(.status(5, generation: sessionGeneration))
             } else if code != 200, step >= 3 {
                 if connectContinuation != nil {
-                    finishConnect(.failure(
+                    await finishConnect(.failure(
                         NIMChatroomError.connectionFailed(stage: "chatroom-enter-\(code)")
-                    ))
+                    ), operationGeneration: operationGeneration)
                 } else if !isDisconnecting {
-                    onEvent?(.status(0, generation: generation))
+                    onEvent?(.status(0, generation: sessionGeneration))
                 }
             }
 
         case let .chatroomRequestFailed(code):
-            finishConnect(.failure(
+            await finishConnect(.failure(
                 NIMChatroomError.connectionFailed(stage: "chatroom-request-\(code)")
-            ))
+            ), operationGeneration: operationGeneration)
 
         case let .message(raw):
             guard raw.utf8.count <= 65_536 else { return }
-            onEvent?(.message(raw: raw, generation: generation))
+            onEvent?(.message(raw: raw, generation: sessionGeneration))
 
         case .disconnected:
             guard !isDisconnecting else { return }
-            onEvent?(.status(0, generation: generation))
+            onEvent?(.status(0, generation: sessionGeneration))
         }
     }
 
-    private func finishConnect(_ result: Result<Void, Error>) {
-        guard let continuation = connectContinuation else { return }
-        connectContinuation = nil
+    private func finishConnect(
+        _ result: Result<Void, Error>,
+        operationGeneration: UInt64
+    ) async {
+        guard activeOperationGeneration == operationGeneration,
+              let continuation = connectContinuation
+        else { return }
         timeoutTask?.cancel()
         timeoutTask = nil
-        if case .failure = result {
-            runtime.disconnect(owner: ownerID)
+        switch result {
+        case .success:
+            connectContinuation = nil
+            continuation.resume()
+        case .failure:
+            await teardownOperation(operationGeneration, continuationResult: result)
         }
-        continuation.resume(with: result)
+    }
+
+    func cancelConnect(operationGeneration: UInt64) async {
+        await finishConnect(
+            .failure(CancellationError()),
+            operationGeneration: operationGeneration
+        )
+    }
+
+    private func reserveOperationGeneration() -> UInt64 {
+        nextOperationGeneration += 1
+        return nextOperationGeneration
     }
 
     private static func object(from raw: String) -> [String: Any]? {
@@ -192,7 +344,7 @@ final class NIMChatroomTransport {
     }
 }
 
-private enum NIMNativeEvent: Sendable {
+enum NIMNativeEvent: Sendable {
     case login(String)
     case chatroomEnter(step: Int, code: Int)
     case chatroomRequestFailed(Int)
@@ -200,71 +352,93 @@ private enum NIMNativeEvent: Sendable {
     case disconnected
 }
 
-private final class NIMNativeRuntime: @unchecked Sendable {
+@MainActor
+final class NIMNativeRuntime: NIMRuntime {
     static let shared = NIMNativeRuntime()
 
-    private let lock = NSLock()
+    private static let chatroomExitTimeout: Duration = .seconds(5)
+    private static let logoutTimeout: Duration = .seconds(20)
+    private static let cleanupTimeout: Duration = .seconds(5)
+
     private var owner: UUID?
+    private var ownerGeneration: UInt64?
     private var eventSink: (@Sendable (NIMNativeEvent) -> Void)?
     private var symbols: NIMNativeSymbols?
     private var handles: [UnsafeMutableRawPointer] = []
+    private var callbackContext: NIMNativeCallbackContext?
+    private var retainedCallbackContexts: [NIMNativeCallbackContext] = []
     private var initialized = false
     private var pendingChatroomID: Int64?
     private var activeChatroomID: Int64?
     private var isChatroomRequestInFlight = false
+    private var exitWait: NIMChatroomExitWait?
+    private var logoutWait: (owner: UUID, generation: UInt64, waiter: NIMCallbackWaiter)?
+    private var cleanupWaiter: NIMCallbackWaiter?
+    private var finalized = false
+    private var shutdownOwner: UUID?
+    private var shutdownTask: Task<Void, Never>?
 
-    private init() {}
+    init() {}
 
-    func activate(owner: UUID, eventSink: @escaping @Sendable (NIMNativeEvent) -> Void) throws {
-        lock.lock()
+    func activate(
+        owner: UUID,
+        generation: UInt64,
+        eventSink: @escaping @Sendable (NIMNativeEvent) -> Void
+    ) async throws {
+        try beginActivation(owner: owner, generation: generation, eventSink: eventSink)
+        try initializeIfNeeded(owner: owner, generation: generation)
+    }
+
+    func beginActivation(
+        owner: UUID,
+        generation: UInt64,
+        eventSink: @escaping @Sendable (NIMNativeEvent) -> Void
+    ) throws {
+        guard !finalized else { throw NIMChatroomError.unavailable }
         guard self.owner == nil || self.owner == owner else {
-            lock.unlock()
             throw NIMChatroomError.connectionFailed(stage: "native-sdk-busy")
         }
         self.owner = owner
+        ownerGeneration = generation
         self.eventSink = eventSink
-        lock.unlock()
-
-        do {
-            try initializeIfNeeded()
-        } catch {
-            deactivate(owner: owner)
-            throw error
-        }
     }
 
-    func deactivate(owner: UUID) {
-        lock.lock()
-        var runtimeToCleanUp: NIMNativeSymbols?
-        if self.owner == owner {
-            self.owner = nil
-            eventSink = nil
-            pendingChatroomID = nil
-            activeChatroomID = nil
-            isChatroomRequestInFlight = false
-            if initialized {
-                initialized = false
-                runtimeToCleanUp = symbols
-            }
-        }
-        lock.unlock()
-
-        guard let runtimeToCleanUp else { return }
-        "".withCString { runtimeToCleanUp.chatroomCleanup($0) }
-        "".withCString { runtimeToCleanUp.clientCleanup($0) }
+    func deactivate(owner: UUID, generation: UInt64) {
+        guard self.owner == owner, ownerGeneration == generation else { return }
+        callbackContext?.stopAcceptingCallbacks()
+        self.owner = nil
+        ownerGeneration = nil
+        eventSink = nil
+        callbackContext = nil
+        pendingChatroomID = nil
+        activeChatroomID = nil
+        isChatroomRequestInFlight = false
     }
 
-    func prepareChatroom(roomID: Int64, owner: UUID) throws {
-        lock.lock()
-        defer { lock.unlock() }
-        guard self.owner == owner, initialized else { throw NIMChatroomError.unavailable }
+    func prepareChatroom(roomID: Int64, owner: UUID, generation: UInt64) throws {
+        guard self.owner == owner,
+              ownerGeneration == generation,
+              initialized
+        else { throw NIMChatroomError.unavailable }
         pendingChatroomID = roomID
         activeChatroomID = nil
         isChatroomRequestInFlight = false
     }
 
-    func login(appKey: String, accountID: String, token: String) throws {
-        guard let login = currentSymbols()?.clientLogin else { throw NIMChatroomError.unavailable }
+    func login(
+        appKey: String,
+        accountID: String,
+        token: String,
+        owner: UUID,
+        generation: UInt64
+    ) throws {
+        let login = self.owner == owner && ownerGeneration == generation
+            ? symbols?.clientLogin
+            : nil
+        let context = self.owner == owner && ownerGeneration == generation
+            ? callbackContext
+            : nil
+        guard let login, let context else { throw NIMChatroomError.unavailable }
         appKey.withCString { appKeyPointer in
             accountID.withCString { accountPointer in
                 token.withCString { tokenPointer in
@@ -274,179 +448,323 @@ private final class NIMNativeRuntime: @unchecked Sendable {
                         tokenPointer,
                         nil,
                         nimClientLoginCallback,
-                        Unmanaged.passUnretained(self).toOpaque()
+                        Unmanaged.passUnretained(context).toOpaque()
                     )
                 }
             }
         }
     }
 
-    func requestChatroomEnter(owner: UUID) throws {
-        lock.lock()
+    func requestChatroomEnter(owner: UUID, generation: UInt64) throws {
         guard self.owner == owner,
+              ownerGeneration == generation,
               let roomID = pendingChatroomID,
               activeChatroomID == nil,
               !isChatroomRequestInFlight,
-              let requestEnter = symbols?.requestChatroomEnter
+              let requestEnter = symbols?.requestChatroomEnter,
+              let context = callbackContext
         else {
-            lock.unlock()
             throw NIMChatroomError.connectionFailed(stage: "chatroom-request-state")
         }
         isChatroomRequestInFlight = true
-        lock.unlock()
 
         requestEnter(
             roomID,
             nil,
             nimChatroomRequestEnterCallback,
-            Unmanaged.passUnretained(self).toOpaque()
+            Unmanaged.passUnretained(context).toOpaque()
         )
     }
 
-    func disconnect(owner: UUID) {
-        lock.lock()
-        let ownsRuntime = self.owner == owner
-        let symbols = self.symbols
-        let chatroomID = ownsRuntime ? activeChatroomID : nil
-        if ownsRuntime {
-            pendingChatroomID = nil
-            activeChatroomID = nil
-            isChatroomRequestInFlight = false
+    func disconnect(owner: UUID, generation: UInt64) async {
+        guard self.owner == owner,
+              ownerGeneration == generation,
+              initialized,
+              let symbols,
+              let context = callbackContext
+        else { return }
+        pendingChatroomID = nil
+        isChatroomRequestInFlight = false
+
+        await NIMNativeTeardownSequence.disconnect {
+            guard let roomID = self.activeChatroomID else { return }
+            _ = await self.waitForChatroomExit(
+                roomID: roomID,
+                owner: owner,
+                generation: generation,
+                timeout: Self.chatroomExitTimeout
+            ) {
+                "".withCString { symbols.chatroomExit(roomID, $0) }
+            }
+            if self.activeChatroomID == roomID { self.activeChatroomID = nil }
+        } logout: {
+            let waiter = NIMCallbackWaiter()
+            self.logoutWait = (owner, generation, waiter)
+            _ = await waiter.wait(timeout: Self.logoutTimeout) {
+                "".withCString {
+                    symbols.clientLogout(
+                        1,
+                        $0,
+                        nimClientLogoutCallback,
+                        Unmanaged.passUnretained(context).toOpaque()
+                    )
+                }
+            }
+            if self.logoutWait?.waiter === waiter { self.logoutWait = nil }
         }
-        lock.unlock()
-        guard ownsRuntime, let symbols else { return }
-        if let chatroomID {
-            "".withCString { symbols.chatroomExit(chatroomID, $0) }
-        }
-        "".withCString { symbols.clientLogout(1, $0, nil, nil) }
+
+        guard self.owner == owner,
+              ownerGeneration == generation,
+              initialized
+        else { return }
+        context.stopAcceptingCallbacks()
+        await cleanup(symbols)
     }
 
-    var isLoggedIn: Bool {
-        currentSymbols()?.clientLoginState(nil) == 1
+    func reserveShutdown(owner: UUID) -> Bool {
+        if let shutdownOwner { return shutdownOwner == owner }
+        guard self.owner == nil || self.owner == owner else { return false }
+        shutdownOwner = owner
+        finalized = true
+        return true
     }
 
-    fileprivate func emit(_ event: NIMNativeEvent) {
-        lock.lock()
-        let sink = eventSink
-        lock.unlock()
+    func shutdown(owner: UUID) async {
+        guard shutdownOwner == owner else { return }
+        if let shutdownTask {
+            await shutdownTask.value
+            return
+        }
+        let task = Task { @MainActor [self] in await performShutdown() }
+        shutdownTask = task
+        await task.value
+    }
+
+    private func performShutdown() async {
+        guard initialized, let symbols else { return }
+
+        await cleanup(symbols)
+    }
+
+    private func cleanup(_ symbols: NIMNativeSymbols) async {
+        await NIMNativeTeardownSequence.shutdown {
+            "".withCString { symbols.chatroomCleanup($0) }
+        } cleanupClient: {
+            _ = await self.waitForClientCleanup(timeout: Self.cleanupTimeout) { context in
+                "".withCString {
+                    symbols.clientCleanup2(
+                        nimClientCleanupCallback,
+                        $0,
+                        Unmanaged.passUnretained(context).toOpaque()
+                    )
+                }
+            }
+        }
+        initialized = false
+    }
+
+    func waitForChatroomExit(
+        roomID: Int64,
+        owner: UUID,
+        generation: UInt64,
+        timeout: Duration,
+        start: () -> Void
+    ) async -> NIMChatroomExitOutcome? {
+        let pending = NIMChatroomExitWait(
+            roomID: roomID,
+            owner: owner,
+            generation: generation
+        )
+        exitWait = pending
+        _ = await pending.waiter.wait(timeout: timeout, start: start)
+        if exitWait === pending { exitWait = nil }
+        return pending.outcome
+    }
+
+    func waitForClientCleanup(
+        timeout: Duration,
+        start: (NIMNativeCallbackContext) -> Void
+    ) async -> NIMCallbackWaitResult {
+        let context = NIMNativeCallbackContext(runtime: self, owner: UUID(), generation: 0)
+        retainCallbackContext(context)
+        let waiter = NIMCallbackWaiter()
+        cleanupWaiter = waiter
+        let result = await waiter.wait(timeout: timeout) { start(context) }
+        if cleanupWaiter === waiter { cleanupWaiter = nil }
+        context.stopAcceptingCallbacks()
+        return result
+    }
+
+    func retainCallbackContext(_ context: NIMNativeCallbackContext) {
+        retainedCallbackContexts.append(context)
+    }
+
+    fileprivate func emit(_ event: NIMNativeEvent, owner: UUID, generation: UInt64) {
+        let sink = self.owner == owner && ownerGeneration == generation ? eventSink : nil
         sink?(event)
     }
 
-    fileprivate func emitChatroomMessage(roomID: Int64, raw: String) {
-        lock.lock()
-        let sink = activeChatroomID == roomID ? eventSink : nil
-        lock.unlock()
+    fileprivate func emitChatroomMessage(
+        roomID: Int64,
+        raw: String,
+        owner: UUID,
+        generation: UInt64
+    ) {
+        let sink = self.owner == owner
+            && ownerGeneration == generation
+            && activeChatroomID == roomID
+            ? eventSink
+            : nil
         sink?(.message(raw))
     }
 
     fileprivate func finishChatroomRequest(
         code: Int32,
-        enterData: UnsafePointer<CChar>?
+        enterData: String?,
+        owner: UUID,
+        generation: UInt64
     ) {
-        lock.lock()
-        guard owner != nil, let roomID = pendingChatroomID, activeChatroomID == nil else {
-            lock.unlock()
-            return
-        }
+        guard self.owner == owner,
+              ownerGeneration == generation,
+              let roomID = pendingChatroomID,
+              activeChatroomID == nil
+        else { return }
         isChatroomRequestInFlight = false
         guard code == 200, let enterData, let chatroomEnter = symbols?.chatroomEnter else {
             pendingChatroomID = nil
-            let sink = eventSink
-            lock.unlock()
-            sink?(.chatroomRequestFailed(Int(code)))
+            eventSink?(.chatroomRequestFailed(Int(code)))
             return
         }
         activeChatroomID = roomID
-        lock.unlock()
 
-        let accepted = chatroomEnter(roomID, enterData, nil, nil)
+        let accepted = enterData.withCString { chatroomEnter(roomID, $0, nil, nil) }
 
         guard !accepted else { return }
-        lock.lock()
-        guard owner != nil, activeChatroomID == roomID else {
-            lock.unlock()
-            return
-        }
+        guard self.owner == owner,
+              ownerGeneration == generation,
+              activeChatroomID == roomID
+        else { return }
         activeChatroomID = nil
         pendingChatroomID = nil
-        let sink = eventSink
-        lock.unlock()
-        sink?(.chatroomRequestFailed(0))
+        eventSink?(.chatroomRequestFailed(0))
     }
 
-    fileprivate func finishChatroomEnter(roomID: Int64, step: Int32, code: Int32) {
-        lock.lock()
-        guard owner != nil, activeChatroomID == roomID else {
-            lock.unlock()
-            return
-        }
+    fileprivate func finishChatroomEnter(
+        roomID: Int64,
+        step: Int32,
+        code: Int32,
+        owner: UUID,
+        generation: UInt64
+    ) {
+        guard self.owner == owner,
+              ownerGeneration == generation,
+              activeChatroomID == roomID
+        else { return }
         if step >= 3, code != 200 {
             activeChatroomID = nil
             pendingChatroomID = nil
         } else if step == 5, code == 200 {
             pendingChatroomID = nil
         }
-        let sink = eventSink
-        lock.unlock()
-        sink?(.chatroomEnter(step: Int(step), code: Int(code)))
+        eventSink?(.chatroomEnter(step: Int(step), code: Int(code)))
     }
 
-    fileprivate func finishChatroomExit(roomID: Int64) {
-        lock.lock()
-        guard activeChatroomID == roomID else {
-            lock.unlock()
-            return
+    fileprivate func finishChatroomExit(
+        _ outcome: NIMChatroomExitOutcome,
+        owner: UUID,
+        generation: UInt64
+    ) {
+        if let exitWait,
+           exitWait.roomID == outcome.roomID,
+           exitWait.owner == owner,
+           exitWait.generation == generation {
+            exitWait.resume(outcome)
         }
+        guard self.owner == owner,
+              ownerGeneration == generation,
+              activeChatroomID == outcome.roomID
+        else { return }
         activeChatroomID = nil
         pendingChatroomID = nil
-        let sink = eventSink
-        lock.unlock()
-        sink?(.disconnected)
+        eventSink?(.disconnected)
     }
 
-    fileprivate func finishChatroomLink(roomID: Int64, condition: Int32) {
-        guard condition == 2 else { return }
-        finishChatroomExit(roomID: roomID)
+    fileprivate func finishChatroomLink(
+        roomID: Int64,
+        condition: Int32,
+        owner: UUID,
+        generation: UInt64
+    ) {
+        guard condition == 2,
+              self.owner == owner,
+              ownerGeneration == generation,
+              activeChatroomID == roomID
+        else { return }
+        activeChatroomID = nil
+        pendingChatroomID = nil
+        eventSink?(.disconnected)
     }
 
-    private func initializeIfNeeded() throws {
-        lock.lock()
+    fileprivate func finishLogout(owner: UUID, generation: UInt64) {
+        guard let logoutWait,
+              logoutWait.owner == owner,
+              logoutWait.generation == generation
+        else { return }
+        logoutWait.waiter.resume()
+    }
+
+    fileprivate func finishCleanup() {
+        cleanupWaiter?.resume()
+    }
+
+    private func initializeIfNeeded(owner: UUID, generation: UInt64) throws {
         if initialized {
-            lock.unlock()
+            guard let symbols else { throw NIMChatroomError.unavailable }
+            try installCallbacks(symbols, owner: owner, generation: generation)
             return
         }
-        lock.unlock()
 
         guard let urls = NIMChatroomTransport.bundledNativeSDKURLs() else {
             throw NIMChatroomError.unavailable
         }
 
-        lock.lock()
         let existingSymbols = symbols
         let existingHandles = handles
-        lock.unlock()
 
         let loadedSymbols: NIMNativeSymbols
         let loadedHandles: [UnsafeMutableRawPointer]
         if let existingSymbols, existingHandles.count == 3 {
             loadedSymbols = existingSymbols
             loadedHandles = existingHandles
+            try initialize(loadedSymbols, owner: owner, generation: generation)
         } else {
-            var newHandles: [UnsafeMutableRawPointer] = []
-            for url in urls {
-                guard let handle = dlopen(url.path, RTLD_NOW | RTLD_GLOBAL) else {
-                    throw NIMChatroomError.unavailable
-                }
-                newHandles.append(handle)
+            let loaded = try NIMLibraryLoadTransaction.run(
+                items: urls,
+                open: { dlopen($0.path, RTLD_NOW | RTLD_GLOBAL) },
+                close: { dlclose($0) }
+            ) { newHandles in
+                guard newHandles.count == 3 else { throw NIMChatroomError.unavailable }
+                let newSymbols = try NIMNativeSymbols(
+                    clientHandle: newHandles[1],
+                    chatroomHandle: newHandles[2]
+                )
+                try initialize(newSymbols, owner: owner, generation: generation)
+                return (newHandles, newSymbols)
             }
-            guard newHandles.count == 3 else { throw NIMChatroomError.unavailable }
-            loadedHandles = newHandles
-            loadedSymbols = try NIMNativeSymbols(
-                clientHandle: newHandles[1],
-                chatroomHandle: newHandles[2]
-            )
+            loadedHandles = loaded.0
+            loadedSymbols = loaded.1
         }
 
+        handles = loadedHandles
+        symbols = loadedSymbols
+        initialized = true
+    }
+
+    private func initialize(
+        _ loadedSymbols: NIMNativeSymbols,
+        owner: UUID,
+        generation: UInt64
+    ) throws {
         let dataDirectory = try Self.dataDirectory()
         let config: [String: Any] = [
             "app_key": NIMChatroomTransport.initializationAppKey,
@@ -465,37 +783,57 @@ private final class NIMNativeRuntime: @unchecked Sendable {
                 loadedSymbols.clientInit(dataPointer, nil, configPointer)
             }
         }
-        guard didInitialize else { throw NIMChatroomError.unavailable }
-
-        let context = Unmanaged.passUnretained(self).toOpaque()
-        "".withCString {
-            loadedSymbols.chatroomInit($0)
-            loadedSymbols.registerChatroomEnter($0, nimChatroomEnterCallback, context)
-            loadedSymbols.registerChatroomExit($0, nimChatroomExitCallback, context)
-            loadedSymbols.registerChatroomLink($0, nimChatroomLinkCallback, context)
-            loadedSymbols.registerChatroomMessage($0, nimChatroomMessageCallback, context)
-            loadedSymbols.registerChatroomNotification($0, nimChatroomMessageCallback, context)
-            loadedSymbols.registerHTTPMessage(nimHTTPMessageCallback, $0, context)
-            loadedSymbols.registerMessage($0, nimMessageCallback, context)
-            loadedSymbols.registerBroadcast($0, nimMessageCallback, context)
-            loadedSymbols.registerSystemMessage($0, nimSystemMessageCallback, context)
-            loadedSymbols.registerPushEvent($0, nimPushEventCallback, context)
-            loadedSymbols.registerDisconnect($0, nimClientDisconnectCallback, context)
-            loadedSymbols.registerAutoRelogin($0, nimClientReloginCallback, context)
+        try NIMClientInitializationTransaction.run(
+            initialized: didInitialize,
+            cleanup: { "".withCString { loadedSymbols.clientCleanup($0) } }
+        ) {
+            "".withCString {
+                loadedSymbols.chatroomInit($0)
+            }
+            try installCallbacks(loadedSymbols, owner: owner, generation: generation)
         }
-
-        lock.lock()
-        handles = loadedHandles
-        symbols = loadedSymbols
-        initialized = true
-        lock.unlock()
     }
 
-    private func currentSymbols() -> NIMNativeSymbols? {
-        lock.lock()
-        let value = symbols
-        lock.unlock()
-        return value
+    private func installCallbacks(
+        _ symbols: NIMNativeSymbols,
+        owner: UUID,
+        generation: UInt64
+    ) throws {
+        let callbackContext = try installCallbackContext(owner: owner, generation: generation)
+        let context = Unmanaged.passUnretained(callbackContext).toOpaque()
+        "".withCString {
+            symbols.registerChatroomEnter($0, nimChatroomEnterCallback, context)
+            symbols.registerChatroomExit($0, nimChatroomExitCallback, context)
+            symbols.registerChatroomLink($0, nimChatroomLinkCallback, context)
+            symbols.registerChatroomMessage($0, nimChatroomMessageCallback, context)
+            symbols.registerChatroomNotification($0, nimChatroomMessageCallback, context)
+            symbols.registerHTTPMessage(nimHTTPMessageCallback, $0, context)
+            symbols.registerMessage($0, nimMessageCallback, context)
+            symbols.registerBroadcast($0, nimMessageCallback, context)
+            symbols.registerSystemMessage($0, nimSystemMessageCallback, context)
+            symbols.registerPushEvent($0, nimPushEventCallback, context)
+            symbols.registerDisconnect($0, nimClientDisconnectCallback, context)
+            symbols.registerAutoRelogin($0, nimClientReloginCallback, context)
+        }
+    }
+
+    func installCallbackContext(
+        owner: UUID,
+        generation: UInt64
+    ) throws -> NIMNativeCallbackContext {
+        guard self.owner == owner, ownerGeneration == generation else {
+            throw CancellationError()
+        }
+        callbackContext?.stopAcceptingCallbacks()
+        let callbackContext = NIMNativeCallbackContext(
+            runtime: self,
+            owner: owner,
+            generation: generation
+        )
+        self.callbackContext = callbackContext
+        // ponytail: retain callback contexts for process lifetime until the vendor proves quiescence.
+        retainCallbackContext(callbackContext)
+        return callbackContext
     }
 
     private static func dataDirectory() throws -> URL {
@@ -510,6 +848,241 @@ private final class NIMNativeRuntime: @unchecked Sendable {
         }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root
+    }
+}
+
+@MainActor
+final class NIMCallbackWaiter {
+    private var continuation: CheckedContinuation<NIMCallbackWaitResult, Never>?
+    private var timeoutTask: Task<Void, Never>?
+
+    func wait(timeout: Duration, start: () -> Void) async -> NIMCallbackWaitResult {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            timeoutTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(for: timeout)
+                } catch {
+                    return
+                }
+                self?.finish(.timeout)
+            }
+            start()
+        }
+    }
+
+    func resume() {
+        finish(.callback)
+    }
+
+    private func finish(_ result: NIMCallbackWaitResult) {
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        let continuation = continuation
+        self.continuation = nil
+        continuation?.resume(returning: result)
+    }
+}
+
+enum NIMCallbackWaitResult: Equatable, Sendable {
+    case callback
+    case timeout
+}
+
+struct NIMChatroomExitOutcome: Equatable, Sendable {
+    let roomID: Int64
+    let errorCode: Int32
+    let exitType: Int32
+}
+
+@MainActor
+private final class NIMChatroomExitWait {
+    let roomID: Int64
+    let owner: UUID
+    let generation: UInt64
+    let waiter = NIMCallbackWaiter()
+    private(set) var outcome: NIMChatroomExitOutcome?
+
+    init(roomID: Int64, owner: UUID, generation: UInt64) {
+        self.roomID = roomID
+        self.owner = owner
+        self.generation = generation
+    }
+
+    func resume(_ outcome: NIMChatroomExitOutcome) {
+        guard self.outcome == nil else { return }
+        self.outcome = outcome
+        waiter.resume()
+    }
+}
+
+enum NIMNativeTeardownSequence {
+    @MainActor
+    static func disconnect(
+        exit: @MainActor () async -> Void,
+        logout: @MainActor () async -> Void
+    ) async {
+        await exit()
+        await logout()
+    }
+
+    @MainActor
+    static func shutdown(
+        cleanupChatroom: @MainActor () -> Void,
+        cleanupClient: @MainActor () async -> Void
+    ) async {
+        cleanupChatroom()
+        await cleanupClient()
+    }
+}
+
+enum NIMLibraryLoadTransaction {
+    static func run<Item, Handle, Output>(
+        items: [Item],
+        open: (Item) -> Handle?,
+        close: (Handle) -> Void,
+        body: ([Handle]) throws -> Output
+    ) throws -> Output {
+        var handles: [Handle] = []
+        var committed = false
+        defer {
+            if !committed {
+                for handle in handles.reversed() { close(handle) }
+            }
+        }
+        for item in items {
+            guard let handle = open(item) else { throw NIMChatroomError.unavailable }
+            handles.append(handle)
+        }
+        let output = try body(handles)
+        committed = true
+        return output
+    }
+}
+
+enum NIMClientInitializationTransaction {
+    static func run<Output>(
+        initialized: Bool,
+        cleanup: () -> Void,
+        body: () throws -> Output
+    ) throws -> Output {
+        guard initialized else { throw NIMChatroomError.unavailable }
+        do {
+            return try body()
+        } catch {
+            cleanup()
+            throw error
+        }
+    }
+}
+
+final class NIMNativeCallbackContext: @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var runtime: NIMNativeRuntime?
+    private var acceptingCallbacks = true
+    let owner: UUID
+    let generation: UInt64
+
+    init(runtime: NIMNativeRuntime, owner: UUID, generation: UInt64) {
+        self.runtime = runtime
+        self.owner = owner
+        self.generation = generation
+    }
+
+    func isAcceptingCallbacks() -> Bool {
+        lock.withLock { acceptingCallbacks }
+    }
+
+    func stopAcceptingCallbacks() {
+        lock.withLock { acceptingCallbacks = false }
+    }
+
+    func copyString(from pointer: UnsafePointer<CChar>?) -> String? {
+        lock.withLock {
+            guard acceptingCallbacks else { return nil }
+            return NIMNativeString.copy(from: pointer)
+        }
+    }
+
+    func emit(_ event: NIMNativeEvent) {
+        submit { runtime in
+            runtime.emit(event, owner: self.owner, generation: self.generation)
+        }
+    }
+
+    func emitChatroomMessage(roomID: Int64, raw: String) {
+        submit { runtime in
+            runtime.emitChatroomMessage(
+                roomID: roomID,
+                raw: raw,
+                owner: self.owner,
+                generation: self.generation
+            )
+        }
+    }
+
+    func finishChatroomRequest(code: Int32, enterData: String?) {
+        submit { runtime in
+            runtime.finishChatroomRequest(
+                code: code,
+                enterData: enterData,
+                owner: self.owner,
+                generation: self.generation
+            )
+        }
+    }
+
+    func finishChatroomEnter(roomID: Int64, step: Int32, code: Int32) {
+        submit { runtime in
+            runtime.finishChatroomEnter(
+                roomID: roomID,
+                step: step,
+                code: code,
+                owner: self.owner,
+                generation: self.generation
+            )
+        }
+    }
+
+    func finishChatroomExit(_ outcome: NIMChatroomExitOutcome) {
+        submit { runtime in
+            runtime.finishChatroomExit(
+                outcome,
+                owner: self.owner,
+                generation: self.generation
+            )
+        }
+    }
+
+    func finishChatroomLink(roomID: Int64, condition: Int32) {
+        submit { runtime in
+            runtime.finishChatroomLink(
+                roomID: roomID,
+                condition: condition,
+                owner: self.owner,
+                generation: self.generation
+            )
+        }
+    }
+
+    func finishLogout() {
+        submit { runtime in
+            runtime.finishLogout(owner: self.owner, generation: self.generation)
+        }
+    }
+
+    func finishCleanup() {
+        submit { runtime in runtime.finishCleanup() }
+    }
+
+    private func submit(
+        _ operation: @escaping @MainActor @Sendable (NIMNativeRuntime) -> Void
+    ) {
+        guard isAcceptingCallbacks() else { return }
+        Task { @MainActor [weak runtime] in
+            guard self.isAcceptingCallbacks(), let runtime else { return }
+            operation(runtime)
+        }
     }
 }
 
@@ -597,6 +1170,11 @@ private struct NIMNativeSymbols: @unchecked Sendable {
         UnsafePointer<CChar>?
     ) -> Bool
     let clientCleanup: @convention(c) (UnsafePointer<CChar>?) -> Void
+    let clientCleanup2: @convention(c) (
+        NIMJSONCallback?,
+        UnsafePointer<CChar>?,
+        UnsafeRawPointer?
+    ) -> Void
     let clientLogin: @convention(c) (
         UnsafePointer<CChar>?,
         UnsafePointer<CChar>?,
@@ -663,6 +1241,7 @@ private struct NIMNativeSymbols: @unchecked Sendable {
     init(clientHandle: UnsafeMutableRawPointer, chatroomHandle: UnsafeMutableRawPointer) throws {
         clientInit = try Self.resolve("nim_client_init", from: clientHandle)
         clientCleanup = try Self.resolve("nim_client_cleanup", from: clientHandle)
+        clientCleanup2 = try Self.resolve("nim_client_cleanup2", from: clientHandle)
         clientLogin = try Self.resolve("nim_client_login", from: clientHandle)
         clientLogout = try Self.resolve("nim_client_logout", from: clientHandle)
         clientLoginState = try Self.resolve("nim_client_get_login_state", from: clientHandle)
@@ -703,16 +1282,30 @@ private struct NIMNativeSymbols: @unchecked Sendable {
     }
 }
 
-private func runtime(from pointer: UnsafeRawPointer?) -> NIMNativeRuntime? {
-    pointer.map { Unmanaged<NIMNativeRuntime>.fromOpaque($0).takeUnretainedValue() }
+private func callbackContext(from pointer: UnsafeRawPointer?) -> NIMNativeCallbackContext? {
+    pointer.map { Unmanaged<NIMNativeCallbackContext>.fromOpaque($0).takeUnretainedValue() }
 }
 
-private func string(from pointer: UnsafePointer<CChar>?) -> String {
-    pointer.map(String.init(cString:)) ?? ""
+enum NIMNativeString {
+    static let maximumBytes = 65_536
+
+    static func copy(from pointer: UnsafePointer<CChar>?) -> String? {
+        guard let pointer else { return "" }
+        // ponytail: local-only cap; vendor length, NUL, encoding, and lifetime remain unverified.
+        let count = strnlen(pointer, maximumBytes + 1)
+        guard count <= maximumBytes else { return nil }
+        let bytes = UnsafeRawPointer(pointer).assumingMemoryBound(to: UInt8.self)
+        return String(bytes: UnsafeBufferPointer(start: bytes, count: count), encoding: .utf8)
+    }
 }
 
 private func nimClientLoginCallback(_ raw: UnsafePointer<CChar>?, _ context: UnsafeRawPointer?) {
-    runtime(from: context)?.emit(.login(string(from: raw)))
+    guard let context = callbackContext(from: context),
+          let raw = context.copyString(from: raw)
+    else {
+        return
+    }
+    context.emit(.login(raw))
 }
 
 private func nimChatroomRequestEnterCallback(
@@ -721,7 +1314,13 @@ private func nimChatroomRequestEnterCallback(
     _: UnsafePointer<CChar>?,
     _ context: UnsafeRawPointer?
 ) {
-    runtime(from: context)?.finishChatroomRequest(code: code, enterData: enterData)
+    guard let context = callbackContext(from: context) else { return }
+    if let enterData {
+        guard let enterData = context.copyString(from: enterData) else { return }
+        context.finishChatroomRequest(code: code, enterData: enterData)
+    } else if context.isAcceptingCallbacks() {
+        context.finishChatroomRequest(code: code, enterData: nil)
+    }
 }
 
 private func nimChatroomEnterCallback(
@@ -732,17 +1331,26 @@ private func nimChatroomEnterCallback(
     _: UnsafePointer<CChar>?,
     _ context: UnsafeRawPointer?
 ) {
-    runtime(from: context)?.finishChatroomEnter(roomID: roomID, step: step, code: code)
+    callbackContext(from: context)?.finishChatroomEnter(
+        roomID: roomID,
+        step: step,
+        code: code
+    )
 }
 
-private func nimChatroomExitCallback(
+func nimChatroomExitCallback(
     _ roomID: Int64,
-    _: Int32,
-    _: Int32,
+    _ errorCode: Int32,
+    _ exitType: Int32,
     _: UnsafePointer<CChar>?,
     _ context: UnsafeRawPointer?
 ) {
-    runtime(from: context)?.finishChatroomExit(roomID: roomID)
+    let outcome = NIMChatroomExitOutcome(
+        roomID: roomID,
+        errorCode: errorCode,
+        exitType: exitType
+    )
+    callbackContext(from: context)?.finishChatroomExit(outcome)
 }
 
 private func nimChatroomLinkCallback(
@@ -751,7 +1359,10 @@ private func nimChatroomLinkCallback(
     _: UnsafePointer<CChar>?,
     _ context: UnsafeRawPointer?
 ) {
-    runtime(from: context)?.finishChatroomLink(roomID: roomID, condition: condition)
+    callbackContext(from: context)?.finishChatroomLink(
+        roomID: roomID,
+        condition: condition
+    )
 }
 
 private func nimChatroomMessageCallback(
@@ -760,7 +1371,12 @@ private func nimChatroomMessageCallback(
     _: UnsafePointer<CChar>?,
     _ context: UnsafeRawPointer?
 ) {
-    runtime(from: context)?.emitChatroomMessage(roomID: roomID, raw: string(from: result))
+    guard let context = callbackContext(from: context),
+          let result = context.copyString(from: result)
+    else {
+        return
+    }
+    context.emitChatroomMessage(roomID: roomID, raw: result)
 }
 
 private func nimSystemMessageCallback(
@@ -768,7 +1384,12 @@ private func nimSystemMessageCallback(
     _: UnsafePointer<CChar>?,
     _ context: UnsafeRawPointer?
 ) {
-    runtime(from: context)?.emit(.message(string(from: result)))
+    guard let context = callbackContext(from: context),
+          let result = context.copyString(from: result)
+    else {
+        return
+    }
+    context.emit(.message(result))
 }
 
 private func nimMessageCallback(
@@ -776,7 +1397,12 @@ private func nimMessageCallback(
     _: UnsafePointer<CChar>?,
     _ context: UnsafeRawPointer?
 ) {
-    runtime(from: context)?.emit(.message(string(from: result)))
+    guard let context = callbackContext(from: context),
+          let result = context.copyString(from: result)
+    else {
+        return
+    }
+    context.emit(.message(result))
 }
 
 private func nimPushEventCallback(
@@ -785,23 +1411,48 @@ private func nimPushEventCallback(
     _: UnsafePointer<CChar>?,
     _ context: UnsafeRawPointer?
 ) {
-    guard code == 200 else { return }
-    runtime(from: context)?.emit(.message(string(from: result)))
+    guard code == 200,
+          let context = callbackContext(from: context),
+          let result = context.copyString(from: result)
+    else { return }
+    context.emit(.message(result))
 }
 
-private func nimHTTPMessageCallback(
+func nimHTTPMessageCallback(
     _: UnsafePointer<CChar>?,
     _ body: UnsafePointer<CChar>?,
-    _: UInt64,
+    _ timestamp: UInt64,
     _ context: UnsafeRawPointer?
 ) {
-    runtime(from: context)?.emit(.message(string(from: body)))
+    _ = timestamp
+    guard let context = callbackContext(from: context),
+          let body = context.copyString(from: body)
+    else {
+        return
+    }
+    context.emit(.message(body))
 }
 
-private func nimClientDisconnectCallback(_: UnsafePointer<CChar>?, _ context: UnsafeRawPointer?) {
-    runtime(from: context)?.emit(.disconnected)
+private func nimClientDisconnectCallback(
+    _: UnsafePointer<CChar>?,
+    _ context: UnsafeRawPointer?
+) {
+    callbackContext(from: context)?.emit(.disconnected)
 }
 
 private func nimClientReloginCallback(_ raw: UnsafePointer<CChar>?, _ context: UnsafeRawPointer?) {
-    runtime(from: context)?.emit(.login(string(from: raw)))
+    guard let context = callbackContext(from: context),
+          let raw = context.copyString(from: raw)
+    else {
+        return
+    }
+    context.emit(.login(raw))
+}
+
+private func nimClientLogoutCallback(_: UnsafePointer<CChar>?, _ context: UnsafeRawPointer?) {
+    callbackContext(from: context)?.finishLogout()
+}
+
+func nimClientCleanupCallback(_: UnsafePointer<CChar>?, _ context: UnsafeRawPointer?) {
+    callbackContext(from: context)?.finishCleanup()
 }

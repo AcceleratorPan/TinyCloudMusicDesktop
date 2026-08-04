@@ -1,0 +1,825 @@
+{
+  "code": 200,
+  "data": {
+    "encUserId": "<redacted:string>",
+    "musician": false,
+    "meetTimeOverview": {
+      "playCount": 0,
+      "playTime": 0,
+      "carTerminalPlayTime": 0,
+      "pcTerminalPlayTime": 0,
+      "homeTerminalPlayTime": 0,
+      "podcastPlayTime": 0,
+      "regTime": 0,
+      "albumCoverUrl": [
+        "<redacted:string>",
+        "<redacted:string>",
+        "<redacted:string>",
+        "<redacted:string>",
+        "<redacted:string>",
+        "<redacted:string>",
+        "<redacted:string>",
+        "<redacted:string>",
+        "<redacted:string>",
+        "<redacted:string>",
+        "<redacted:string>",
+        "<redacted:string>",
+        "<redacted:string>",
+        "<redacted:string>",
+        "<redacted:string>"
+      ]
+    },
+    "newDiscoveryDTO": {
+      "totalArtistCount": 0,
+      "newArtistCount": 0,
+      "newGenreCount": 0,
+      "totalGenreCount": 0,
+      "specialGenre": [
+        "<redacted:string>",
+        "<redacted:string>"
+      ],
+      "newSinger": null,
+      "new_genre_tag_2_name": null,
+      "newGenreDetailDtoList": null,
+      "newSingerDetailDto": {
+        "artistId": 0,
+        "artistName": "<redacted:string>",
+        "songCount": 0
+      },
+      "top5SingerDetails": [
+        {
+          "singerName": "<redacted:string>",
+          "singerCoverUrl": "<redacted:string>"
+        },
+        {
+          "singerName": "<redacted:string>",
+          "singerCoverUrl": "<redacted:string>"
+        },
+        {
+          "singerName": "<redacted:string>",
+          "singerCoverUrl": "<redacted:string>"
+        },
+        {
+          "singerName": "<redacted:string>",
+          "singerCoverUrl": "<redacted:string>"
+        },
+        {
+          "singerName": "<redacted:string>",
+          "singerCoverUrl": "<redacted:string>"
+        }
+      ]
+    },
+    "keyWord": {
+      "firstKeyWord": {
+        "keyword": "<redacted:string>",
+        "lyricCnt": 0,
+        "lyricList": [
+          {
+            "songId": 0,
+            "songName": "<redacted:string>",
+            "artistId": null,
+            "artistName": "<redacted:string>",
+            "lyric": "<redacted:string>",
+            "effectivePlayCntStd": 0,
+            "lyriccnt": 0,
+            "keyword": "<redacted:string>"
+          },
+          {
+            "songId": 0,
+            "songName": "<redacted:string>",
+            "artistId": null,
+            "artistName": "<redacted:string>",
+            "lyric": "<redacted:string>",
+            "effectivePlayCntStd": 0,
+            "lyriccnt": 0,
+            "keyword": "<redacted:string>"
+          },
+          {
+            "songId": 0,
+            "songName": "<redacted:string>",
+            "artistId": null,
+            "artistName": "<redacted:string>",
+            "lyric": "<redacted:string>",
+            "effectivePlayCntStd": 0,
+            "lyriccnt": 0,
+            "keyword": "<redacted:string>"
+          },
+          {
+            "songId": 0,
+            "songName": "<redacted:string>",
+            "artistId": null,
+            "artistName": "<redacted:string>",
+            "lyric": "<redacted:string>",
+            "effectivePlayCntStd": 0,
+            "lyriccnt": 0,
+            "keyword": "<redacted:string>"
+          },
+          {
+            "songId": 0,
+            "songName": "<redacted:string>",
+            "artistId": null,
+            "artistName": "<redacted:string>",
+            "lyric": "<redacted:string>",
+            "effectivePlayCntStd": 0,
+            "lyriccnt": 0,
+            "keyword": "<redacted:string>"
+          }
+        ]
+      },
+      "secondKeyWord": {
+        "keyword": "<redacted:string>",
+        "lyricCnt": 0,
+        "lyricList": [
+          {
+            "songId": 0,
+            "songName": "<redacted:string>",
+            "artistId": null,
+            "artistName": "<redacted:string>",
+            "lyric": "<redacted:string>",
+            "effectivePlayCntStd": 0,
+            "lyriccnt": 0,
+            "keyword": "<redacted:string>"
+          },
+          {
+            "songId": 0,
+            "songName": "<redacted:string>",
+            "artistId": null,
+            "artistName": "<redacted:string>",
+            "lyric": "<redacted:string>",
+            "effectivePlayCntStd": 0,
+            "lyriccnt": 0,
+            "keyword": "<redacted:string>"
+          },
+          {
+            "songId": 0,
+            "songName": "<redacted:string>",
+            "artistId": null,
+            "artistName": "<redacted:string>",
+            "lyric": "<redacted:string>",
+            "effectivePlayCntStd": 0,
+            "lyriccnt": 0,
+            "keyword": "<redacted:string>"
+          },
+          {
+            "songId": 0,
+            "songName": "<redacted:string>",
+            "artistId": null,
+            "artistName": "<redacted:string>",
+            "lyric": "<redacted:string>",
+            "effectivePlayCntStd": 0,
+            "lyriccnt": 0,
+            "keyword": "<redacted:string>"
+          },
+          {
+            "songId": 0,
+            "songName": "<redacted:string>",
+            "artistId": null,
+            "artistName": "<redacted:string>",
+            "lyric": "<redacted:string>",
+            "effectivePlayCntStd": 0,
+            "lyriccnt": 0,
+            "keyword": "<redacted:string>"
+          }
+        ]
+      },
+      "loveKeyword": {
+        "keyword": "<redacted:string>",
+        "lyricCnt": 0,
+        "lyricList": [
+          {
+            "songId": 0,
+            "songName": "<redacted:string>",
+            "artistId": null,
+            "artistName": "<redacted:string>",
+            "lyric": "<redacted:string>",
+            "effectivePlayCntStd": 0,
+            "lyriccnt": 0,
+            "keyword": "<redacted:string>"
+          },
+          {
+            "songId": 0,
+            "songName": "<redacted:string>",
+            "artistId": null,
+            "artistName": "<redacted:string>",
+            "lyric": "<redacted:string>",
+            "effectivePlayCntStd": 0,
+            "lyriccnt": 0,
+            "keyword": "<redacted:string>"
+          },
+          {
+            "songId": 0,
+            "songName": "<redacted:string>",
+            "artistId": null,
+            "artistName": "<redacted:string>",
+            "lyric": "<redacted:string>",
+            "effectivePlayCntStd": 0,
+            "lyriccnt": 0,
+            "keyword": "<redacted:string>"
+          },
+          {
+            "songId": 0,
+            "songName": "<redacted:string>",
+            "artistId": null,
+            "artistName": "<redacted:string>",
+            "lyric": "<redacted:string>",
+            "effectivePlayCntStd": 0,
+            "lyriccnt": 0,
+            "keyword": "<redacted:string>"
+          },
+          {
+            "songId": 0,
+            "songName": "<redacted:string>",
+            "artistId": null,
+            "artistName": "<redacted:string>",
+            "lyric": "<redacted:string>",
+            "effectivePlayCntStd": 0,
+            "lyriccnt": 0,
+            "keyword": "<redacted:string>"
+          }
+        ]
+      }
+    },
+    "genrePlayRank": {
+      "genreRank": [
+        {
+          "oneGenreTagName": "<redacted:string>",
+          "genreTagName": "<redacted:string>",
+          "rank": 0,
+          "percent": 0
+        },
+        {
+          "oneGenreTagName": "<redacted:string>",
+          "genreTagName": "<redacted:string>",
+          "rank": 0,
+          "percent": 0
+        },
+        {
+          "oneGenreTagName": "<redacted:string>",
+          "genreTagName": "<redacted:string>",
+          "rank": 0,
+          "percent": 0
+        },
+        {
+          "oneGenreTagName": "<redacted:string>",
+          "genreTagName": "<redacted:string>",
+          "rank": 0,
+          "percent": 0
+        }
+      ],
+      "specialGenreRank": [],
+      "musicAge": 0,
+      "word": "<redacted:string>"
+    },
+    "seasonsListen": {
+      "spring": null,
+      "summer": {
+        "seasonIndex": 0,
+        "songId": 0,
+        "songName": "<redacted:string>",
+        "artistId": "<redacted:string>",
+        "artistName": "<redacted:string>",
+        "playNum": 0,
+        "picId": "<redacted:string>",
+        "picUrl": "<redacted:string>"
+      },
+      "autumn": {
+        "seasonIndex": 0,
+        "songId": 0,
+        "songName": "<redacted:string>",
+        "artistId": "<redacted:string>",
+        "artistName": "<redacted:string>",
+        "playNum": 0,
+        "picId": "<redacted:string>",
+        "picUrl": "<redacted:string>"
+      },
+      "winter": {
+        "seasonIndex": 0,
+        "songId": 0,
+        "songName": "<redacted:string>",
+        "artistId": "<redacted:string>",
+        "artistName": "<redacted:string>",
+        "playNum": 0,
+        "picId": "<redacted:string>",
+        "picUrl": "<redacted:string>"
+      }
+    },
+    "monthListenDTO": {
+      "monthListenItemList": [
+        {
+          "monthIndex": 0,
+          "playTime": "<redacted:string>",
+          "songId": 0,
+          "songName": null,
+          "songCoverPicId": null,
+          "songCoverPicUrl": null,
+          "albumId": 0,
+          "albumName": null,
+          "albumCoverId": null,
+          "albumCoverUrl": null,
+          "artistId": null,
+          "artistName": "<redacted:string>",
+          "artistPicId": "<redacted:string>",
+          "artistPicUrl": "<redacted:string>"
+        },
+        {
+          "monthIndex": 0,
+          "playTime": "<redacted:string>",
+          "songId": 0,
+          "songName": null,
+          "songCoverPicId": null,
+          "songCoverPicUrl": null,
+          "albumId": 0,
+          "albumName": null,
+          "albumCoverId": null,
+          "albumCoverUrl": null,
+          "artistId": null,
+          "artistName": "<redacted:string>",
+          "artistPicId": "<redacted:string>",
+          "artistPicUrl": "<redacted:string>"
+        },
+        {
+          "monthIndex": 0,
+          "playTime": "<redacted:string>",
+          "songId": 0,
+          "songName": null,
+          "songCoverPicId": null,
+          "songCoverPicUrl": null,
+          "albumId": 0,
+          "albumName": null,
+          "albumCoverId": null,
+          "albumCoverUrl": null,
+          "artistId": null,
+          "artistName": "<redacted:string>",
+          "artistPicId": "<redacted:string>",
+          "artistPicUrl": "<redacted:string>"
+        },
+        {
+          "monthIndex": 0,
+          "playTime": "<redacted:string>",
+          "songId": 0,
+          "songName": null,
+          "songCoverPicId": null,
+          "songCoverPicUrl": null,
+          "albumId": 0,
+          "albumName": null,
+          "albumCoverId": null,
+          "albumCoverUrl": null,
+          "artistId": null,
+          "artistName": "<redacted:string>",
+          "artistPicId": "<redacted:string>",
+          "artistPicUrl": "<redacted:string>"
+        },
+        {
+          "monthIndex": 0,
+          "playTime": "<redacted:string>",
+          "songId": 0,
+          "songName": null,
+          "songCoverPicId": null,
+          "songCoverPicUrl": null,
+          "albumId": 0,
+          "albumName": null,
+          "albumCoverId": null,
+          "albumCoverUrl": null,
+          "artistId": null,
+          "artistName": "<redacted:string>",
+          "artistPicId": "<redacted:string>",
+          "artistPicUrl": "<redacted:string>"
+        },
+        {
+          "monthIndex": 0,
+          "playTime": "<redacted:string>",
+          "songId": 0,
+          "songName": null,
+          "songCoverPicId": null,
+          "songCoverPicUrl": null,
+          "albumId": 0,
+          "albumName": null,
+          "albumCoverId": null,
+          "albumCoverUrl": null,
+          "artistId": null,
+          "artistName": "<redacted:string>",
+          "artistPicId": "<redacted:string>",
+          "artistPicUrl": "<redacted:string>"
+        }
+      ]
+    },
+    "listenTimePeriod": {
+      "maxTimePeriod": "<redacted:string>",
+      "totalMaxPlayCount": 0,
+      "distributions": [
+        {
+          "month": 0,
+          "hour": 0,
+          "peak": 0
+        },
+        {
+          "month": 0,
+          "hour": 0,
+          "peak": 0
+        },
+        {
+          "month": 0,
+          "hour": 0,
+          "peak": 0
+        },
+        {
+          "month": 0,
+          "hour": 0,
+          "peak": 0
+        },
+        {
+          "month": 0,
+          "hour": 0,
+          "peak": 0
+        },
+        {
+          "month": 0,
+          "hour": 0,
+          "peak": 0
+        }
+      ]
+    },
+    "spiritDto": {
+      "spiritItems": [
+        {
+          "playMonth": 0,
+          "genreTagName": "<redacted:string>",
+          "moodTag": "<redacted:string>"
+        },
+        {
+          "playMonth": 0,
+          "genreTagName": "<redacted:string>",
+          "moodTag": "<redacted:string>"
+        },
+        {
+          "playMonth": 0,
+          "genreTagName": "<redacted:string>",
+          "moodTag": "<redacted:string>"
+        },
+        {
+          "playMonth": 0,
+          "genreTagName": "<redacted:string>",
+          "moodTag": "<redacted:string>"
+        },
+        {
+          "playMonth": 0,
+          "genreTagName": "<redacted:string>",
+          "moodTag": "<redacted:string>"
+        },
+        {
+          "playMonth": 0,
+          "genreTagName": "<redacted:string>",
+          "moodTag": "<redacted:string>"
+        },
+        {
+          "playMonth": 0,
+          "genreTagName": null,
+          "moodTag": "<redacted:string>"
+        },
+        {
+          "playMonth": 0,
+          "genreTagName": null,
+          "moodTag": "<redacted:string>"
+        },
+        {
+          "playMonth": 0,
+          "genreTagName": null,
+          "moodTag": "<redacted:string>"
+        },
+        {
+          "playMonth": 0,
+          "genreTagName": null,
+          "moodTag": "<redacted:string>"
+        },
+        {
+          "playMonth": 0,
+          "genreTagName": null,
+          "moodTag": "<redacted:string>"
+        },
+        {
+          "playMonth": 0,
+          "genreTagName": null,
+          "moodTag": "<redacted:string>"
+        }
+      ]
+    },
+    "latePlayDTO": {
+      "datetime": 0,
+      "songId": 0,
+      "songName": "<redacted:string>",
+      "artistId": "<redacted:string>",
+      "artistName": "<redacted:string>",
+      "songPicId": "<redacted:string>",
+      "songPicUrl": "<redacted:string>",
+      "year": null
+    },
+    "loopSongDTO": {
+      "playDate": 0,
+      "singerId": "<redacted:string>",
+      "singerName": "<redacted:string>",
+      "playCount": 0,
+      "songPicUrl": "<redacted:string>",
+      "songId": "<redacted:string>",
+      "songName": "<redacted:string>"
+    },
+    "minorMassDTO": {
+      "minoritySingerName": null,
+      "minoritySongName": null,
+      "minoritySongId": null,
+      "minoritySongCoverUrl": null,
+      "minorityFindUserCount": 0,
+      "minoritySongPlayCount": 0,
+      "minoritySongPlayUnt": 0,
+      "minoritySongFirstDate": 0,
+      "minorityCoverUrl": null,
+      "massSingerName": "<redacted:string>",
+      "massSongName": "<redacted:string>",
+      "massSongIp": null,
+      "massFindUserCount": 0,
+      "massSongCoverUrl": "<redacted:string>"
+    },
+    "voicePlayBizPage": null,
+    "noteDto": null,
+    "yunCunContributeDto": {
+      "commentCreateCount": 0,
+      "commentLikeCount": 0,
+      "yearNoteCount24": null,
+      "yearNoteInteractiveCount24": null,
+      "playlistCreateCount": 0,
+      "playlistPlayCount": 0,
+      "playlistCollectCount": 0,
+      "yuntuigeCount": 0,
+      "yuntuigeLightCnt": 0,
+      "yuntuigePlayCount": 0,
+      "yuntuigeLightNum": 0,
+      "completeSongsCount": 0,
+      "completeSongsEffectUserCount": 0,
+      "collectSongCnt": 0
+    },
+    "yunCunFeeDto": {
+      "singleSongPurchaseCount": 0,
+      "purchaseDigitAlbumCount": 0,
+      "purchaseEntityAlbumCount": 0,
+      "liveTotalCount": 0,
+      "musicianAppreciationAmount": null,
+      "beVipUserLongestTime": null,
+      "beSVipUserLongestTime": null,
+      "experienceVipDays": 0,
+      "vipLevel": "<redacted:string>",
+      "listenVipSongsCount": 0,
+      "experienceInterestCount": 0,
+      "vipInterestCount": 0,
+      "highSoundQualityPlayTime": "<redacted:string>",
+      "saveMoneyAfterStudentsMeal": null,
+      "isOpenStudent": 0,
+      "singleSongPurchaseAmt": "<redacted:string>",
+      "purchaseDigitAlbumAmt": "<redacted:string>",
+      "purchaseEntityAlbumAmt": "<redacted:string>",
+      "liveTotalAmt": "<redacted:string>",
+      "privilegeTradeAmt": "<redacted:string>"
+    },
+    "musicianBizPage": null,
+    "listenTogetherBizPage": {
+      "listenTogetherDuration": 0,
+      "listenTogetherLongestCreateDate": 0
+    },
+    "annualPlaylistAlbum": {
+      "favoriteAlbum": {
+        "songId": 0,
+        "songName": "<redacted:string>",
+        "playUrl": {
+          "songId": 0,
+          "chorusStart": 0,
+          "chorusEnd": 0
+        },
+        "albumId": "<redacted:string>",
+        "albumName": "<redacted:string>",
+        "artistName": "<redacted:string>",
+        "albumPicId": "<redacted:string>",
+        "albumPicUrl": "<redacted:string>",
+        "playDays": 0,
+        "playCount": 0,
+        "playDuration": 0
+      }
+    },
+    "annualSong": {
+      "songName": "<redacted:string>",
+      "songId": 0,
+      "artistNameList": "<redacted:string>",
+      "firstDate": 0,
+      "songPicId": "<redacted:string>",
+      "songPicUrl": "<redacted:string>",
+      "playCnt": 0,
+      "playDays": 0,
+      "userCountOfThisAnnualSong": 0,
+      "playUrl": {
+        "songId": 0,
+        "chorusStart": null,
+        "chorusEnd": null
+      }
+    },
+    "parentsPage": null,
+    "annualPlaylist": {
+      "playUrl": null,
+      "items": [
+        {
+          "songId": 0,
+          "songName": "<redacted:string>",
+          "playCount": 0,
+          "index": 0,
+          "artistId": "<redacted:string>",
+          "artistName": "<redacted:string>",
+          "picid": "<redacted:string>",
+          "picUrl": "<redacted:string>",
+          "chorusSegmentStartPosition": null,
+          "chorusSegmentEndPosition": null
+        },
+        {
+          "songId": 0,
+          "songName": "<redacted:string>",
+          "playCount": 0,
+          "index": 0,
+          "artistId": "<redacted:string>",
+          "artistName": "<redacted:string>",
+          "picid": "<redacted:string>",
+          "picUrl": "<redacted:string>",
+          "chorusSegmentStartPosition": null,
+          "chorusSegmentEndPosition": null
+        },
+        {
+          "songId": 0,
+          "songName": "<redacted:string>",
+          "playCount": 0,
+          "index": 0,
+          "artistId": "<redacted:string>",
+          "artistName": "<redacted:string>",
+          "picid": "<redacted:string>",
+          "picUrl": "<redacted:string>",
+          "chorusSegmentStartPosition": null,
+          "chorusSegmentEndPosition": null
+        },
+        {
+          "songId": 0,
+          "songName": "<redacted:string>",
+          "playCount": 0,
+          "index": 0,
+          "artistId": "<redacted:string>",
+          "artistName": "<redacted:string>",
+          "picid": "<redacted:string>",
+          "picUrl": "<redacted:string>",
+          "chorusSegmentStartPosition": null,
+          "chorusSegmentEndPosition": null
+        },
+        {
+          "songId": 0,
+          "songName": "<redacted:string>",
+          "playCount": 0,
+          "index": 0,
+          "artistId": "<redacted:string>",
+          "artistName": "<redacted:string>",
+          "picid": "<redacted:string>",
+          "picUrl": "<redacted:string>",
+          "chorusSegmentStartPosition": null,
+          "chorusSegmentEndPosition": null
+        },
+        {
+          "songId": 0,
+          "songName": "<redacted:string>",
+          "playCount": 0,
+          "index": 0,
+          "artistId": "<redacted:string>",
+          "artistName": "<redacted:string>",
+          "picid": "<redacted:string>",
+          "picUrl": "<redacted:string>",
+          "chorusSegmentStartPosition": null,
+          "chorusSegmentEndPosition": null
+        },
+        {
+          "songId": 0,
+          "songName": "<redacted:string>",
+          "playCount": 0,
+          "index": 0,
+          "artistId": "<redacted:string>",
+          "artistName": "<redacted:string>",
+          "picid": "<redacted:string>",
+          "picUrl": "<redacted:string>",
+          "chorusSegmentStartPosition": null,
+          "chorusSegmentEndPosition": null
+        },
+        {
+          "songId": 0,
+          "songName": "<redacted:string>",
+          "playCount": 0,
+          "index": 0,
+          "artistId": "<redacted:string>",
+          "artistName": "<redacted:string>",
+          "picid": "<redacted:string>",
+          "picUrl": "<redacted:string>",
+          "chorusSegmentStartPosition": null,
+          "chorusSegmentEndPosition": null
+        },
+        {
+          "songId": 0,
+          "songName": "<redacted:string>",
+          "playCount": 0,
+          "index": 0,
+          "artistId": "<redacted:string>",
+          "artistName": "<redacted:string>",
+          "picid": "<redacted:string>",
+          "picUrl": "<redacted:string>",
+          "chorusSegmentStartPosition": null,
+          "chorusSegmentEndPosition": null
+        },
+        {
+          "songId": 0,
+          "songName": "<redacted:string>",
+          "playCount": 0,
+          "index": 0,
+          "artistId": "<redacted:string>",
+          "artistName": "<redacted:string>",
+          "picid": "<redacted:string>",
+          "picUrl": "<redacted:string>",
+          "chorusSegmentStartPosition": null,
+          "chorusSegmentEndPosition": null
+        }
+      ],
+      "pureItems": null
+    },
+    "annualSinger": {
+      "artistId": "<redacted:string>",
+      "singerName": "<redacted:string>",
+      "singerPicId": "<redacted:string>",
+      "singerPicUrl": "<redacted:string>",
+      "playCount": 0,
+      "top5Songs": [
+        {
+          "songId": 0,
+          "name": "<redacted:string>",
+          "playCount": 0,
+          "index": 0
+        },
+        {
+          "songId": 0,
+          "name": "<redacted:string>",
+          "playCount": 0,
+          "index": 0
+        },
+        {
+          "songId": 0,
+          "name": "<redacted:string>",
+          "playCount": 0,
+          "index": 0
+        },
+        {
+          "songId": 0,
+          "name": "<redacted:string>",
+          "playCount": 0,
+          "index": 0
+        },
+        {
+          "songId": 0,
+          "name": "<redacted:string>",
+          "playCount": 0,
+          "index": 0
+        }
+      ],
+      "follow": false,
+      "singerPlayDays": 0,
+      "playUrl": {
+        "songId": 0,
+        "chorusStart": 0,
+        "chorusEnd": 0
+      },
+      "musicNobleDTOS": {
+        "artistId": "<redacted:string>",
+        "singerName": "<redacted:string>",
+        "singerPicUrl": "<redacted:string>",
+        "playCount": 0,
+        "singerPlayDays": 0,
+        "singerPlayDuration": 0,
+        "honourName": "<redacted:string>"
+      },
+      "likeCnt": 0
+    },
+    "annualSingerLetter": null,
+    "annualSingerComparePage": {
+      "singers": [
+        {
+          "year": 0,
+          "singerId": "<redacted:string>",
+          "singerName": "<redacted:string>",
+          "singerPicid": "<redacted:string>",
+          "singerPicUrl": "<redacted:string>"
+        },
+        {
+          "year": 0,
+          "singerId": "<redacted:string>",
+          "singerName": "<redacted:string>",
+          "singerPicid": "<redacted:string>",
+          "singerPicUrl": null
+        }
+      ]
+    }
+  },
+  "message": "<redacted:string>"
+}

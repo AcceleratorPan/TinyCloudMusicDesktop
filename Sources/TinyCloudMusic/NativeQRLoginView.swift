@@ -125,7 +125,7 @@ final class QRLoginController {
 
     func setActive(_ active: Bool) {
         if !active {
-            generation &+= 1
+            generation += 1
             pollingTask?.cancel()
             pollingTask = nil
         } else if pollingTask == nil {
@@ -138,7 +138,7 @@ final class QRLoginController {
     }
 
     func cancel() {
-        generation &+= 1
+        generation += 1
         pollingTask?.cancel()
         pollingTask = nil
     }
@@ -146,7 +146,7 @@ final class QRLoginController {
     private func replaceTask(
         _ operation: @escaping @MainActor (QRLoginController, Int) async -> Void
     ) {
-        generation &+= 1
+        generation += 1
         let generation = generation
         pollingTask?.cancel()
         pollingTask = Task { @MainActor [weak self] in

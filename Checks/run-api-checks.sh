@@ -17,6 +17,7 @@ COMMON_SOURCES=(
   Sources/TinyCloudMusic/MusicKnowledgeModels.swift
   Sources/TinyCloudMusic/RecommendationMemoryModels.swift
   Sources/TinyCloudMusic/Repository.swift
+  Sources/TinyCloudMusic/CredentialSnapshot.swift
   Sources/TinyCloudMusic/CredentialStore.swift
   Sources/TinyCloudMusic/EAPITransport.swift
   Sources/TinyCloudMusic/MusicDownloadModels.swift
@@ -46,6 +47,7 @@ COMMON_SOURCES=(
 swift build -j 4 -Xswiftc -warnings-as-errors
 swiftc \
   Sources/TinyCloudMusic/Models.swift \
+  Sources/TinyCloudMusic/CredentialSnapshot.swift \
   Sources/TinyCloudMusic/CredentialStore.swift \
   Sources/TinyCloudMusic/EAPITransport.swift \
   Sources/TinyCloudMusic/RecommendationMemoryModels.swift \
@@ -62,12 +64,14 @@ swiftc -parse-as-library -warnings-as-errors \
 /tmp/tinycloudmusic-personal-fm-queue-check
 swiftc -warnings-as-errors \
   Sources/TinyCloudMusic/EAPITransport.swift \
+  Sources/TinyCloudMusic/CredentialSnapshot.swift \
   Sources/TinyCloudMusic/CredentialStore.swift \
   Checks/EAPICheck.swift \
   -o /tmp/tinycloudmusic-eapi-check
 /tmp/tinycloudmusic-eapi-check
 swiftc -parse-as-library -warnings-as-errors \
   Sources/TinyCloudMusic/EAPITransport.swift \
+  Sources/TinyCloudMusic/CredentialSnapshot.swift \
   Sources/TinyCloudMusic/CredentialStore.swift \
   Checks/CacheCheck.swift \
   -o /tmp/tinycloudmusic-cache-check
@@ -108,9 +112,11 @@ swiftc -D AUDIO_UPLOAD_CHECK -warnings-as-errors \
 /tmp/tinycloudmusic-audio-upload-check
 swiftc -D MUSIC_KNOWLEDGE_CHECK -warnings-as-errors \
   Sources/TinyCloudMusic/Models.swift \
+  Sources/TinyCloudMusic/CredentialSnapshot.swift \
   Sources/TinyCloudMusic/CredentialStore.swift \
   Sources/TinyCloudMusic/EAPITransport.swift \
   Sources/TinyCloudMusic/MusicKnowledgeModels.swift \
+  Sources/TinyCloudMusic/MusicSheetWorker.swift \
   Tests/TinyCloudMusicTests/MusicKnowledgeTests.swift \
   -o /tmp/tinycloudmusic-knowledge-check
 /tmp/tinycloudmusic-knowledge-check

@@ -4,6 +4,7 @@ struct LiveMusicRepository: MusicRepository {
     private static let interfaceHost = "https://interface.music.163.com"
 
     let transport: EAPITransport
+    var currentCredentialRevision: UInt64 { transport.credentialSnapshotValue().revision }
 
     let homeDescriptors = [
         HomeSectionDescriptor(id: "PAGE_RECOMMEND_MY_SHEET", title: "我的歌单"),
@@ -28,7 +29,7 @@ struct LiveMusicRepository: MusicRepository {
 
     func lyrics(for songID: Int64) async throws -> SongLyrics {
         do {
-            let data = try await request(
+            let root = try await request(
                 EAPIEndpoint(
                     "/eapi/song/lyric/v1",
                     signing: "/api/song/lyric/v1",
@@ -40,16 +41,16 @@ struct LiveMusicRepository: MusicRepository {
                 ],
                 cache: .lyrics
             )
-            return try decodeLyrics(data)
+            return decodeLyrics(root)
         } catch is CancellationError {
             throw CancellationError()
         } catch where Self.isLyricCompatibilityError(error) {
-            let data = try await request(
+            let root = try await request(
                 EAPIEndpoint("/eapi/song/lyric"),
                 payload: ["id": songID, "lv": -1, "kv": -1, "tv": -1, "yv": -1],
                 cache: .lyrics
             )
-            return try decodeLyrics(data)
+            return decodeLyrics(root)
         }
     }
 
@@ -72,7 +73,7 @@ struct LiveMusicRepository: MusicRepository {
             return try await transport.withVIPRequesterFallback(
                 fallbackOn: { $0 is PlaybackUnavailableError }
             ) { credential in
-                let data = try await request(
+                let root = try await request(
                     EAPIEndpoint(
                         "/eapi/song/enhance/player/url/v1",
                         signing: "/api/song/enhance/player/url/v1",
@@ -84,7 +85,7 @@ struct LiveMusicRepository: MusicRepository {
                     iPhoneClient: true
                 )
                 return try Self.decodePlaybackSource(
-                    data,
+                    root,
                     expectedSongID: songID,
                     requestedLevel: level,
                     requiresExactLevel: requiresExactLevel
@@ -133,12 +134,12 @@ struct LiveMusicRepository: MusicRepository {
                 cache: .detail
             )
             let result = try await (qualityData, privilegeData)
-            return try Self.decodeSongQualityDetails(result.0, privileges: result.1)
+            return Self.decodeSongQualityDetails(result.0, privileges: result.1)
         }
     }
 
     func copyrightAlternatives(for songID: Int64) async throws -> [Song] {
-        let data = try await request(
+        let root = try await request(
             EAPIEndpoint(
                 "/eapi/song/copyright/rcmd",
                 signing: "/api/song/copyright/rcmd",
@@ -148,7 +149,7 @@ struct LiveMusicRepository: MusicRepository {
             payload: ["songid": songID],
             cache: .detail
         )
-        return try decodeCopyrightAlternatives(data)
+        return decodeCopyrightAlternatives(root)
     }
 
     func heartModeSongs(seedSongID: Int64, playlistID: Int64?, startSongID: Int64) async throws -> [Song] {
@@ -156,7 +157,7 @@ struct LiveMusicRepository: MusicRepository {
         if let playlistID {
             guard playlistID > 0 else { throw EAPIError.invalidPayload }
             do {
-                let data = try await request(
+                let root = try await request(
                     EAPIEndpoint(
                         "/eapi/playmode/intelligence/list",
                         signing: "/api/playmode/intelligence/list",
@@ -170,7 +171,7 @@ struct LiveMusicRepository: MusicRepository {
                         "count": 1
                     ]
                 )
-                let songs = try decodeHeartModeSongs(data)
+                let songs = decodeHeartModeSongs(root)
                 if !songs.isEmpty { return songs }
             } catch is CancellationError {
                 throw CancellationError()
@@ -181,7 +182,10 @@ struct LiveMusicRepository: MusicRepository {
     }
 
     func decodeHeartModeSongs(_ data: Data) throws -> [Song] {
-        let root = try decodedJSONObject(data)
+        decodeHeartModeSongs(try decodedJSONObject(data))
+    }
+
+    func decodeHeartModeSongs(_ root: [String: Any]) -> [Song] {
         let values = root.array("data").isEmpty ? root.object("data").array("songs") : root.array("data")
         return values.compactMap { item in
             var songInfo = item.object("songInfo")
@@ -191,12 +195,18 @@ struct LiveMusicRepository: MusicRepository {
         }
     }
 
-    func recordPlaybackStart(for songID: Int64, sourceID: Int64, totalSeconds: Int) async throws {
+    func recordPlaybackStart(
+        for songID: Int64,
+        sourceID: Int64,
+        totalSeconds: Int,
+        expectedCredentialRevision: UInt64
+    ) async throws {
         try await uploadPlaybackReport(
             songID: songID,
             sourceID: sourceID,
             totalSeconds: totalSeconds,
-            event: .start
+            event: .start,
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
@@ -204,36 +214,38 @@ struct LiveMusicRepository: MusicRepository {
         for songID: Int64,
         sourceID: Int64,
         playedSeconds: Int,
-        totalSeconds: Int
+        totalSeconds: Int,
+        expectedCredentialRevision: UInt64
     ) async throws {
         try await uploadPlaybackReport(
             songID: songID,
             sourceID: sourceID,
             totalSeconds: totalSeconds,
-            event: .play(seconds: playedSeconds)
+            event: .play(seconds: playedSeconds),
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
     func recordPodcastPlayback(
         for episodeID: Int64,
         positionMilliseconds: Int,
-        completed: Bool
+        completed: Bool,
+        expectedCredentialRevision: UInt64
     ) async throws {
         guard episodeID > 0, positionMilliseconds > 0 else { throw EAPIError.invalidPayload }
-        _ = try decodedJSONObject(
-            try await transport.request(
-                EAPIEndpoint(
-                    "/eapi/dj/playrecord/upload",
-                    signing: "/api/dj/playrecord/upload"
-                ),
-                json: try compactJSON([
-                    "programId": String(episodeID),
-                    "listenLocation": String(positionMilliseconds),
-                    "isListened": String(completed)
-                ]),
-                invalidatesAccountCache: true,
-                retryable: false
-            )
+        _ = try await transport.requestJSONObject(
+            EAPIEndpoint(
+                "/eapi/dj/playrecord/upload",
+                signing: "/api/dj/playrecord/upload"
+            ),
+            json: try compactJSON([
+                "programId": String(episodeID),
+                "listenLocation": String(positionMilliseconds),
+                "isListened": String(completed)
+            ]),
+            expectedCredentialRevision: expectedCredentialRevision,
+            invalidatesGroups: [.listeningHistory],
+            retryable: false
         )
     }
 
@@ -241,9 +253,12 @@ struct LiveMusicRepository: MusicRepository {
         songID: Int64,
         sourceID: Int64,
         totalSeconds: Int,
-        event: NCBLPlaybackEvent
+        event: NCBLPlaybackEvent,
+        expectedCredentialRevision: UInt64
     ) async throws {
-        let credentials = transport.playbackCredentials()
+        let credentials = try transport.playbackCredentials(
+            expectedCredentialRevision: expectedCredentialRevision
+        )
         let upload = try NCBLPlaybackReport.upload(
             cookie: credentials.cookie,
             deviceID: credentials.deviceID,
@@ -253,11 +268,13 @@ struct LiveMusicRepository: MusicRepository {
             totalSeconds: totalSeconds,
             event: event
         )
-        try NCBLPlaybackReport.validateResponse(
-            try await transport.requestRaw(upload.request, restrictsRedirects: true),
-            fileName: upload.fileName
+        _ = try await transport.requestRaw(
+            upload.request,
+            restrictsRedirects: true,
+            expectedCredentialRevision: expectedCredentialRevision,
+            validateResponse: { try NCBLPlaybackReport.validateResponse($0, fileName: upload.fileName) },
+            invalidatesGroups: [.listeningHistory]
         )
-        await transport.invalidateAllCachedResponses()
     }
 
     private func playbackLevel(for songID: Int64, quality: AudioQuality) async throws -> String {
@@ -283,20 +300,21 @@ struct LiveMusicRepository: MusicRepository {
         payload: [String: Any],
         vipCredential: VIPRequesterCredential? = nil,
         iPhoneClient: Bool = false,
-        cache: EAPIReadCache? = nil
-    ) async throws -> Data {
-        try await transport.request(
+        cache: EAPIReadCache? = nil,
+        expectedCredentialRevision: UInt64? = nil
+    ) async throws -> [String: Any] {
+        try await transport.requestJSONObject(
             endpoint,
             json: compactJSON(payload),
             vip: vipCredential != nil,
             useStoredCookieForVIP: vipCredential == .storedCookie,
             cache: cache,
+            expectedCredentialRevision: expectedCredentialRevision,
             iPhoneClient: iPhoneClient
         )
     }
 
-    private func decodeLyrics(_ data: Data) throws -> SongLyrics {
-        let root = try decodedJSONObject(data)
+    private func decodeLyrics(_ root: [String: Any]) -> SongLyrics {
         func lyric(_ key: String) -> String? {
             let value = root.object(key).string("lyric")
             return value.isEmpty ? nil : value
@@ -329,7 +347,21 @@ struct LiveMusicRepository: MusicRepository {
         requestedLevel: String,
         requiresExactLevel: Bool = false
     ) throws -> PlaybackSource {
-        guard let item = try decodedJSONObject(data).array("data").first else {
+        try decodePlaybackSource(
+            decodedJSONObject(data),
+            expectedSongID: expectedSongID,
+            requestedLevel: requestedLevel,
+            requiresExactLevel: requiresExactLevel
+        )
+    }
+
+    static func decodePlaybackSource(
+        _ root: [String: Any],
+        expectedSongID: Int64,
+        requestedLevel: String,
+        requiresExactLevel: Bool = false
+    ) throws -> PlaybackSource {
+        guard let item = root.array("data").first else {
             throw EAPIError.missingData("data[0]")
         }
         let songID = item.int64("id")
@@ -389,8 +421,18 @@ struct LiveMusicRepository: MusicRepository {
     }
 
     static func decodeSongQualityDetails(_ data: Data, privileges privilegeData: Data) throws -> [SongQualityDetail] {
-        let values = try decodedJSONObject(data).object("data")
-        let privilege = try decodedJSONObject(privilegeData).array("privileges").first ?? [:]
+        try decodeSongQualityDetails(
+            decodedJSONObject(data),
+            privileges: decodedJSONObject(privilegeData)
+        )
+    }
+
+    static func decodeSongQualityDetails(
+        _ root: [String: Any],
+        privileges privilegeRoot: [String: Any]
+    ) -> [SongQualityDetail] {
+        let values = root.object("data")
+        let privilege = privilegeRoot.array("privileges").first ?? [:]
         let levelRanks = [
             "standard": 0, "higher": 1, "exhigh": 2, "lossless": 3, "hires": 4,
             "jyeffect": 5, "dolby": 6, "sky": 6, "jymaster": 6
@@ -420,7 +462,11 @@ struct LiveMusicRepository: MusicRepository {
     }
 
     func decodeCopyrightAlternatives(_ data: Data) throws -> [Song] {
-        let recommendation = try decodedJSONObject(data).object("data").object("rcmd")
+        decodeCopyrightAlternatives(try decodedJSONObject(data))
+    }
+
+    func decodeCopyrightAlternatives(_ root: [String: Any]) -> [Song] {
+        let recommendation = root.object("data").object("rcmd")
         return decodeSong(recommendation).map { [$0] } ?? []
     }
 }

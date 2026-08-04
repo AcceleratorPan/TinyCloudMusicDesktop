@@ -172,6 +172,43 @@ enum ListenTogetherPlaylistCommandType: String, CaseIterable, Sendable {
     case replace = "REPLACE"
 }
 
+enum ListenTogetherPlaylistValidator {
+    static func isValid(
+        display: [Int64],
+        random: [Int64],
+        anchorSongID: Int64?,
+        anchorPosition: Int,
+        playMode: ListenTogetherPlayMode?,
+        allowsEmptyDisplay: Bool = false
+    ) -> Bool {
+        guard allowsEmptyDisplay || !display.isEmpty,
+              display.allSatisfy({ $0 > 0 }),
+              Set(display).count == display.count,
+              random.allSatisfy({ $0 > 0 }),
+              Set(random).count == random.count,
+              random.isEmpty || (random.count == display.count && Set(random) == Set(display))
+        else { return false }
+
+        if let anchorSongID {
+            guard anchorSongID > 0,
+                  let index = display.firstIndex(of: anchorSongID),
+                  anchorPosition == index
+            else { return false }
+        } else if anchorPosition != -1 {
+            return false
+        }
+
+        switch playMode {
+        case .orderLoop, .singleLoop:
+            return random.isEmpty || random == display
+        case .random:
+            return !random.isEmpty
+        case nil:
+            return true
+        }
+    }
+}
+
 struct ListenTogetherPlayCommand: Equatable, Sendable {
     let commandType: ListenTogetherPlayCommandType
     let progress: Int64
@@ -224,10 +261,13 @@ struct ListenTogetherPlaylistCommand: Equatable, Sendable {
     ) throws {
         guard userID > 0,
               version >= 0,
-              anchorSongID.map({ $0 > 0 }) ?? true,
-              anchorPosition >= -1,
-              randomList.allSatisfy({ $0 > 0 }),
-              displayList.allSatisfy({ $0 > 0 })
+              ListenTogetherPlaylistValidator.isValid(
+                display: displayList,
+                random: randomList,
+                anchorSongID: anchorSongID,
+                anchorPosition: anchorPosition,
+                playMode: playMode
+              )
         else { throw EAPIError.invalidPayload }
         self.commandType = commandType
         self.userID = userID
@@ -242,14 +282,21 @@ struct ListenTogetherPlaylistCommand: Equatable, Sendable {
 
 enum ListenTogetherResponseDecoder {
     static func room(from data: Data, currentUserID: Int64) throws -> ListenTogetherRoom {
-        let root = try decodedJSONObject(data)
+        try room(from: decodedJSONObject(data), currentUserID: currentUserID)
+    }
+
+    static func room(from root: [String: Any], currentUserID: Int64) throws -> ListenTogetherRoom {
         let nested = root.object("data").object("roomInfo")
         let value = nested.isEmpty ? root.object("roomInfo") : nested
-        return try room(from: value, currentUserID: currentUserID)
+        return try decodeRoom(from: value, currentUserID: currentUserID)
     }
 
     static func roomCheck(from data: Data) throws -> ListenTogetherRoomCheck {
-        let value = try decodedJSONObject(data).object("data")
+        try roomCheck(from: decodedJSONObject(data))
+    }
+
+    static func roomCheck(from root: [String: Any]) throws -> ListenTogetherRoomCheck {
+        let value = root.object("data")
         let status = string(value["status"])
         guard isProtocolValue(status), let joinable = boolean(value["joinable"]) else {
             throw EAPIError.invalidResponse
@@ -259,16 +306,24 @@ enum ListenTogetherResponseDecoder {
     }
 
     static func status(from data: Data, currentUserID: Int64) throws -> ListenTogetherStatus {
-        let value = try decodedJSONObject(data).object("data")
+        try status(from: decodedJSONObject(data), currentUserID: currentUserID)
+    }
+
+    static func status(from root: [String: Any], currentUserID: Int64) throws -> ListenTogetherStatus {
+        let value = root.object("data")
         guard let inRoom = boolean(value["inRoom"]) else { throw EAPIError.invalidResponse }
-        let room = inRoom ? try room(from: value.object("roomInfo"), currentUserID: currentUserID) : nil
+        let room = inRoom ? try decodeRoom(from: value.object("roomInfo"), currentUserID: currentUserID) : nil
         let status = string(value["status"])
         guard status.isEmpty || isProtocolValue(status) else { throw EAPIError.invalidResponse }
         return ListenTogetherStatus(inRoom: inRoom, status: status, room: room)
     }
 
     static func heartbeat(from data: Data) throws -> ListenTogetherHeartbeat {
-        let value = try decodedJSONObject(data).object("data")
+        try heartbeat(from: decodedJSONObject(data))
+    }
+
+    static func heartbeat(from root: [String: Any]) throws -> ListenTogetherHeartbeat {
+        let value = root.object("data")
         guard let succeeded = boolean(value["result"]),
               let intervalValue = number(value["timeSpan"]),
               let interval = Int(exactly: intervalValue),
@@ -278,13 +333,21 @@ enum ListenTogetherResponseDecoder {
     }
 
     static func succeeded(from data: Data) throws -> Bool {
-        let value = try decodedJSONObject(data).object("data")
+        try succeeded(from: decodedJSONObject(data))
+    }
+
+    static func succeeded(from root: [String: Any]) throws -> Bool {
+        let value = root.object("data")
         guard let result = boolean(value["result"] ?? value["success"]) else { throw EAPIError.invalidResponse }
         return result
     }
 
     static func realtimeCredentials(from data: Data) throws -> ListenTogetherRealtimeCredentials {
-        let value = try decodedJSONObject(data).object("data")
+        try realtimeCredentials(from: decodedJSONObject(data))
+    }
+
+    static func realtimeCredentials(from root: [String: Any]) throws -> ListenTogetherRealtimeCredentials {
+        let value = root.object("data")
         let accountID = string(value["accId"])
         let token = string(value["token"])
         guard let addresses = stringArray(value["addr"] ?? []) else { throw EAPIError.invalidResponse }
@@ -299,19 +362,31 @@ enum ListenTogetherResponseDecoder {
     }
 
     static func authoritativeState(from data: Data) throws -> ListenTogetherAuthoritativeState? {
-        let data = try decodedJSONObject(data).object("data")
+        try authoritativeState(from: decodedJSONObject(data))
+    }
+
+    static func authoritativeState(from root: [String: Any]) throws -> ListenTogetherAuthoritativeState? {
+        let data = root.object("data")
         let playList = data.object("playList")
         let playlist = data.object("playlist")
         let value = !playList.isEmpty ? playList : (playlist.isEmpty ? data : playlist)
         guard !value.isEmpty else { return nil }
         guard let display = songIDs(value["displayList"]),
-              let random = songIDs(value["randomList"]),
-              !display.isEmpty,
-              Set(display).count == display.count,
-              random.isEmpty || (random.count == display.count && Set(random) == Set(display))
+              let random = songIDs(value["randomList"])
         else { throw EAPIError.invalidResponse }
         let anchor = positiveID(value["anchorSongId"])
-        if let anchor, !display.contains(anchor) { throw EAPIError.invalidResponse }
+        guard let anchorPosition = number(value["anchorPosition"]).flatMap(Int.init(exactly:)) else {
+            throw EAPIError.invalidResponse
+        }
+        let playMode = optionalString(value["playMode"]).flatMap(ListenTogetherPlayMode.init(rawValue:))
+        if value["playMode"] != nil, playMode == nil { throw EAPIError.invalidResponse }
+        guard ListenTogetherPlaylistValidator.isValid(
+            display: display,
+            random: random,
+            anchorSongID: anchor,
+            anchorPosition: anchorPosition,
+            playMode: playMode
+        ) else { throw EAPIError.invalidResponse }
         let versionValues = value["version"] as? [[String: Any]] ?? []
         let versions = versionValues.compactMap { number($0["version"]) }
         guard versions.count == versionValues.count else { throw EAPIError.invalidResponse }
@@ -329,6 +404,10 @@ enum ListenTogetherResponseDecoder {
 
     static func playlist(from data: Data) throws -> ListenTogetherPlaylist? {
         try authoritativeState(from: data)?.playlist
+    }
+
+    static func playlist(from root: [String: Any]) throws -> ListenTogetherPlaylist? {
+        try authoritativeState(from: root)?.playlist
     }
 
     static func remoteEvent(from raw: String) throws -> ListenTogetherRemoteEvent {
@@ -383,7 +462,8 @@ enum ListenTogetherResponseDecoder {
             let values = payload["ignoreUserIds"] as? [Any] ?? []
             let ignoredUserIDs = values.compactMap(number)
             guard ignoredUserIDs.count == values.count,
-                  ignoredUserIDs.allSatisfy({ $0 > 0 })
+                  ignoredUserIDs.allSatisfy({ $0 > 0 }),
+                  Set(ignoredUserIDs).count == ignoredUserIDs.count
             else { throw EAPIError.invalidResponse }
             return .heartbeatRequested(ignoredUserIDs: ignoredUserIDs)
         default:
@@ -414,7 +494,7 @@ enum ListenTogetherResponseDecoder {
         )
     }
 
-    private static func room(
+    private static func decodeRoom(
         from value: [String: Any],
         currentUserID: Int64
     ) throws -> ListenTogetherRoom {

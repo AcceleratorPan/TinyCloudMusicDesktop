@@ -168,10 +168,23 @@ enum LiveAPICheck {
 
         if let artist {
             _ = await check("detail.artist") { try await repository.detail(for: .artist(artist.id)) }
-            _ = await check("artist.albums") { try await extras.artistAlbums(artistID: artist.id) }
-            _ = await check("artist.followStatus") { try await extras.artistFollowStatus(artistID: artist.id) }
+            _ = await check("artist.albums") {
+                try await extras.artistAlbums(
+                    artistID: artist.id,
+                    expectedCredentialRevision: repository.currentCredentialRevision
+                )
+            }
+            _ = await check("artist.followStatus") {
+                try await extras.artistFollowStatus(
+                    artistID: artist.id,
+                    expectedCredentialRevision: repository.currentCredentialRevision
+                )
+            }
             _ = await check("similar.artist", required: hasAccountCredentials) {
-                try await library.similarArtists(to: artist.id)
+                try await library.similarArtists(
+                    to: artist.id,
+                    expectedCredentialRevision: repository.currentCredentialRevision
+                )
             }
         } else {
             failed.append("search.artist: no decodable artist")
@@ -179,7 +192,12 @@ enum LiveAPICheck {
 
         if let album {
             _ = await check("detail.album") { try await repository.detail(for: .album(album.id)) }
-            _ = await check("album.subscription") { try await extras.albumSubscription(albumID: album.id) }
+            _ = await check("album.subscription") {
+                try await extras.albumSubscription(
+                    albumID: album.id,
+                    expectedCredentialRevision: repository.currentCredentialRevision
+                )
+            }
         } else {
             failed.append("search.album: no decodable album")
         }
@@ -204,7 +222,10 @@ enum LiveAPICheck {
 
         for descriptor in repository.homeDescriptors {
             _ = await check("home.\(descriptor.id)", required: hasAccountCredentials) {
-                try await repository.homeSection(id: descriptor.id)
+                try await repository.homeSection(
+                    id: descriptor.id,
+                    expectedCredentialRevision: repository.currentCredentialRevision
+                )
             }
         }
 
@@ -227,6 +248,7 @@ enum LiveAPICheck {
 
         let login = await check("account.loginState") { try await library.loginState() }
         if case let .loggedIn(account)? = login {
+            let expectedCredentialRevision = repository.transport.credentialSnapshotValue().revision
             _ = await check("account.dailyRecommendations") { try await library.dailyRecommendations() }
             let fmModes: [PersonalFMMode] = [
                 .standard, .familiar, .explore,
@@ -234,7 +256,10 @@ enum LiveAPICheck {
             ]
             for mode in fmModes {
                 _ = await check("account.personalFM.\(mode.requestValues.mode).\(mode.requestValues.subMode)") {
-                    let tracks = try await library.personalFM(mode: mode)
+                    let tracks = try await library.personalFM(
+                        mode: mode,
+                        expectedCredentialRevision: expectedCredentialRevision
+                    )
                     guard !tracks.isEmpty else { throw EAPIError.missingData("data") }
                     return tracks
                 }
@@ -263,7 +288,11 @@ enum LiveAPICheck {
             _ = await check("account.vipStatus") { try await library.hasActiveVIP() }
             if let song {
                 _ = await check("account.availablePlaylists") {
-                    try await extras.availablePlaylists(userID: account.id, trackID: song.id)
+                    try await extras.availablePlaylists(
+                        userID: account.id,
+                        trackID: song.id,
+                        expectedCredentialRevision: expectedCredentialRevision
+                    )
                 }
             }
             if ProcessInfo.processInfo.environment["TINYCLOUDMUSIC_MUTATING_API_CHECK"] == "YES", let song {
@@ -276,6 +305,7 @@ enum LiveAPICheck {
                     album: album,
                     playlist: playlist,
                     user: user,
+                    expectedCredentialRevision: expectedCredentialRevision,
                     passed: &passed,
                     failed: &failed,
                     skipped: &skipped
@@ -344,19 +374,46 @@ enum LiveAPICheck {
         album: Album?,
         playlist: Playlist?,
         user: UserProfile?,
+        expectedCredentialRevision: UInt64,
         passed: inout [String],
         failed: inout [String],
         skipped: inout [String]
     ) async {
         do {
-            let id = try await library.createPlaylist(name: "Tiny Cloud Music API Check \(UUID().uuidString.prefix(8))")
+            let id = try await library.createPlaylist(
+                name: "Tiny Cloud Music API Check \(UUID().uuidString.prefix(8))",
+                expectedCredentialRevision: expectedCredentialRevision
+            )
             do {
-                try await library.updatePlaylistName(id, name: "Tiny Cloud Music \"Edit\" 🎵")
-                try await library.updatePlaylistDescription(id, description: "line 1\nline 2")
-                try await library.updatePlaylistTags(id, tags: ["学习", "华语"])
-                try await library.addSongs([song.id], to: id)
-                try await library.removeSongs([song.id], from: id)
-                try await library.deletePlaylist(id)
+                try await library.updatePlaylistName(
+                    id,
+                    name: "Tiny Cloud Music \"Edit\" 🎵",
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+                try await library.updatePlaylistDescription(
+                    id,
+                    description: "line 1\nline 2",
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+                try await library.updatePlaylistTags(
+                    id,
+                    tags: ["学习", "华语"],
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+                try await library.addSongs(
+                    [song.id],
+                    to: id,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+                try await library.removeSongs(
+                    [song.id],
+                    from: id,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+                try await library.deletePlaylist(
+                    id,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
                 passed += [
                     "write.playlistCreate",
                     "write.playlistName",
@@ -367,7 +424,10 @@ enum LiveAPICheck {
                     "write.playlistDelete"
                 ]
             } catch {
-                try? await library.deletePlaylist(id)
+                try? await library.deletePlaylist(
+                    id,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
                 throw error
             }
         } catch {
@@ -375,18 +435,54 @@ enum LiveAPICheck {
         }
 
         let liked = (try? await extras.favoriteSongIDs(userID: account.id).contains(song.id)) ?? false
-        await reversible("write.songLike", initial: liked, set: { try await library.setSongLiked(song.id, liked: $0) }, passed: &passed, failed: &failed)
-        if let artist, let state = try? await extras.artistFollowStatus(artistID: artist.id) {
-            await reversible("write.artistFollow", initial: state.isFollowed, set: { try await library.setArtistFollowed(artist.id, followed: $0) }, passed: &passed, failed: &failed)
+        await reversible("write.songLike", initial: liked, set: {
+            try await library.setSongLiked(
+                song.id,
+                liked: $0,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
+        }, passed: &passed, failed: &failed)
+        if let artist, let state = try? await extras.artistFollowStatus(
+            artistID: artist.id,
+            expectedCredentialRevision: expectedCredentialRevision
+        ) {
+            await reversible("write.artistFollow", initial: state.isFollowed, set: {
+                try await library.setArtistFollowed(
+                    artist.id,
+                    followed: $0,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+            }, passed: &passed, failed: &failed)
         } else { skipped.append("write.artistFollow: no fixture") }
-        if let album, let state = try? await extras.albumSubscription(albumID: album.id) {
-            await reversible("write.albumSubscribe", initial: state.isSubscribed, set: { try await library.setAlbumSubscribed(album.id, subscribed: $0) }, passed: &passed, failed: &failed)
+        if let album, let state = try? await extras.albumSubscription(
+            albumID: album.id,
+            expectedCredentialRevision: expectedCredentialRevision
+        ) {
+            await reversible("write.albumSubscribe", initial: state.isSubscribed, set: {
+                try await library.setAlbumSubscribed(
+                    album.id,
+                    subscribed: $0,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+            }, passed: &passed, failed: &failed)
         } else { skipped.append("write.albumSubscribe: no fixture") }
         if let playlist {
-            await reversible("write.playlistSubscribe", initial: playlist.isSubscribed, set: { try await library.setPlaylistSubscribed(playlist.id, subscribed: $0) }, passed: &passed, failed: &failed)
+            await reversible("write.playlistSubscribe", initial: playlist.isSubscribed, set: {
+                try await library.setPlaylistSubscribed(
+                    playlist.id,
+                    subscribed: $0,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+            }, passed: &passed, failed: &failed)
         } else { skipped.append("write.playlistSubscribe: no fixture") }
         if let user {
-            await reversible("write.userFollow", initial: user.isFollowed, set: { try await library.setUserFollowed(user.id, followed: $0) }, passed: &passed, failed: &failed)
+            await reversible("write.userFollow", initial: user.isFollowed, set: {
+                try await library.setUserFollowed(
+                    user.id,
+                    followed: $0,
+                    expectedCredentialRevision: expectedCredentialRevision
+                )
+            }, passed: &passed, failed: &failed)
         } else { skipped.append("write.userFollow: no fixture") }
     }
 

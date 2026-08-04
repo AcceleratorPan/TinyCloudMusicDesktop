@@ -1,4 +1,6 @@
 import AppKit
+import Observation
+import QuartzCore
 import SwiftUI
 
 @main
@@ -16,18 +18,67 @@ enum TinyCloudMusicApp {
     }
 }
 
+enum AppCredentialBootstrapResult: Equatable, Sendable {
+    case loaded(CredentialSnapshotState)
+    case failed
+}
+
+enum AppCredentialBootstrap {
+    static func start(
+        load: @escaping @Sendable () throws -> CredentialSnapshotState
+    ) -> Task<AppCredentialBootstrapResult, Never> {
+        Task.detached(priority: .userInitiated) {
+            do {
+                return .loaded(try load())
+            } catch {
+                return .failed
+            }
+        }
+    }
+}
+
+enum AppTerminationDeadline {
+    static func wait(for cleanup: Task<Void, Never>, timeout: Duration) async -> Bool {
+        let (events, continuation) = AsyncStream<Bool>.makeStream(bufferingPolicy: .bufferingOldest(1))
+        let completion = Task {
+            await cleanup.value
+            continuation.yield(true)
+        }
+        let deadline = Task {
+            do {
+                try await Task.sleep(for: timeout)
+                continuation.yield(false)
+            } catch {}
+        }
+        for await completed in events {
+            completion.cancel()
+            deadline.cancel()
+            continuation.finish()
+            return completed
+        }
+        return false
+    }
+}
+
 @MainActor
-private final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow?
     private var nowPlayingWindow: NSWindow?
     private var settingsWindow: NSWindow?
     private var menuBarPlayer: MenuBarPlayerController?
     private var model: AppModel?
+    private var player: PlayerController?
     private var credentialObserver: NSObjectProtocol?
     private var sleepObserver: NSObjectProtocol?
     private var wakeObserver: NSObjectProtocol?
+    private var credentialBootstrapTask: Task<AppCredentialBootstrapResult, Never>?
+    private var sheetCleanupTask: Task<Void, Never>?
     private var terminationConfirmed = false
     private var terminationTask: Task<Void, Never>?
+    private var terminationCleanupTask: Task<Void, Never>?
+
+    var hasNowPlayingWindow: Bool { nowPlayingWindow != nil }
+    var hasSettingsWindow: Bool { settingsWindow != nil }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
@@ -40,10 +91,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             return value
         }
         let credentialStore = CredentialStore(service: CredentialStore.productionService)
+        let cookieOverride = credentialOverride("TINYCLOUDMUSIC_COOKIE")
+        let musicUOverride = credentialOverride("TINYCLOUDMUSIC_MUSIC_U")
+        let credentialSnapshot = CredentialSnapshot()
+        credentialBootstrapTask = AppCredentialBootstrap.start {
+            try credentialStore.loadSnapshotState()
+        }
         let transport = EAPITransport(
-            cookie: credentialOverride("TINYCLOUDMUSIC_COOKIE"),
-            musicU: credentialOverride("TINYCLOUDMUSIC_MUSIC_U"),
-            loadStoredCredentials: { try? credentialStore.load() }
+            cookie: cookieOverride,
+            musicU: musicUOverride,
+            credentialSnapshot: credentialSnapshot
         )
         let repository = LiveMusicRepository(transport: transport)
         let library = LiveMusicLibrary(transport: transport)
@@ -51,7 +108,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let audioLibrary = LiveAudioContentLibrary(transport: transport)
         let knowledgeLibrary = LiveMusicKnowledgeLibrary(transport: transport)
         let extras = LiveMusicExtras(transport: transport)
-        MusicSheetTemporaryFiles.cleanupExpired()
+        sheetCleanupTask = Task { [weak self] in
+            await MusicSheetWorker.shared.cleanupExpired()
+            self?.sheetCleanupTask = nil
+        }
         let storedConcurrency = UserDefaults.standard.object(forKey: "downloadConcurrency") == nil
             ? 3
             : UserDefaults.standard.integer(forKey: "downloadConcurrency")
@@ -65,6 +125,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         let session = SessionController(
             store: credentialStore,
+            credentialSnapshot: credentialSnapshot,
             transport: transport,
             validator: { credentials in
                 let validator = LiveMusicLibrary(
@@ -92,13 +153,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             session: session
         )
         self.model = model
-        ArtworkPipeline.shared.configure(cacheRoot: model.cacheFolderURL)
-        let player = PlayerController(
-            repository: repository,
+        let initialCacheConfiguration = CacheConfigurationSnapshot(
             playbackQuality: model.settings.playbackQuality,
             cacheRoot: model.cacheFolderURL,
+            revision: model.cacheConfigurationRevision
+        )
+        ArtworkPipeline.shared.configure(cacheRoot: initialCacheConfiguration.cacheRoot)
+        let player = PlayerController(
+            repository: repository,
+            playbackQuality: initialCacheConfiguration.playbackQuality,
+            cacheRoot: initialCacheConfiguration.cacheRoot,
             crossfadeDuration: model.settings.crossfadeDuration
         )
+        self.player = player
         let listenTogether = ListenTogetherController(
             service: LiveListenTogetherService(transport: transport),
             player: player
@@ -129,9 +196,22 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             player: player,
             onTrashSucceeded: { [weak model] in model?.showToast("已减少这首歌的推荐") }
         )
-        let rootView = RootView(model: model, player: player) { [weak self] in
-            self?.openNowPlaying(model: model, player: player)
-        }
+        let rootView = RootView(
+            model: model,
+            player: player,
+            initialCacheConfiguration: initialCacheConfiguration,
+            openNowPlaying: { [weak self] in
+                self?.openNowPlaying(model: model, player: player)
+            },
+            start: { [weak self, weak session, weak player] in
+                guard let self, let session, let player else { return false }
+                return await self.finishCredentialBootstrap(
+                    credentialSnapshot,
+                    session: session,
+                    player: player
+                )
+            }
+        )
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 760),
@@ -151,23 +231,41 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
-    private func openNowPlaying(model: AppModel, player: PlayerController) {
+    private func finishCredentialBootstrap(
+        _ snapshot: CredentialSnapshot,
+        session: SessionController,
+        player: PlayerController
+    ) async -> Bool {
+        if let task = credentialBootstrapTask {
+            credentialBootstrapTask = nil
+            if case let .loaded(state) = await task.value {
+                snapshot.store(state)
+            }
+        }
+        await session.restore()
+        player.setAccountCredentialRevision(session.credentialRevision)
+        if case .unavailable = snapshot.load().state { return false }
+        return true
+    }
+
+    @discardableResult
+    func openNowPlaying(model: AppModel, player: PlayerController) -> NSWindow {
         if let nowPlayingWindow {
             nowPlayingWindow.deminiaturize(nil)
             nowPlayingWindow.makeKeyAndOrderFront(nil)
-            return
+            return nowPlayingWindow
         }
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 940, height: 720),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "正在播放"
         window.contentMinSize = NSSize(width: 780, height: 720)
-        window.contentMaxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: 720)
         window.isReleasedWhenClosed = false
+        window.delegate = self
         window.contentViewController = NSHostingController(
             rootView: NowPlayingDetailView(model: model, player: player) { [weak window] in
                 window?.close()
@@ -176,14 +274,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         window.center()
         window.makeKeyAndOrderFront(nil)
         nowPlayingWindow = window
+        return window
     }
 
     @objc private func openSettings(_ sender: Any?) {
-        guard let model else { return }
+        guard let model, let player else { return }
+        openSettings(model: model, player: player)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    @discardableResult
+    func openSettings(model: AppModel, player: PlayerController) -> NSWindow {
         if let settingsWindow {
             settingsWindow.makeKeyAndOrderFront(nil)
-            NSApplication.shared.activate(ignoringOtherApps: true)
-            return
+            return settingsWindow
         }
         if let session = model.session, session.state == .error {
             Task { await session.restore() }
@@ -198,10 +302,25 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsWindow.title = "设置"
         settingsWindow.minSize = NSSize(width: 640, height: 560)
         settingsWindow.isReleasedWhenClosed = false
-        settingsWindow.contentViewController = NSHostingController(rootView: SettingsView(model: model))
+        settingsWindow.delegate = self
+        settingsWindow.contentViewController = NSHostingController(
+            rootView: SettingsView(model: model, player: player)
+        )
         settingsWindow.center()
         settingsWindow.makeKeyAndOrderFront(nil)
         self.settingsWindow = settingsWindow
+        return settingsWindow
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        if window === nowPlayingWindow {
+            window.contentViewController = nil
+            nowPlayingWindow = nil
+        } else if window === settingsWindow {
+            window.contentViewController = nil
+            settingsWindow = nil
+        }
     }
 
     private func observeCredentialIssues(_ session: SessionController) {
@@ -210,13 +329,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil,
             queue: .main
         ) { [weak self, weak session] notification in
-            guard let value = notification.object as? String,
-                  let issue = SessionCredentialIssue(rawValue: value)
-            else { return }
+            guard let event = notification.object as? SessionCredentialIssueEvent else { return }
             Task { @MainActor in
-                guard let session, session.invalidate(issue) else { return }
-                if issue == .cookie { await session.restore() }
-                self?.presentCredentialAlert(issue)
+                guard let session, session.invalidate(event) else { return }
+                if event.issue == .cookie { await session.restore() }
+                self?.presentCredentialAlert(event.issue)
             }
         }
     }
@@ -291,17 +408,33 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let downloads = model?.downloads
         let uploads = model?.uploads
         let listenTogether = model?.listenTogether
-        guard downloads?.runningDownloadCount ?? 0 > 0
-                || downloads?.queuedDownloadCount ?? 0 > 0
-                || uploads?.isActive == true
-                || listenTogether?.requiresShutdown == true
-        else { return .terminateNow }
 
-        terminationTask = Task { [weak self] in
-            await downloads?.pauseAll()
-            await uploads?.pauseAll()
-            await listenTogether?.shutdown()
+        if terminationCleanupTask == nil {
+            terminationCleanupTask = Task { @MainActor [weak self] in
+                async let downloadCleanup: Void? = downloads?.pauseAll()
+                async let uploadCleanup: Void? = uploads?.pauseAll()
+                async let listenTogetherCleanup: Void? = listenTogether?.shutdown()
+                _ = await (downloadCleanup, uploadCleanup, listenTogetherCleanup)
+                self?.terminationCleanupTask = nil
+            }
+        }
+        let cleanup = terminationCleanupTask!
+        terminationTask = Task { @MainActor [weak self] in
+            let completed = await AppTerminationDeadline.wait(for: cleanup, timeout: .seconds(10))
             self?.terminationTask = nil
+            guard completed else {
+                self?.terminationConfirmed = false
+                self?.presentPersistenceFailure(["退出清理在 10 秒内未完成，已取消退出；进度保存仍在继续。"])
+                sender.reply(toApplicationShouldTerminate: false)
+                return
+            }
+            let failures = [downloads?.persistenceError, uploads?.persistenceError].compactMap { $0 }
+            guard failures.isEmpty else {
+                self?.terminationConfirmed = false
+                self?.presentPersistenceFailure(failures)
+                sender.reply(toApplicationShouldTerminate: false)
+                return
+            }
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
@@ -317,11 +450,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.buttons.first?.hasDestructiveAction = true
         return alert.runModal() == .alertFirstButtonReturn
     }
+
+    private func presentPersistenceFailure(_ failures: [String]) {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "无法安全退出"
+        alert.informativeText = "下载或上传进度尚未保存：\n" + failures.joined(separator: "\n")
+        alert.addButton(withTitle: "返回应用")
+        alert.runModal()
+    }
 }
 
 enum MenuBarMarquee {
     private static let speed: CGFloat = 28
-    private static let delay: TimeInterval = 1.2
+    static let delay: TimeInterval = 1.2
 
     static func duration(textWidth: CGFloat, viewportWidth: CGFloat, gap: CGFloat) -> TimeInterval? {
         guard textWidth > viewportWidth else { return nil }
@@ -338,9 +480,9 @@ enum MenuBarMarquee {
 @MainActor
 private final class MenuBarLyricView: NSView {
     private let label = NSTextField(labelWithString: "")
-    private var marqueeTimer: Timer?
-    private var marqueeStartedAt: TimeInterval = 0
-    private var marqueeDistance: CGFloat = 0
+    private var currentText = ""
+    private var wantsAnimation = false
+    private var viewportWidth: CGFloat = 0
 
     init(width: CGFloat) {
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: NSStatusBar.system.thickness))
@@ -360,23 +502,32 @@ private final class MenuBarLyricView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
-    func show(_ text: String) {
+    override func layout() {
+        super.layout()
+        guard bounds.width != viewportWidth else { return }
+        show(currentText, animate: wantsAnimation)
+    }
+
+    func show(_ text: String, animate: Bool) {
+        guard text != currentText || animate != wantsAnimation || bounds.width != viewportWidth else { return }
+        currentText = text
+        wantsAnimation = animate
+        viewportWidth = bounds.width
         let font = label.font ?? .menuBarFont(ofSize: 0)
         let attributes: [NSAttributedString.Key: Any] = [.font: font]
         let displayedText = "♪  \(text)"
         let textWidth = ceil((displayedText as NSString).size(withAttributes: attributes).width)
         let gapText = "        "
         let gapWidth = ceil((gapText as NSString).size(withAttributes: attributes).width)
-        marqueeTimer?.invalidate()
-        marqueeTimer = nil
+        label.layer?.removeAnimation(forKey: "menu-bar-marquee")
         toolTip = text
         setAccessibilityValue(text)
 
-        guard MenuBarMarquee.duration(
+        guard animate, let duration = MenuBarMarquee.duration(
             textWidth: textWidth,
             viewportWidth: bounds.width,
             gap: gapWidth
-        ) != nil else {
+        ) else {
             place(displayedText, width: bounds.width, alignment: .center)
             return
         }
@@ -386,30 +537,36 @@ private final class MenuBarLyricView: NSView {
             width: textWidth * 2 + gapWidth,
             alignment: .left
         )
-        marqueeDistance = textWidth + gapWidth
-        marqueeStartedAt = ProcessInfo.processInfo.systemUptime
-        let timer = Timer(
-            timeInterval: 1 / 30,
-            target: self,
-            selector: #selector(advanceMarquee),
-            userInfo: nil,
-            repeats: true
-        )
-        RunLoop.main.add(timer, forMode: .common)
-        marqueeTimer = timer
+        let animation = CABasicAnimation(keyPath: "transform.translation.x")
+        animation.fromValue = 0
+        animation.toValue = -(textWidth + gapWidth)
+        animation.beginTime = CACurrentMediaTime() + MenuBarMarquee.delay
+        animation.duration = duration
+        animation.repeatCount = .infinity
+        animation.timingFunction = CAMediaTimingFunction(name: .linear)
+        animation.fillMode = .backwards
+        label.layer?.add(animation, forKey: "menu-bar-marquee")
     }
 
-    @objc private func advanceMarquee() {
-        label.frame.origin.x = MenuBarMarquee.offset(
-            elapsed: ProcessInfo.processInfo.systemUptime - marqueeStartedAt,
-            distance: marqueeDistance
-        )
+    func stop() {
+        label.layer?.removeAnimation(forKey: "menu-bar-marquee")
     }
 
     private func place(_ text: String, width: CGFloat, alignment: NSTextAlignment) {
         label.stringValue = text
         label.alignment = alignment
         label.frame = NSRect(x: 0, y: -2, width: width, height: bounds.height)
+    }
+}
+
+struct MenuBarPositionState {
+    private(set) var restartsCurrentSong = false
+
+    mutating func update(position: TimeInterval) -> Bool {
+        let next = position > 3
+        guard next != restartsCurrentSong else { return false }
+        restartsCurrentSong = next
+        return true
     }
 }
 
@@ -426,7 +583,9 @@ private final class MenuBarPlayerController: NSObject {
     private let favoriteButton = NSButton()
     private let downloadButton = NSButton()
     private let windowButton = NSButton()
-    private var displayedText = ""
+    private var displayOptionsObserver: NSObjectProtocol?
+    private var statusItemVisibilityObservation: NSKeyValueObservation?
+    private var positionState = MenuBarPositionState()
 
     init(model: AppModel, player: PlayerController, window: NSWindow) {
         self.model = model
@@ -435,9 +594,28 @@ private final class MenuBarPlayerController: NSObject {
         super.init()
 
         configureStatusItem()
-        refresh()
-        let timer = Timer(timeInterval: 0.3, target: self, selector: #selector(refresh), userInfo: nil, repeats: true)
-        RunLoop.main.add(timer, forMode: .common)
+        observePositionChanges()
+        observeLyricChanges()
+        observeControlChanges()
+        statusItemVisibilityObservation = statusItem.observe(\.isVisible) { [weak self] _, _ in
+            Task { @MainActor in self?.refreshLyric() }
+        }
+        displayOptionsObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.refreshLyric() }
+        }
+    }
+
+    isolated deinit {
+        if let displayOptionsObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(displayOptionsObserver)
+        }
+        statusItemVisibilityObservation?.invalidate()
+        lyricView.stop()
+        NSStatusBar.system.removeStatusItem(statusItem)
     }
 
     private func configureStatusItem() {
@@ -568,20 +746,54 @@ private final class MenuBarPlayerController: NSObject {
         }
     }
 
-    @objc private func refresh() {
-        let text = player.currentLyric?.text ?? player.currentSong?.name ?? "小云音乐"
-        if text != displayedText {
-            displayedText = text
-            lyricView.show(text)
+    private func observePositionChanges() {
+        withObservationTracking {
+            refreshPositionThreshold()
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.observePositionChanges() }
         }
+    }
 
-        let song = player.currentSong
+    private func observeLyricChanges() {
+        withObservationTracking {
+            refreshLyric()
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.observeLyricChanges() }
+        }
+    }
+
+    private func observeControlChanges() {
+        withObservationTracking {
+            refreshControls()
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.observeControlChanges() }
+        }
+    }
+
+    private func refreshPositionThreshold() {
+        guard positionState.update(position: player.position) else { return }
         update(
             previousButton,
             symbol: "backward.end.fill",
-            label: player.position > 3 ? "从头播放" : "上一首",
-            enabled: player.canGoPrevious && !player.isControlInteractionLocked
+            label: positionState.restartsCurrentSong ? "从头播放" : "上一首",
+            enabled: previousButton.isEnabled
         )
+    }
+
+    private func refreshLyric() {
+        let text = player.currentLyric?.text ?? player.currentSong?.name ?? "小云音乐"
+        let isPlaying = if case .playing = player.state { true } else { false }
+        lyricView.show(
+            text,
+            animate: isPlaying
+                && statusItem.isVisible
+                && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        )
+    }
+
+    private func refreshControls() {
+        let song = player.currentSong
+        updatePreviousButton()
         update(
             playbackButton,
             symbol: player.isPlaybackRequested ? "pause.fill" : "play.fill",
@@ -596,19 +808,37 @@ private final class MenuBarPlayerController: NSObject {
         )
         let isLiked = song.map { model.likedSongIDs.contains($0.id) } ?? false
         let isPodcastEpisode = song?.isPodcastEpisode == true
+        let isLikePending = song.map { model.pendingMutations.contains(.songLike($0.id)) } ?? false
         update(
             favoriteButton,
             symbol: isPodcastEpisode ? "heart.slash" : (isLiked ? "heart.fill" : "heart"),
-            label: isPodcastEpisode ? "播客音频不支持收藏" : (isLiked ? "取消喜欢" : "喜欢"),
-            enabled: song != nil && !isPodcastEpisode
+            label: isPodcastEpisode
+                ? "播客音频不支持收藏"
+                : (isLikePending ? "正在更新喜欢状态" : (isLiked ? "取消喜欢" : "喜欢")),
+            enabled: song != nil && !isPodcastEpisode && !isLikePending
         )
         updateDownloadButton(for: song)
         update(windowButton, symbol: "music.note.house.fill", label: "打开小云音乐", enabled: true)
     }
 
-    @objc private func previous() { player.previous() }
-    @objc private func togglePlayback() { player.togglePlayback() }
-    @objc private func next() { player.next() }
+    private func updatePreviousButton() {
+        update(
+            previousButton,
+            symbol: "backward.end.fill",
+            label: positionState.restartsCurrentSong ? "从头播放" : "上一首",
+            enabled: player.canGoPrevious && !player.isControlInteractionLocked
+        )
+    }
+
+    private func refreshAfterControlAction() {
+        refreshPositionThreshold()
+        refreshLyric()
+        refreshControls()
+    }
+
+    @objc private func previous() { player.previous(); refreshAfterControlAction() }
+    @objc private func togglePlayback() { player.togglePlayback(); refreshAfterControlAction() }
+    @objc private func next() { player.next(); refreshAfterControlAction() }
     @objc private func toggleFavorite() {
         guard let song = player.currentSong, !song.isPodcastEpisode else { return }
         model.toggleSongLiked(song.id)

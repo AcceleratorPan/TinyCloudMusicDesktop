@@ -3,64 +3,103 @@ import Foundation
 struct LiveListenTogetherService: Sendable {
     let transport: EAPITransport
 
+    var credentialRevision: UInt64 { transport.credentialSnapshotValue().revision }
+
     init(transport: EAPITransport = EAPITransport()) {
         self.transport = transport
     }
 
-    func createRoom() async throws -> Data {
-        try await call("/api/listen/together/room/create", payload: ["refer": "songplay_more"])
+    func createRoom(expectedCredentialRevision: UInt64) async throws -> [String: Any] {
+        try await call(
+            "/api/listen/together/room/create",
+            payload: ["refer": "songplay_more"],
+            expectedCredentialRevision: expectedCredentialRevision
+        )
     }
 
-    func createRoom(currentUserID: Int64) async throws -> ListenTogetherRoom {
-        try ListenTogetherResponseDecoder.room(from: await createRoom(), currentUserID: currentUserID)
+    func createRoom(
+        currentUserID: Int64,
+        expectedCredentialRevision: UInt64
+    ) async throws -> ListenTogetherRoom {
+        try ListenTogetherResponseDecoder.room(
+            from: await createRoom(expectedCredentialRevision: expectedCredentialRevision),
+            currentUserID: currentUserID
+        )
     }
 
-    func checkRoom(roomID: String) async throws -> Data {
-        try await call("/api/listen/together/room/check", payload: ["roomId": try validatedRoomID(roomID)])
+    func checkRoom(roomID: String, expectedCredentialRevision: UInt64? = nil) async throws -> [String: Any] {
+        try await call(
+            "/api/listen/together/room/check",
+            payload: ["roomId": try validatedRoomID(roomID)],
+            expectedCredentialRevision: expectedCredentialRevision ?? credentialRevision
+        )
     }
 
-    func checkInvitation(_ invitation: ListenTogetherInvitation) async throws -> ListenTogetherRoomCheck {
-        try ListenTogetherResponseDecoder.roomCheck(from: await checkRoom(roomID: invitation.roomID))
+    func checkInvitation(
+        _ invitation: ListenTogetherInvitation,
+        expectedCredentialRevision: UInt64? = nil
+    ) async throws -> ListenTogetherRoomCheck {
+        try ListenTogetherResponseDecoder.roomCheck(from: await checkRoom(
+            roomID: invitation.roomID,
+            expectedCredentialRevision: expectedCredentialRevision
+        ))
     }
 
-    func acceptInvitation(roomID: String, inviterID: Int64) async throws -> Data {
+    func acceptInvitation(
+        roomID: String,
+        inviterID: Int64,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [String: Any] {
         guard inviterID > 0 else { throw EAPIError.invalidPayload }
         return try await call(
             "/api/listen/together/play/invitation/accept",
-            payload: ["refer": "inbox_invite", "roomId": try validatedRoomID(roomID), "inviterId": inviterID]
+            payload: ["refer": "inbox_invite", "roomId": try validatedRoomID(roomID), "inviterId": inviterID],
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
     func acceptInvitation(
         _ invitation: ListenTogetherInvitation,
-        currentUserID: Int64
+        currentUserID: Int64,
+        expectedCredentialRevision: UInt64
     ) async throws -> ListenTogetherRoom {
         try ListenTogetherResponseDecoder.room(
-            from: await acceptInvitation(roomID: invitation.roomID, inviterID: invitation.inviterID),
+            from: await acceptInvitation(
+                roomID: invitation.roomID,
+                inviterID: invitation.inviterID,
+                expectedCredentialRevision: expectedCredentialRevision
+            ),
             currentUserID: currentUserID
         )
     }
 
-    func status() async throws -> Data {
-        let data = try await transport.requestWEAPI(
+    func status(expectedCredentialRevision: UInt64? = nil) async throws -> [String: Any] {
+        let expectedCredentialRevision = expectedCredentialRevision ?? credentialRevision
+        return try await transport.requestWEAPIJSONObject(
             path: "/weapi/listen/together/status/get",
             payload: [:],
+            expectedCredentialRevision: expectedCredentialRevision,
             invalidatesAccountCache: false
         )
-        _ = try decodedJSONObject(data)
-        return data
     }
 
-    func status(currentUserID: Int64) async throws -> ListenTogetherStatus {
-        try ListenTogetherResponseDecoder.status(from: await status(), currentUserID: currentUserID)
+    func status(
+        currentUserID: Int64,
+        expectedCredentialRevision: UInt64? = nil
+    ) async throws -> ListenTogetherStatus {
+        try ListenTogetherResponseDecoder.status(
+            from: await status(expectedCredentialRevision: expectedCredentialRevision),
+            currentUserID: currentUserID
+        )
     }
 
     func heartbeat(
         roomID: String,
         songID: Int64,
         playStatus: ListenTogetherPlayStatus,
-        progress: Int64
-    ) async throws -> Data {
+        progress: Int64,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [String: Any] {
         guard songID > 0, progress >= 0 else { throw EAPIError.invalidPayload }
         return try await call(
             "/api/listen/together/heartbeat",
@@ -69,7 +108,8 @@ struct LiveListenTogetherService: Sendable {
                 "songId": songID,
                 "playStatus": playStatus.rawValue,
                 "progress": progress
-            ]
+            ],
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
@@ -77,19 +117,25 @@ struct LiveListenTogetherService: Sendable {
         roomID: String,
         songID: Int64,
         playStatus: ListenTogetherPlayStatus,
-        progress: Int64
+        progress: Int64,
+        expectedCredentialRevision: UInt64
     ) async throws -> ListenTogetherHeartbeat {
         try ListenTogetherResponseDecoder.heartbeat(
             from: await heartbeat(
                 roomID: roomID,
                 songID: songID,
                 playStatus: playStatus,
-                progress: progress
+                progress: progress,
+                expectedCredentialRevision: expectedCredentialRevision
             )
         )
     }
 
-    func reportPlayCommand(roomID: String, command: ListenTogetherPlayCommand) async throws -> Data {
+    func reportPlayCommand(
+        roomID: String,
+        command: ListenTogetherPlayCommand,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [String: Any] {
         let commandInfo: [String: Any] = [
             "commandType": command.commandType.rawValue,
             "progress": command.progress,
@@ -100,20 +146,30 @@ struct LiveListenTogetherService: Sendable {
         ]
         return try await call(
             "/api/listen/together/play/command/report",
-            payload: ["roomId": try validatedRoomID(roomID), "commandInfo": try jsonString(commandInfo)]
+            payload: ["roomId": try validatedRoomID(roomID), "commandInfo": try jsonString(commandInfo)],
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
-    func reportPlayCommandConfirmed(roomID: String, command: ListenTogetherPlayCommand) async throws -> Bool {
+    func reportPlayCommandConfirmed(
+        roomID: String,
+        command: ListenTogetherPlayCommand,
+        expectedCredentialRevision: UInt64
+    ) async throws -> Bool {
         try ListenTogetherResponseDecoder.succeeded(
-            from: await reportPlayCommand(roomID: roomID, command: command)
+            from: await reportPlayCommand(
+                roomID: roomID,
+                command: command,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
         )
     }
 
     func reportPlaylistCommand(
         roomID: String,
-        command: ListenTogetherPlaylistCommand
-    ) async throws -> Data {
+        command: ListenTogetherPlaylistCommand,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [String: Any] {
         let playlist: [String: Any] = [
             "commandType": command.commandType.rawValue,
             "version": [["userId": command.userID, "version": command.version]],
@@ -125,16 +181,22 @@ struct LiveListenTogetherService: Sendable {
         ]
         return try await call(
             "/api/listen/together/sync/list/command/report",
-            payload: ["roomId": try validatedRoomID(roomID), "playlistParam": try jsonString(playlist)]
+            payload: ["roomId": try validatedRoomID(roomID), "playlistParam": try jsonString(playlist)],
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
     func reportPlaylistCommandConfirmed(
         roomID: String,
-        command: ListenTogetherPlaylistCommand
+        command: ListenTogetherPlaylistCommand,
+        expectedCredentialRevision: UInt64
     ) async throws -> Bool {
         try ListenTogetherResponseDecoder.succeeded(
-            from: await reportPlaylistCommand(roomID: roomID, command: command)
+            from: await reportPlaylistCommand(
+                roomID: roomID,
+                command: command,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
         )
     }
 
@@ -142,13 +204,23 @@ struct LiveListenTogetherService: Sendable {
         roomID: String,
         displaySongIDs: [Int64],
         randomSongIDs: [Int64],
-        anchorSongID: Int64?
-    ) async throws -> Data {
+        anchorSongID: Int64?,
+        expectedCredentialRevision: UInt64? = nil
+    ) async throws -> [String: Any] {
         let anchorPosition = anchorSongID.flatMap(displaySongIDs.firstIndex(of:)) ?? -1
+        let playMode: ListenTogetherPlayMode = randomSongIDs.isEmpty || randomSongIDs == displaySongIDs
+            ? .orderLoop
+            : .random
+        guard ListenTogetherPlaylistValidator.isValid(
+            display: displaySongIDs,
+            random: randomSongIDs,
+            anchorSongID: anchorSongID,
+            anchorPosition: anchorPosition,
+            playMode: playMode,
+            allowsEmptyDisplay: true
+        ) else { throw EAPIError.invalidPayload }
         let playlistParam: [String: Any] = [
-            "playMode": (randomSongIDs == displaySongIDs
-                ? ListenTogetherPlayMode.orderLoop
-                : ListenTogetherPlayMode.random).rawValue,
+            "playMode": playMode.rawValue,
             "anchorSongId": anchorSongID.map(String.init) ?? "",
             "anchorPosition": anchorPosition,
             "randomList": randomSongIDs.map(String.init),
@@ -159,7 +231,8 @@ struct LiveListenTogetherService: Sendable {
             payload: [
                 "roomId": try validatedRoomID(roomID),
                 "playlistParam": try jsonString(playlistParam)
-            ]
+            ],
+            expectedCredentialRevision: expectedCredentialRevision ?? credentialRevision
         )
     }
 
@@ -167,14 +240,16 @@ struct LiveListenTogetherService: Sendable {
         roomID: String,
         displaySongIDs: [Int64],
         randomSongIDs: [Int64],
-        anchorSongID: Int64?
+        anchorSongID: Int64?,
+        expectedCredentialRevision: UInt64? = nil
     ) async throws -> ListenTogetherPlaylist? {
         try ListenTogetherResponseDecoder.playlist(
             from: await playlist(
                 roomID: roomID,
                 displaySongIDs: displaySongIDs,
                 randomSongIDs: randomSongIDs,
-                anchorSongID: anchorSongID
+                anchorSongID: anchorSongID,
+                expectedCredentialRevision: expectedCredentialRevision
             )
         )
     }
@@ -183,48 +258,71 @@ struct LiveListenTogetherService: Sendable {
         roomID: String,
         displaySongIDs: [Int64],
         randomSongIDs: [Int64],
-        anchorSongID: Int64?
+        anchorSongID: Int64?,
+        expectedCredentialRevision: UInt64? = nil
     ) async throws -> ListenTogetherAuthoritativeState? {
         try ListenTogetherResponseDecoder.authoritativeState(
             from: await playlist(
                 roomID: roomID,
                 displaySongIDs: displaySongIDs,
                 randomSongIDs: randomSongIDs,
-                anchorSongID: anchorSongID
+                anchorSongID: anchorSongID,
+                expectedCredentialRevision: expectedCredentialRevision
             )
         )
     }
 
-    func realtimeCredentials() async throws -> ListenTogetherRealtimeCredentials {
-        let data = try await transport.requestQuery(
+    func realtimeCredentials(
+        expectedCredentialRevision: UInt64
+    ) async throws -> ListenTogetherRealtimeCredentials {
+        let root = try await transport.requestQueryJSONObject(
             path: "/api/middle/im/token/get",
             fields: [("bizName", "music_listenTogether")],
-            host: "https://interface3.music.163.com"
+            host: "https://interface3.music.163.com",
+            expectedCredentialRevision: expectedCredentialRevision
         )
-        return try ListenTogetherResponseDecoder.realtimeCredentials(from: data)
+        try validateCredentialRevision(expectedCredentialRevision)
+        return try ListenTogetherResponseDecoder.realtimeCredentials(from: root)
     }
 
-    func endRoom(roomID: String) async throws -> Data {
+    func endRoom(roomID: String, expectedCredentialRevision: UInt64) async throws -> [String: Any] {
         try await call(
             "/api/listen/together/end/v2",
-            payload: ["roomId": try validatedRoomID(roomID)]
+            payload: ["roomId": try validatedRoomID(roomID)],
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
-    func endRoomConfirmed(roomID: String) async throws -> Bool {
-        try ListenTogetherResponseDecoder.succeeded(from: await endRoom(roomID: roomID))
+    func endRoomConfirmed(
+        roomID: String,
+        expectedCredentialRevision: UInt64
+    ) async throws -> Bool {
+        try ListenTogetherResponseDecoder.succeeded(from: await endRoom(
+            roomID: roomID,
+            expectedCredentialRevision: expectedCredentialRevision
+        ))
     }
 
-    private func call(_ logicalPath: String, payload: [String: Any]) async throws -> Data {
+    private func call(
+        _ logicalPath: String,
+        payload: [String: Any],
+        expectedCredentialRevision: UInt64
+    ) async throws -> [String: Any] {
         let physicalPath = logicalPath.replacingOccurrences(of: "/api/", with: "/eapi/")
-        let data = try await transport.request(
+        return try await transport.requestJSONObject(
             EAPIEndpoint(physicalPath, signing: logicalPath),
             json: compactJSON(payload),
+            expectedCredentialRevision: expectedCredentialRevision,
             invalidatesAccountCache: false,
             retryable: false
         )
-        _ = try decodedJSONObject(data)
-        return data
+    }
+
+    private func validateCredentialRevision(_ expected: UInt64) throws {
+        let actual = credentialRevision
+        guard actual == expected else {
+            throw CredentialRevisionMismatch(expected: expected, actual: actual)
+        }
     }
 
     private func validatedRoomID(_ value: String) throws -> String {

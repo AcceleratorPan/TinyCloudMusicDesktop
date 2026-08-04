@@ -1,4 +1,3 @@
-import ImageIO
 import PDFKit
 import SwiftUI
 
@@ -54,21 +53,47 @@ struct MusicStylesView: View {
             }
         }
         .navigationTitle("曲风")
-        .task(id: "\(accountID ?? 0):\(reloadID)") { await load() }
+        .task(id: "\(accountID ?? 0):\(credentialRevision):\(reloadID)") { await load() }
+    }
+
+    private var credentialRevision: UInt64 {
+        library.transport.credentialSnapshotValue().revision
     }
 
     @MainActor
     private func load() async {
+        let expectedAccountID = accountID
+        let expectedCredentialRevision = credentialRevision
         phase = .loading
         do {
             async let styles = library.styles()
-            let preferences = accountID == nil ? [] : (try? await library.preferredStyleIDs()) ?? []
+            let preferences: [Int64]
+            if expectedAccountID == nil {
+                preferences = []
+            } else {
+                do {
+                    preferences = try await library.preferredStyleIDs(
+                        expectedCredentialRevision: expectedCredentialRevision
+                    )
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    guard credentialRevision == expectedCredentialRevision else { return }
+                    preferences = []
+                }
+            }
             let loaded = try await styles
             try Task.checkCancellation()
+            guard accountID == expectedAccountID,
+                  credentialRevision == expectedCredentialRevision
+            else { return }
             preferredIDs = Set(preferences)
             phase = .loaded(loaded)
         } catch is CancellationError {
         } catch {
+            guard accountID == expectedAccountID,
+                  credentialRevision == expectedCredentialRevision
+            else { return }
             phase = .failed(error.localizedDescription)
         }
     }
@@ -226,9 +251,13 @@ struct MusicStyleDetailView: View {
                 ContentUnavailableView("暂无\(selectedKind.rawValue)", systemImage: selectedKind.symbol)
                     .frame(maxWidth: .infinity, minHeight: 180)
             } else {
+                let songs = page.items.compactMap { item -> Song? in
+                    guard case let .song(song) = item else { return nil }
+                    return song
+                }
                 LazyVStack(spacing: 0) {
                     ForEach(page.items) { item in
-                        resourceRow(item, page: page)
+                        resourceRow(item, songs: songs)
                         Divider().padding(.leading, 72)
                     }
                     if let cursor = page.nextCursor {
@@ -269,11 +298,7 @@ struct MusicStyleDetailView: View {
         }
     }
 
-    private func resourceRow(_ item: MusicStyleResource, page: MusicStylePage) -> some View {
-        let songs = page.items.compactMap { item -> Song? in
-            guard case let .song(song) = item else { return nil }
-            return song
-        }
+    private func resourceRow(_ item: MusicStyleResource, songs: [Song]) -> some View {
         let searchItem: SearchItem = switch item {
         case let .song(value): .song(value)
         case let .album(value): .album(value)
@@ -324,11 +349,7 @@ struct MusicStyleDetailView: View {
         do {
             let next = try await library.stylePage(id: styleID, kind: kind, cursor: cursor)
             try Task.checkCancellation()
-            let appended = page.appending(next)
-            pages[kind] = MusicStylePage(
-                items: appended.items,
-                nextCursor: next.nextCursor == cursor ? nil : next.nextCursor
-            )
+            pages[kind] = page.appending(next)
         } catch is CancellationError {
         } catch {
             errors[kind] = error.localizedDescription
@@ -579,6 +600,8 @@ private struct MusicSheetPreviewView: View {
     @State private var isDownloading = false
     @State private var downloadCompleted = false
     @State private var downloadError: String?
+    @State private var downloadTask: Task<Void, Never>?
+    @State private var downloadGeneration = 0
     @State private var reloadID = 0
 
     var body: some View {
@@ -634,7 +657,7 @@ private struct MusicSheetPreviewView: View {
         }
         .frame(width: previewSize.width, height: previewSize.height)
         .task(id: "\(sheet.id):\(reloadID)") { await load() }
-        .onDisappear { MusicSheetTemporaryFiles.remove(pdfFile) }
+        .onDisappear { cancelDownload() }
         .alert("琴谱下载失败", isPresented: downloadErrorPresented) {
             Button("好") { downloadError = nil }
         } message: {
@@ -732,67 +755,72 @@ private struct MusicSheetPreviewView: View {
     private func downloadSheet() {
         guard !isDownloading, case let .loaded(preview) = phase else { return }
         let destination = model.sheetFolderURL
-        if let existing = MusicSheetFiles.existingPDF(song: song, sheet: sheet, in: destination) {
-            _ = try? MusicSheetFiles.cachePDF(
-                at: existing,
-                sheetID: sheet.id,
-                cacheRoot: model.cacheFolderURL
-            )
-            downloadCompleted = true
-            model.showToast("琴谱已存在，已跳过下载")
-            return
-        }
-
+        let cacheRoot = model.cacheFolderURL
+        downloadTask?.cancel()
+        downloadGeneration += 1
+        let generation = downloadGeneration
         isDownloading = true
         downloadCompleted = false
         downloadError = nil
-        Task { @MainActor in
-            var temporaryFile: URL?
+        downloadTask = Task { @MainActor in
             defer {
-                MusicSheetTemporaryFiles.remove(temporaryFile)
-                isDownloading = false
+                if downloadGeneration == generation {
+                    isDownloading = false
+                    downloadTask = nil
+                }
             }
             do {
+                if try await MusicSheetWorker.shared.cacheExistingPDF(
+                    song: song,
+                    sheet: sheet,
+                    in: destination,
+                    cacheRoot: cacheRoot
+                ) != nil {
+                    try Task.checkCancellation()
+                    guard downloadGeneration == generation else { return }
+                    downloadCompleted = true
+                    model.showToast("琴谱已存在，已跳过下载")
+                    return
+                }
+
                 let source: URL
-                if let cached = MusicSheetFiles.cachedPDF(
+                if let cached = await MusicSheetWorker.shared.cachedPDF(
                     sheetID: sheet.id,
-                    cacheRoot: model.cacheFolderURL
+                    cacheRoot: cacheRoot
                 ) {
                     source = cached
                 } else {
-                    switch preview {
-                    case let .images(images):
-                        source = try await MusicSheetPDFLoader.makePDF(from: images)
-                        temporaryFile = source
-                    case let .pdf(url):
-                        if let pdfFile {
-                            source = pdfFile
-                        } else {
-                            source = try await MusicSheetPDFLoader.download(url)
-                            temporaryFile = source
-                        }
-                    case .unsupported:
-                        return
-                    }
+                    source = try await MusicSheetWorker.shared.preparePDF(
+                        sheetID: sheet.id,
+                        preview: preview,
+                        cacheRoot: cacheRoot
+                    )
                 }
-                let cached = try MusicSheetFiles.cachePDF(
+                let result = try await MusicSheetWorker.shared.savePDF(
                     at: source,
-                    sheetID: sheet.id,
-                    cacheRoot: model.cacheFolderURL
-                )
-                let result = try MusicSheetFiles.savePDF(
-                    at: cached,
                     song: song,
                     sheet: sheet,
                     to: destination
                 )
+                try Task.checkCancellation()
+                guard downloadGeneration == generation else { return }
                 downloadCompleted = true
                 model.showToast(result.saved ? "琴谱下载完成" : "琴谱已存在，已跳过下载")
             } catch is CancellationError {
             } catch {
+                guard downloadGeneration == generation, !Task.isCancelled else { return }
                 downloadError = error.localizedDescription
             }
         }
+    }
+
+    private func cancelDownload() {
+        downloadGeneration += 1
+        let task = downloadTask
+        downloadTask = nil
+        isDownloading = false
+        task?.cancel()
+        if let task { Task { await task.value } }
     }
 
     private var previewSize: CGSize {
@@ -823,7 +851,6 @@ private struct MusicSheetPreviewView: View {
 
     @MainActor
     private func load() async {
-        MusicSheetTemporaryFiles.remove(pdfFile)
         pdfFile = nil
         pdfError = nil
         pageIndex = 0
@@ -831,17 +858,23 @@ private struct MusicSheetPreviewView: View {
         zoom = 1
         phase = .loading
         do {
-            if let cached = MusicSheetFiles.cachedPDF(
+            if let cached = await MusicSheetWorker.shared.cachedPDF(
                 sheetID: sheet.id,
                 cacheRoot: model.cacheFolderURL
-            ) ?? MusicSheetFiles.existingPDF(song: song, sheet: sheet, in: model.sheetFolderURL) {
-                let file = try MusicSheetFiles.cachePDF(
-                    at: cached,
-                    sheetID: sheet.id,
-                    cacheRoot: model.cacheFolderURL
-                )
-                pdfFile = file
-                phase = .loaded(.pdf(file))
+            ) {
+                pdfFile = cached
+                phase = .loaded(.pdf(cached))
+                return
+            }
+            if let cached = try await MusicSheetWorker.shared.cacheExistingPDF(
+                song: song,
+                sheet: sheet,
+                in: model.sheetFolderURL,
+                cacheRoot: model.cacheFolderURL
+            ) {
+                try Task.checkCancellation()
+                pdfFile = cached
+                phase = .loaded(.pdf(cached))
                 return
             }
             let preview = try await library.sheetPreview(id: sheet.id)
@@ -849,11 +882,9 @@ private struct MusicSheetPreviewView: View {
             phase = .loaded(preview)
             if case let .pdf(url) = preview {
                 do {
-                    let temporary = try await MusicSheetPDFLoader.download(url)
-                    defer { MusicSheetTemporaryFiles.remove(temporary) }
-                    let file = try MusicSheetFiles.cachePDF(
-                        at: temporary,
+                    let file = try await MusicSheetWorker.shared.preparePDF(
                         sheetID: sheet.id,
+                        preview: .pdf(url),
                         cacheRoot: model.cacheFolderURL
                     )
                     try Task.checkCancellation()
@@ -914,91 +945,5 @@ private struct MusicPDFView: NSViewRepresentable {
 
     func updateNSView(_ view: PDFView, context: Context) {
         if view.document?.documentURL != url { view.document = PDFDocument(url: url) }
-    }
-}
-
-private final class MusicSheetRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        willPerformHTTPRedirection response: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping (URLRequest?) -> Void
-    ) {
-        completionHandler(request.url.map(MusicSheetURLPolicy.isAllowed) == true ? request : nil)
-    }
-}
-
-enum MusicSheetPDFLoader {
-    static let maximumBytes = 50 * 1_024 * 1_024
-    static let maximumImageBytes = 25 * 1_024 * 1_024
-    static let maximumDocumentBytes = 100 * 1_024 * 1_024
-    static let maximumPageCount = 100
-
-    static func download(_ url: URL) async throws -> URL {
-        guard MusicSheetURLPolicy.isAllowed(url) else { throw EAPIError.invalidPayload }
-        let session = makeSession()
-        defer { session.finishTasksAndInvalidate() }
-        let (data, response) = try await session.data(from: url)
-        guard data.count <= maximumBytes,
-              valid(response),
-              data.starts(with: Data("%PDF".utf8))
-        else { throw EAPIError.invalidResponse }
-        try Task.checkCancellation()
-        return try MusicSheetTemporaryFiles.write(data)
-    }
-
-    @MainActor
-    static func makePDF(from urls: [URL]) async throws -> URL {
-        guard !urls.isEmpty, urls.count <= maximumPageCount,
-              urls.allSatisfy(MusicSheetURLPolicy.isAllowed)
-        else { throw EAPIError.invalidPayload }
-        let session = makeSession()
-        defer { session.finishTasksAndInvalidate() }
-
-        let document = PDFDocument()
-        var totalBytes = 0
-        for url in urls {
-            let (data, response) = try await session.data(from: url)
-            let nextTotal = totalBytes.addingReportingOverflow(data.count)
-            guard !nextTotal.overflow,
-                  data.count <= maximumImageBytes,
-                  nextTotal.partialValue <= maximumDocumentBytes,
-                  valid(response),
-                  let source = CGImageSourceCreateWithData(data as CFData, nil),
-                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
-                  let page = PDFPage(image: NSImage(
-                    cgImage: image,
-                    size: NSSize(width: image.width, height: image.height)
-                  ))
-            else { throw EAPIError.invalidResponse }
-            document.insert(page, at: document.pageCount)
-            totalBytes = nextTotal.partialValue
-            try Task.checkCancellation()
-        }
-        guard let data = document.dataRepresentation(),
-              data.count <= maximumDocumentBytes,
-              data.starts(with: Data("%PDF".utf8))
-        else { throw EAPIError.invalidResponse }
-        return try MusicSheetTemporaryFiles.write(data)
-    }
-
-    private static func makeSession() -> URLSession {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 20
-        configuration.timeoutIntervalForResource = 60
-        return URLSession(
-            configuration: configuration,
-            delegate: MusicSheetRedirectDelegate(),
-            delegateQueue: nil
-        )
-    }
-
-    private static func valid(_ response: URLResponse) -> Bool {
-        guard let http = response as? HTTPURLResponse,
-              (200..<300).contains(http.statusCode),
-              response.url.map(MusicSheetURLPolicy.isAllowed) == true
-        else { return false }
-        return true
     }
 }

@@ -29,7 +29,6 @@ private final class ScriptedDownloadProtocol: URLProtocol, @unchecked Sendable {
         let status: Int
         let headers: [String: String]
         let body: Data
-        var delay: TimeInterval = 0
         var hangs = false
     }
 
@@ -38,6 +37,7 @@ private final class ScriptedDownloadProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) private static var paths: [String] = []
     nonisolated(unsafe) private static var lyricCompleted = false
     nonisolated(unsafe) private static var audioBeforeLyricsCompleted = false
+    nonisolated(unsafe) private static var pendingLyrics: [@Sendable () -> Void] = []
     private let stateLock = NSLock()
     private var stopped = false
 
@@ -47,6 +47,7 @@ private final class ScriptedDownloadProtocol: URLProtocol, @unchecked Sendable {
             paths = []
             lyricCompleted = false
             audioBeforeLyricsCompleted = false
+            pendingLyrics = []
         }
     }
 
@@ -56,6 +57,15 @@ private final class ScriptedDownloadProtocol: URLProtocol, @unchecked Sendable {
 
     static var didDownloadBeforeLyricsCompleted: Bool {
         lock.withLock { audioBeforeLyricsCompleted }
+    }
+
+    static func releaseLyrics() {
+        let callbacks = lock.withLock {
+            let callbacks = pendingLyrics
+            pendingLyrics = []
+            return callbacks
+        }
+        callbacks.forEach { $0() }
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -72,13 +82,17 @@ private final class ScriptedDownloadProtocol: URLProtocol, @unchecked Sendable {
         }
         let reply = Self.reply(for: state.0, path: path, requestNumber: state.1)
         guard !reply.hangs else { return }
-        if reply.delay > 0 {
-            DispatchQueue.global().asyncAfter(deadline: .now() + reply.delay) { [weak self] in
-                self?.finish(reply, path: path)
-            }
+        let waitsForRelease = if case .sourceRetry = state.0 {
+            path == "/eapi/song/lyric"
         } else {
-            finish(reply, path: path)
+            false
         }
+        let respond: @Sendable () -> Void = { [weak self] in self?.finish(reply, path: path) }
+        if waitsForRelease {
+            Self.lock.withLock { Self.pendingLyrics.append(respond) }
+            return
+        }
+        respond()
     }
 
     override func stopLoading() {
@@ -116,10 +130,8 @@ private final class ScriptedDownloadProtocol: URLProtocol, @unchecked Sendable {
                 headers: json,
                 body: Data(#"{"code":200,"privileges":[{"plLevel":"jymaster","flLevel":"jymaster","downloadMaxBrLevel":"jymaster"}]}"#.utf8)
             )
-        case (.qualityFallback, "/eapi/song/enhance/player/url/v1") where requestNumber == 1:
-            return Reply(status: 200, headers: json, body: Data(#"{"code":500,"message":"busy"}"#.utf8))
-        case (.qualityFallback, "/eapi/song/enhance/player/url/v1") where requestNumber < 4:
-            let level = requestNumber == 2 ? "jymaster" : "sky"
+        case (.qualityFallback, "/eapi/song/enhance/player/url/v1") where requestNumber < 3:
+            let level = requestNumber == 1 ? "jymaster" : "sky"
             return Reply(
                 status: 200,
                 headers: json,
@@ -135,8 +147,6 @@ private final class ScriptedDownloadProtocol: URLProtocol, @unchecked Sendable {
             return Reply(status: 200, headers: ["Content-Type": "audio/flac"], body: Data("fLaC".utf8))
 
         case (.sourceRetry, "/eapi/song/enhance/player/url/v1") where requestNumber == 1:
-            return Reply(status: 200, headers: json, body: Data(#"{"code":500,"message":"busy"}"#.utf8))
-        case (.sourceRetry, "/eapi/song/enhance/player/url/v1") where requestNumber == 2:
             return Reply(
                 status: 200,
                 headers: json,
@@ -156,8 +166,7 @@ private final class ScriptedDownloadProtocol: URLProtocol, @unchecked Sendable {
             return Reply(
                 status: 200,
                 headers: json,
-                body: Data(#"{"code":200,"lrc":{"lyric":"[00:00.000]cached lyric"},"tlyric":{"lyric":""}}"#.utf8),
-                delay: 0.2
+                body: Data(#"{"code":200,"lrc":{"lyric":"[00:00.000]cached lyric"},"tlyric":{"lyric":""}}"#.utf8)
             )
 
         case (.sourceValidation, "/eapi/song/enhance/player/url/v1") where requestNumber == 1:
@@ -226,7 +235,13 @@ private func completedDownload(
         switch manager.states[songID] {
         case let .completed(audioURL, lyricURL):
             return MusicDownloadResult(audioURL: audioURL, lyricURL: lyricURL)
-        case .failed, .cancelled:
+        case let .failed(message):
+            throw NSError(
+                domain: "MusicDownloadTests",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: message]
+            )
+        case .cancelled:
             throw MusicDownloadCheckError.failed
         default:
             try await Task.sleep(for: .milliseconds(10))
@@ -291,12 +306,13 @@ private func verifyHighestQualityFallback() async throws {
         throw MusicDownloadCheckError.failed
     }
     let result = try await completedDownload(from: manager, songID: song.id)
-    guard ScriptedDownloadProtocol.requestCount(for: "/eapi/song/enhance/player/url/v1") == 4,
+    guard ScriptedDownloadProtocol.requestCount(for: "/eapi/song/enhance/player/url/v1") == 3,
           result.audioURL.pathExtension == "flac",
           result.audioURL.lastPathComponent.contains("【无损】"),
           !result.audioURL.lastPathComponent.contains("[1]"),
           try Data(contentsOf: result.audioURL) == Data("fLaC".utf8)
     else { throw MusicDownloadCheckError.failed }
+    try await manager.clearCache()
 
     let mediaRequests = ScriptedDownloadProtocol.requestCount(for: "/quality-audio")
     let cachedManager = MusicDownloadManager(
@@ -313,16 +329,32 @@ private func verifyHighestQualityFallback() async throws {
         throw MusicDownloadCheckError.failed
     }
     let cached = try await completedDownload(from: cachedManager, songID: song.id)
+    let cachedRequest = MusicDownloadRequest(
+        songID: song.id,
+        songName: song.name,
+        artists: song.artistsDisplay,
+        destination: destination,
+        quality: .best,
+        includeLyrics: false,
+        source: .catalog,
+        expectedBytes: nil
+    )
     guard ScriptedDownloadProtocol.requestCount(for: "/quality-audio") == mediaRequests,
           cached.audioURL.lastPathComponent.contains("【无损】"),
-          try Data(contentsOf: cached.audioURL) == Data("fLaC".utf8)
+          try Data(contentsOf: cached.audioURL) == Data("fLaC".utf8),
+          MusicDownloadFiles.managedDownload(for: cachedRequest)?.audioURL == cached.audioURL
     else { throw MusicDownloadCheckError.failed }
+    try await cachedManager.clearCache()
+    guard FileManager.default.fileExists(atPath: cached.audioURL.path) else {
+        throw MusicDownloadCheckError.failed
+    }
 }
 
 @MainActor
 private func verifySourceRetryAndParallelLyrics() async throws {
     let network = scriptedNetwork(.sourceRetry)
     defer { network.session.invalidateAndCancel() }
+    defer { ScriptedDownloadProtocol.releaseLyrics() }
     let root = FileManager.default.temporaryDirectory
         .appending(path: UUID().uuidString, directoryHint: .isDirectory)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -346,10 +378,17 @@ private func verifySourceRetryAndParallelLyrics() async throws {
     guard manager.enqueue(song: song, to: root, quality: .standard, includeLyrics: true) else {
         throw MusicDownloadCheckError.failed
     }
+    for _ in 0..<200 where ScriptedDownloadProtocol.requestCount(for: "/good-audio") == 0 {
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    guard ScriptedDownloadProtocol.requestCount(for: "/good-audio") == 1 else {
+        throw MusicDownloadCheckError.failed
+    }
+    ScriptedDownloadProtocol.releaseLyrics()
     let result = try await completedDownload(from: manager, songID: song.id)
     guard ScriptedDownloadProtocol.requestCount(for: "/eapi/song/music/detail/get") == 0,
           ScriptedDownloadProtocol.requestCount(for: "/eapi/v3/song/detail") == 0,
-          ScriptedDownloadProtocol.requestCount(for: "/eapi/song/enhance/player/url/v1") == 3,
+          ScriptedDownloadProtocol.requestCount(for: "/eapi/song/enhance/player/url/v1") == 2,
           ScriptedDownloadProtocol.requestCount(for: "/bad-audio") == 1,
           ScriptedDownloadProtocol.requestCount(for: "/good-audio") == 1,
           ScriptedDownloadProtocol.didDownloadBeforeLyricsCompleted,
@@ -384,6 +423,34 @@ private func verifySourceRetryAndParallelLyrics() async throws {
           cachedResult.audioURL.pathExtension == "flac",
           try Data(contentsOf: cachedResult.audioURL) == Data("fLaC".utf8),
           cachedResult.lyricURL.flatMap({ try? String(contentsOf: $0, encoding: .utf8) })?.contains("cached lyric") == true
+    else { throw MusicDownloadCheckError.failed }
+
+    if let lyricURL = result.lyricURL { try FileManager.default.removeItem(at: lyricURL) }
+    let lyricsOnlyManager = MusicDownloadManager(
+        transport: EAPITransport(session: network.session, cookie: "", musicU: ""),
+        session: network.session,
+        maximumConcurrentDownloads: 1,
+        retryPolicy: MusicDownloadRetryPolicy(maximumAttempts: 1, baseDelay: 0, maximumDelay: 0),
+        resumeStore: MusicDownloadResumeStore(directory: root.appending(path: "lyrics-only-resume")),
+        targetAllocator: MusicDownloadTargetAllocator(),
+        cacheRoot: root.appending(path: "lyrics-only-cache")
+    )
+    guard lyricsOnlyManager.enqueue(song: song, to: root, quality: .standard, includeLyrics: true) else {
+        throw MusicDownloadCheckError.failed
+    }
+    for _ in 0..<200 where ScriptedDownloadProtocol.requestCount(for: "/eapi/song/lyric") == lyricRequests {
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    guard ScriptedDownloadProtocol.requestCount(for: "/eapi/song/lyric") == lyricRequests + 1 else {
+        throw MusicDownloadCheckError.failed
+    }
+    ScriptedDownloadProtocol.releaseLyrics()
+    let lyricsOnlyResult = try await completedDownload(from: lyricsOnlyManager, songID: song.id)
+    guard lyricsOnlyResult.audioURL == result.audioURL,
+          lyricsOnlyResult.lyricURL != nil,
+          ScriptedDownloadProtocol.requestCount(for: "/eapi/song/enhance/player/url/v1") == sourceRequests,
+          ScriptedDownloadProtocol.requestCount(for: "/good-audio") == audioRequests,
+          ScriptedDownloadProtocol.requestCount(for: "/eapi/song/lyric") == lyricRequests + 1
     else { throw MusicDownloadCheckError.failed }
 }
 
@@ -547,7 +614,7 @@ private func verifyMusicDownloadFiles() throws {
     ) == nil else { throw MusicDownloadCheckError.failed }
 }
 
-private func verifyRetryPolicyAndResumeStore() throws {
+private func verifyRetryPolicyAndResumeStore() async throws {
     let policy = MusicDownloadRetryPolicy(maximumAttempts: 4, baseDelay: 0.5, maximumDelay: 1.5)
     guard policy.maximumRetryCount == 3,
           policy.delay(forRetry: 1) == 0.5,
@@ -593,9 +660,11 @@ private func verifyRetryPolicyAndResumeStore() throws {
         expectedBytes: 1_024
     )
     store.save(resumeBytes, for: request)
-    guard store.load(for: request) == resumeBytes else { throw MusicDownloadCheckError.failed }
+    try await store.flush()
+    guard try await store.load(for: request) == resumeBytes else { throw MusicDownloadCheckError.failed }
     store.remove(songID: request.songID)
-    guard store.load(for: request) == nil else { throw MusicDownloadCheckError.failed }
+    try await store.flush()
+    guard try await store.load(for: request) == nil else { throw MusicDownloadCheckError.failed }
 
     let laterRequest = MusicDownloadRequest(
         songID: 100,
@@ -608,11 +677,14 @@ private func verifyRetryPolicyAndResumeStore() throws {
         expectedBytes: request.expectedBytes
     )
     store.save(request)
-    Thread.sleep(forTimeInterval: 0.01)
+    try await store.flush()
+    try await Task.sleep(for: .milliseconds(10))
     store.save(laterRequest)
-    Thread.sleep(forTimeInterval: 0.01)
+    try await store.flush()
+    try await Task.sleep(for: .milliseconds(10))
     store.save(request, resumeData: resumeBytes)
-    guard store.recoverableDownloads().map(\.request.songID) == [99, 100] else {
+    try await store.flush()
+    guard (await store.recoverableDownloadsAsync()).downloads.map(\.request.songID) == [99, 100] else {
         throw MusicDownloadCheckError.failed
     }
 }
@@ -644,6 +716,45 @@ private func verifyDuplicateQualityIsSkipped() throws {
 }
 
 @MainActor
+private func verifyPersistenceFailurePublishesWithoutFlush() async throws {
+    let network = scriptedNetwork(.transfer)
+    defer { network.session.invalidateAndCancel() }
+    let root = FileManager.default.temporaryDirectory
+        .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let blockingFile = root.appending(path: "not-a-directory")
+    try Data([1]).write(to: blockingFile)
+    let manager = MusicDownloadManager(
+        transport: network.transport,
+        session: network.session,
+        resumeStore: MusicDownloadResumeStore(directory: blockingFile.appending(path: "resume")),
+        targetAllocator: MusicDownloadTargetAllocator()
+    )
+    let song = Song(
+        id: 8,
+        name: "Persistence failure",
+        artists: [ArtistSummary(id: 1, name: "Artist")],
+        album: AlbumSummary(
+            id: 1,
+            name: "Album",
+            artwork: Artwork(symbol: "music.note", accent: .red)
+        ),
+        duration: .seconds(1)
+    )
+
+    guard manager.enqueue(
+        song: song,
+        to: root.appending(path: "downloads", directoryHint: .isDirectory),
+        includeLyrics: false
+    ) else { throw MusicDownloadCheckError.failed }
+    for _ in 0..<200 where manager.persistenceError == nil {
+        try? await Task.sleep(for: .milliseconds(5))
+    }
+    guard manager.persistenceError != nil else { throw MusicDownloadCheckError.failed }
+}
+
+@MainActor
 private func verifyManagerRecoveryAndPause() async throws {
     let network = scriptedNetwork(.transfer)
     defer { network.session.invalidateAndCancel() }
@@ -662,6 +773,7 @@ private func verifyManagerRecoveryAndPause() async throws {
         expectedBytes: nil
     )
     store.save(request)
+    try await store.flush()
 
     let manager = MusicDownloadManager(
         transport: network.transport,
@@ -671,6 +783,9 @@ private func verifyManagerRecoveryAndPause() async throws {
         resumeStore: store,
         targetAllocator: MusicDownloadTargetAllocator()
     )
+    for _ in 0..<200 where manager.states[request.songID] == nil {
+        try await Task.sleep(for: .milliseconds(5))
+    }
     guard manager.states[request.songID] == .running(progress: nil),
           manager.items[request.songID]?.title == request.songName
     else { throw MusicDownloadCheckError.failed }
@@ -710,6 +825,9 @@ private func verifyManagerRecoveryAndPause() async throws {
         resumeStore: store,
         targetAllocator: MusicDownloadTargetAllocator()
     )
+    for _ in 0..<200 where !restarted.isActive(songID: request.songID) {
+        try await Task.sleep(for: .milliseconds(5))
+    }
     guard restarted.isActive(songID: request.songID) else {
         throw MusicDownloadCheckError.failed
     }
@@ -726,8 +844,9 @@ private enum MusicDownloadCheck {
     @MainActor
     static func main() async throws {
         try verifyMusicDownloadFiles()
-        try verifyRetryPolicyAndResumeStore()
+        try await verifyRetryPolicyAndResumeStore()
         try verifyDuplicateQualityIsSkipped()
+        try await verifyPersistenceFailurePublishesWithoutFlush()
         try await verifyManagerRecoveryAndPause()
         try await verifySourceValidation()
         try await verifyTransferSuccessAndCancellation()
@@ -745,7 +864,7 @@ struct MusicDownloadTests {
     }
 
     @MainActor
-    @Test("Best quality retries service failures and falls through available levels")
+    @Test("Best quality falls through explicitly unavailable levels")
     func highestQualityFallback() async throws {
         try await verifyHighestQualityFallback()
     }
@@ -767,14 +886,20 @@ struct MusicDownloadTests {
     }
 
     @Test("Retries use exponential backoff and persist matching resume data")
-    func retryPolicyAndResumeStore() throws {
-        try verifyRetryPolicyAndResumeStore()
+    func retryPolicyAndResumeStore() async throws {
+        try await verifyRetryPolicyAndResumeStore()
     }
 
     @MainActor
     @Test("Only an identical active request is skipped")
     func duplicateQualityIsSkipped() throws {
         try verifyDuplicateQualityIsSkipped()
+    }
+
+    @MainActor
+    @Test("Routine resume save failures publish without a later flush")
+    func persistenceFailurePublishesWithoutFlush() async throws {
+        try await verifyPersistenceFailurePublishesWithoutFlush()
     }
 
     @MainActor

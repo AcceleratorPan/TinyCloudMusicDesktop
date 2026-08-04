@@ -152,30 +152,31 @@ private func verifyAudioUploadCore() async throws {
 
     let store = AudioUploadStore(directory: root.appending(path: "store"))
     let stored = uploadManifest(byteCount: 3, bookmark: Data("bookmark".utf8))
-    try store.save(stored)
-    guard store.load() == [stored],
+    try await store.save(stored)
+    guard try await store.load().manifests == [stored],
           let storedData = try? Data(contentsOf: root.appending(path: "store/\(stored.id.uuidString).json")),
           !String(decoding: storedData, as: UTF8.self).contains("nos-token")
     else { throw AudioUploadCheckError.failed("Upload manifest persistence mismatch") }
 
-    try await MainActor.run {
-        let manager = AudioUploadManager(
+    let manager = await MainActor.run {
+        AudioUploadManager(
             musicLibrary: LiveMusicLibrary(transport: EAPITransport()),
             audioLibrary: LiveAudioContentLibrary(transport: EAPITransport()),
             store: store
         )
-        manager.setAccount(8)
-        guard manager.items.isEmpty else { throw AudioUploadCheckError.failed("Account manifests leaked") }
-        manager.setAccount(7)
-        guard manager.items[stored.id]?.phase == .paused else {
-            throw AudioUploadCheckError.failed("Recovered manifest was not user-paused")
-        }
-        manager.start(stored.id)
-        guard manager.items[stored.id]?.phase == .allocating else {
-            throw AudioUploadCheckError.failed("Upload phase was overwritten while saving")
-        }
-        manager.cancel(stored.id)
     }
+    await manager.waitUntilLoaded()
+    await manager.setAccount(8)
+    guard await manager.items.isEmpty else { throw AudioUploadCheckError.failed("Account manifests leaked") }
+    await manager.setAccount(7)
+    guard await manager.items[stored.id]?.phase == .paused else {
+        throw AudioUploadCheckError.failed("Recovered manifest was not user-paused")
+    }
+    await manager.start(stored.id)
+    guard try await store.load().manifests.first(where: { $0.id == stored.id })?.phase == .allocating else {
+        throw AudioUploadCheckError.failed("Upload phase was overwritten while saving")
+    }
+    await manager.cancel(stored.id)
 
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [AudioUploadProtocol.self]

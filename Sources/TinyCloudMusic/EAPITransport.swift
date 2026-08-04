@@ -35,6 +35,7 @@ enum EAPIReadCache: Hashable, Sendable {
     case playlistSummaries
     case comments
     case lyrics
+    case listeningHistory
 
     fileprivate var policy: EAPIRequestCachePolicy {
         switch self {
@@ -45,6 +46,7 @@ enum EAPIReadCache: Hashable, Sendable {
         case .playlistSummaries: .read(ttl: 0, staleIfError: 15 * 60)
         case .comments: .read(ttl: 30, staleIfError: 2 * 60)
         case .lyrics: .read(ttl: 60 * 60, staleIfError: 24 * 60 * 60)
+        case .listeningHistory: .read(ttl: 30, staleIfError: 5 * 60)
         }
     }
 }
@@ -57,18 +59,32 @@ enum EAPIRequestCachePolicy: Sendable {
 
 struct EAPIHTTPResponse: @unchecked Sendable {
     let data: Data
+    let object: [String: Any]
     let statusCode: Int
     let headers: [String: String]
     let cookies: [HTTPCookie]
 }
 
+struct EAPIParsedResponse: @unchecked Sendable {
+    let data: Data
+    let object: [String: Any]?
+}
+
 enum SensitiveHeaderRedirectPolicy {
     static func allows(originalURL: URL, redirectedURL: URL) -> Bool {
-        redirectedURL.scheme?.lowercased() == "https"
+        originalURL.scheme?.lowercased() == "https"
+            && redirectedURL.scheme?.lowercased() == "https"
             && redirectedURL.user == nil
             && redirectedURL.password == nil
-            && (redirectedURL.port == nil || redirectedURL.port == 443)
+            && (originalURL.port ?? 443) == (redirectedURL.port ?? 443)
             && redirectedURL.host?.lowercased() == originalURL.host?.lowercased()
+    }
+
+    static func requiresProtection(_ request: URLRequest) -> Bool {
+        request.allHTTPHeaderFields?.keys.contains {
+            let name = $0.lowercased()
+            return name == "cookie" || name == "authorization" || name == "music_u" || name == "x-nos-token"
+        } == true
     }
 }
 
@@ -121,12 +137,41 @@ enum EAPIError: LocalizedError, Equatable {
     }
 }
 
+extension EAPIParsedResponse {
+    static func businessError(in object: [String: Any]) -> EAPIError? {
+        guard let value = object["code"] else { return nil }
+        guard let code = (value as? NSNumber)?.intValue ?? (value as? String).flatMap(Int.init) else {
+            return .invalidResponse
+        }
+        guard code != 0, !(200..<300).contains(code) else { return nil }
+        let message = object.string("message")
+        return .service(code: code, message: message.isEmpty ? object.string("msg") : message)
+    }
+
+    var businessError: EAPIError? { object.flatMap { Self.businessError(in: $0) } }
+}
+
+struct CredentialUnavailable: LocalizedError, Equatable, Sendable {
+    var errorDescription: String? { "凭据尚未完成恢复" }
+}
+
+struct CredentialRevisionMismatch: LocalizedError, Equatable, Sendable {
+    let expected: UInt64
+    let actual: UInt64
+
+    var errorDescription: String? { "凭据已改变，请重试当前操作" }
+}
+
 enum SessionCredentialIssue: String, Sendable {
     case cookie
     case musicU
 
     static func detect(in data: Data, vip: Bool, musicU: String) -> Self? {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return detect(in: object, vip: vip, musicU: musicU)
+    }
+
+    static func detect(in object: [String: Any], vip: Bool, musicU: String) -> Self? {
         let code = (object["code"] as? NSNumber)?.intValue
             ?? (object["code"] as? String).flatMap(Int.init)
         guard let code, (300..<400).contains(code) || code == 401 || code == 403 else { return nil }
@@ -144,11 +189,21 @@ enum SessionCredentialIssue: String, Sendable {
     }
 }
 
+struct SessionCredentialIssueEvent: Equatable, Sendable {
+    let issue: SessionCredentialIssue
+    let credentialRevision: UInt64
+}
+
 extension Notification.Name {
     static let neteaseCredentialIssue = Notification.Name("TinyCloudMusic.credentialIssue")
 }
 
 enum EAPICodec {
+    struct DecodedResponse {
+        let data: Data
+        let object: Any
+    }
+
     private static let separator = "36cd479b6b5"
     private static let eapiKey = Data("e82ckenh8dichen8".utf8)
     private static let cacheKey = Data(")(13daqP@ssw0rd~".utf8)
@@ -183,26 +238,32 @@ enum EAPICodec {
     }
 
     static func responseData(_ data: Data, encoding: EAPIResponseEncoding = .automatic) throws -> Data {
+        try decodedResponse(data, encoding: encoding).data
+    }
+
+    static func decodedResponse(
+        _ data: Data,
+        encoding: EAPIResponseEncoding = .automatic
+    ) throws -> DecodedResponse {
         guard !data.isEmpty else { throw EAPIError.invalidResponse }
         switch encoding {
         case .json:
-            guard isJSON(data) else { throw EAPIError.invalidResponse }
-            return data
+            return try decodedJSON(data)
         case .encrypted:
-            return try decryptedJSON(data)
+            return try decodedJSON(decrypt(data))
         case .automatic:
-            return isJSON(data) ? data : try decryptedJSON(data)
+            if let object = try? JSONSerialization.jsonObject(with: data) {
+                return DecodedResponse(data: data, object: object)
+            }
+            return try decodedJSON(decrypt(data))
         }
     }
 
-    private static func decryptedJSON(_ data: Data) throws -> Data {
-        let decrypted = try decrypt(data)
-        guard isJSON(decrypted) else { throw EAPIError.invalidResponse }
-        return decrypted
-    }
-
-    private static func isJSON(_ data: Data) -> Bool {
-        (try? JSONSerialization.jsonObject(with: data)) != nil
+    private static func decodedJSON(_ data: Data) throws -> DecodedResponse {
+        guard let object = try? JSONSerialization.jsonObject(with: data) else {
+            throw EAPIError.invalidResponse
+        }
+        return DecodedResponse(data: data, object: object)
     }
 
     fileprivate static func crypt(_ input: Data, key: Data, operation: CCOperation) throws -> Data {
@@ -1045,26 +1106,27 @@ enum VIPRequesterCredential: Equatable, Sendable {
 struct EAPITransport: Sendable {
     private let session: URLSession
     private let authenticationSession: URLSession
-    private let authenticationCookieStorage: HTTPCookieStorage?
     private let cookieOverride: String?
     private let musicUOverride: String?
-    private let loadStoredCredentials: @Sendable () -> SessionCredentials?
+    let credentialSnapshot: CredentialSnapshot
     private let weapiSecretKeyOverride: String?
     private let responseCache: EAPIResponseCache
     private let playbackClientID: String
+    private let beforeSendingRequest: (@Sendable () async -> Void)?
 
     init(
         session: URLSession? = nil,
         cookie: String? = nil,
         musicU: String? = nil,
-        loadStoredCredentials: @escaping @Sendable () -> SessionCredentials? = { nil },
+        credentialSnapshot: CredentialSnapshot? = nil,
+        loadStoredCredentials: (@Sendable () -> SessionCredentials?)? = nil,
         weapiSecretKey: String? = nil,
-        responseCache: EAPIResponseCache = EAPIResponseCache()
+        responseCache: EAPIResponseCache = EAPIResponseCache(),
+        beforeSendingRequest: (@Sendable () async -> Void)? = nil
     ) {
         if let session {
             self.session = session
             authenticationSession = session
-            authenticationCookieStorage = session.configuration.httpCookieStorage
         } else {
             let configuration = URLSessionConfiguration.default
             configuration.httpMaximumConnectionsPerHost = 8
@@ -1078,39 +1140,60 @@ struct EAPITransport: Sendable {
             authenticationConfiguration.timeoutIntervalForRequest = 15
             authenticationConfiguration.timeoutIntervalForResource = 30
             authenticationSession = URLSession(configuration: authenticationConfiguration)
-            authenticationCookieStorage = authenticationConfiguration.httpCookieStorage
         }
         cookieOverride = cookie
         musicUOverride = musicU
-        self.loadStoredCredentials = loadStoredCredentials
+        if let credentialSnapshot {
+            self.credentialSnapshot = credentialSnapshot
+        } else if cookie != nil || musicU != nil {
+            let cookie = cookie ?? ""
+            let musicU = musicU ?? ""
+            self.credentialSnapshot = CredentialSnapshot(
+                (try? SessionCredentials(
+                    cookie: cookie,
+                    musicU: musicU,
+                    deviceID: NeteaseCookieHeader.value(named: "deviceId", in: cookie)
+                )).map(CredentialSnapshotState.authenticated)
+                    ?? .guest
+            )
+        } else if let credentials = loadStoredCredentials?() {
+            self.credentialSnapshot = CredentialSnapshot(.authenticated(credentials))
+        } else {
+            self.credentialSnapshot = CredentialSnapshot(.guest)
+        }
         weapiSecretKeyOverride = weapiSecretKey
         self.responseCache = responseCache
+        self.beforeSendingRequest = beforeSendingRequest
         playbackClientID = "\(UUID().uuidString.prefix(6).lowercased()).\(Int64(Date().timeIntervalSince1970 * 1_000)).01.0"
     }
 
     func registerAnonymous() async throws -> NeteaseAuthenticationContext {
-        authenticationCookieStorage?.removeCookies(since: .distantPast)
-        defer { authenticationCookieStorage?.removeCookies(since: .distantPast) }
+        let flow = authenticationFlow()
+        defer { flow.session.finishTasksAndInvalidate() }
         let deviceID = try XEAPICodec.generateDeviceID()
         let keyRequest = try XEAPICodec.publicKeyRequest(deviceID: deviceID)
-        let (keyData, keyResponse) = try await authenticationSession.data(for: keyRequest.request)
+        let (keyData, keyResponse) = try await flow.session.data(for: keyRequest.request)
         guard let keyHTTP = keyResponse as? HTTPURLResponse,
               (200..<300).contains(keyHTTP.statusCode)
         else { throw EAPIError.invalidResponse }
         let publicKey = try XEAPICodec.decodePublicKey(keyData, nonce: keyRequest.nonce)
 
         let request = try XEAPICodec.anonymousRequest(deviceID: deviceID, publicKey: publicKey)
-        let (responseData, response) = try await authenticationSession.data(for: request)
+        let (responseData, response) = try await flow.session.data(for: request)
         guard let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode)
         else { throw EAPIError.invalidResponse }
-        _ = try decodedJSONObject(XEAPICodec.decodeResponse(responseData))
+        let decodedResponse = try EAPICodec.decodedResponse(XEAPICodec.decodeResponse(responseData))
+        guard let responseObject = decodedResponse.object as? [String: Any] else {
+            throw EAPIError.invalidResponse
+        }
+        _ = try decodedJSONObject(responseObject)
         let headers = http.allHeaderFields.reduce(into: [String: String]()) { result, field in
             result[String(describing: field.key)] = String(describing: field.value)
         }
         let cookie = NeteaseCookieHeader.merging(
             "",
-            with: (authenticationCookieStorage?.cookies(for: request.url!) ?? [])
+            with: (flow.cookieStorage?.cookies(for: request.url!) ?? [])
                 + HTTPCookie.cookies(withResponseHeaderFields: headers, for: request.url!)
         )
         guard !NeteaseCookieHeader.value(named: "MUSIC_A", in: cookie).isEmpty else {
@@ -1125,8 +1208,8 @@ struct EAPITransport: Sendable {
         context: NeteaseAuthenticationContext,
         userAgent: String? = nil
     ) async throws -> EAPIHTTPResponse {
-        authenticationCookieStorage?.removeCookies(since: .distantPast)
-        defer { authenticationCookieStorage?.removeCookies(since: .distantPast) }
+        let flow = authenticationFlow()
+        defer { flow.session.finishTasksAndInvalidate() }
         let headerFields = Self.eapiClientHeaderFields(cookie: context.cookie, deviceID: context.deviceID)
         let isMacOS = headerFields.first { $0.0 == "os" }?.1.lowercased() == "osx"
         var json = payload
@@ -1142,10 +1225,11 @@ struct EAPITransport: Sendable {
             macOSClient: isMacOS,
             iPhoneClient: false,
             retryable: false,
-            session: authenticationSession,
-            cookieStorage: authenticationCookieStorage,
+            session: flow.session,
+            cookieStorage: flow.cookieStorage,
             cookieHeaderOverride: try XEAPICodec.encodedCookie(headerFields),
-            userAgentOverride: userAgent
+            userAgentOverride: userAgent,
+            validatesBusinessResponse: false
         )
     }
 
@@ -1155,9 +1239,7 @@ struct EAPITransport: Sendable {
         cookie: String? = nil,
         musicU: String? = nil
     ) async throws -> EAPIHTTPResponse {
-        let stored = credentials()
-        authenticationCookieStorage?.removeCookies(since: .distantPast)
-        defer { authenticationCookieStorage?.removeCookies(since: .distantPast) }
+        let stored = try resolvedCredentials()
         return try await performHTTPRequest(
             endpoint,
             body: EAPICodec.requestBody(path: endpoint.logicalPath, json: json),
@@ -1167,8 +1249,8 @@ struct EAPITransport: Sendable {
             macOSClient: false,
             iPhoneClient: false,
             retryable: false,
-            session: authenticationSession,
-            cookieStorage: authenticationCookieStorage,
+            session: session,
+            cookieStorage: nil,
             cookieHeaderOverride: nil,
             userAgentOverride: nil
         )
@@ -1177,28 +1259,66 @@ struct EAPITransport: Sendable {
     func requestQuery(
         path: String,
         fields: [(String, String)],
-        host: String = "https://interface.music.163.com"
+        host: String,
+        expectedCredentialRevision: UInt64
     ) async throws -> Data {
+        try await requestQueryResponse(
+            path: path,
+            fields: fields,
+            host: host,
+            expectedCredentialRevision: expectedCredentialRevision
+        ).data
+    }
+
+    func requestQueryJSONObject(
+        path: String,
+        fields: [(String, String)],
+        host: String,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [String: Any] {
+        try await requestQueryResponse(
+            path: path,
+            fields: fields,
+            host: host,
+            expectedCredentialRevision: expectedCredentialRevision
+        ).object
+    }
+
+    private func requestQueryResponse(
+        path: String,
+        fields: [(String, String)],
+        host: String,
+        expectedCredentialRevision: UInt64
+    ) async throws -> EAPIHTTPResponse {
         guard path.hasPrefix("/"), !path.hasPrefix("//") else { throw EAPIError.invalidPayload }
         var components = URLComponents()
         components.queryItems = fields.map { URLQueryItem(name: $0.0, value: $0.1) }
         guard let query = components.percentEncodedQuery else { throw EAPIError.invalidPayload }
-        let credentials = credentials()
+        let snapshot = try resolvedCredentialSnapshot()
+        guard snapshot.value.revision == expectedCredentialRevision else {
+            throw CredentialRevisionMismatch(
+                expected: expectedCredentialRevision,
+                actual: snapshot.value.revision
+            )
+        }
+        try validateExpectedCredentialRevision(expectedCredentialRevision)
         return try await performHTTPRequest(
             EAPIEndpoint("\(path)?\(query)", signing: path, host: host, responseEncoding: .json),
             body: Data(),
-            cookie: credentials.cookie,
+            cookie: snapshot.credentials.cookie,
             musicU: "",
+            credentialRevision: snapshot.value.revision,
+            expectedCredentialRevision: expectedCredentialRevision,
             vip: false,
             macOSClient: true,
             iPhoneClient: false,
             retryable: false,
-            session: authenticationSession,
-            cookieStorage: authenticationCookieStorage,
+            session: session,
+            cookieStorage: nil,
             cookieHeaderOverride: nil,
             userAgentOverride: "",
             method: "GET"
-        ).data
+        )
     }
 
     func request(
@@ -1207,6 +1327,9 @@ struct EAPITransport: Sendable {
         vip: Bool = false,
         useStoredCookieForVIP: Bool = false,
         cache: EAPIReadCache? = nil,
+        refreshCache: Bool = false,
+        expectedCredentialRevision: UInt64? = nil,
+        invalidatesGroups: Set<EAPIReadCache> = [],
         invalidatesAccountCache: Bool = false,
         macOSClient: Bool = false,
         iPhoneClient: Bool = false,
@@ -1214,40 +1337,135 @@ struct EAPITransport: Sendable {
         retryable: Bool = true,
         additionalHeaders: [String: String] = [:]
     ) async throws -> Data {
-        let credentials = resolvedCredentials()
+        try await requestParsed(
+            endpoint,
+            json: json,
+            vip: vip,
+            useStoredCookieForVIP: useStoredCookieForVIP,
+            cache: cache,
+            refreshCache: refreshCache,
+            expectedCredentialRevision: expectedCredentialRevision,
+            invalidatesGroups: invalidatesGroups,
+            invalidatesAccountCache: invalidatesAccountCache,
+            macOSClient: macOSClient,
+            iPhoneClient: iPhoneClient,
+            includesClientHeader: includesClientHeader,
+            retryable: retryable,
+            additionalHeaders: additionalHeaders
+        ).data
+    }
+
+    func requestJSONObject(
+        _ endpoint: EAPIEndpoint,
+        json: Data,
+        vip: Bool = false,
+        useStoredCookieForVIP: Bool = false,
+        cache: EAPIReadCache? = nil,
+        refreshCache: Bool = false,
+        expectedCredentialRevision: UInt64? = nil,
+        invalidatesGroups: Set<EAPIReadCache> = [],
+        invalidatesAccountCache: Bool = false,
+        macOSClient: Bool = false,
+        iPhoneClient: Bool = false,
+        includesClientHeader: Bool = false,
+        retryable: Bool = true,
+        additionalHeaders: [String: String] = [:],
+        allowsDomainBusinessCodes: Bool = false
+    ) async throws -> [String: Any] {
+        let response = try await requestParsed(
+            endpoint,
+            json: json,
+            vip: vip,
+            useStoredCookieForVIP: useStoredCookieForVIP,
+            cache: cache,
+            refreshCache: refreshCache,
+            expectedCredentialRevision: expectedCredentialRevision,
+            invalidatesGroups: invalidatesGroups,
+            invalidatesAccountCache: invalidatesAccountCache,
+            macOSClient: macOSClient,
+            iPhoneClient: iPhoneClient,
+            includesClientHeader: includesClientHeader,
+            retryable: retryable,
+            additionalHeaders: additionalHeaders,
+            allowsDomainBusinessCodes: allowsDomainBusinessCodes
+        )
+        guard let object = response.object else { throw EAPIError.invalidResponse }
+        return object
+    }
+
+    private func requestParsed(
+        _ endpoint: EAPIEndpoint,
+        json: Data,
+        vip: Bool = false,
+        useStoredCookieForVIP: Bool = false,
+        cache: EAPIReadCache? = nil,
+        refreshCache: Bool = false,
+        expectedCredentialRevision: UInt64? = nil,
+        invalidatesGroups: Set<EAPIReadCache> = [],
+        invalidatesAccountCache: Bool = false,
+        macOSClient: Bool = false,
+        iPhoneClient: Bool = false,
+        includesClientHeader: Bool = false,
+        retryable: Bool = true,
+        additionalHeaders: [String: String] = [:],
+        allowsDomainBusinessCodes: Bool = false
+    ) async throws -> EAPIParsedResponse {
+        guard !refreshCache || cache != nil,
+              cache == nil || invalidatesGroups.isEmpty
+        else { throw EAPIError.invalidPayload }
+        let snapshot = try resolvedCredentialSnapshot()
+        try validateExpectedCredentialRevision(expectedCredentialRevision)
+        let credentials = snapshot.credentials
         let cookie = credentials.cookie
         let musicU = vip && useStoredCookieForVIP ? "" : credentials.musicU
-        let clientHeaderFields = includesClientHeader
-            ? Self.eapiClientHeaderFields(
-                cookie: cookie,
-                deviceID: credentials.deviceID,
-                macOSClient: macOSClient
-            )
-            : nil
-        let requestJSON = try clientHeaderFields.map {
-            try Self.addingEAPIClientHeader(to: json, fields: $0)
-        } ?? json
-        let clientCookie = try clientHeaderFields.map(XEAPICodec.encodedCookie)
-        let body = try EAPICodec.requestBody(path: endpoint.logicalPath, json: requestJSON)
-        let account = Self.accountFingerprint(cookie: cookie, musicU: credentials.musicU)
+        let account = Self.accountFingerprint(
+            cookie: cookie,
+            musicU: credentials.musicU,
+            revision: snapshot.value.revision
+        )
         let policy: EAPIRequestCachePolicy = invalidatesAccountCache
             ? .invalidateAccount
             : cache?.policy ?? .none
-
-        switch policy {
-        case .none:
+        let loader: @Sendable () async throws -> EAPIParsedResponse = { [self] in
+            try validateExpectedCredentialRevision(expectedCredentialRevision)
+            let clientHeaderFields = includesClientHeader
+                ? Self.eapiClientHeaderFields(
+                    cookie: cookie,
+                    deviceID: credentials.deviceID,
+                    macOSClient: macOSClient
+                )
+                : nil
+            let requestJSON = try clientHeaderFields.map {
+                try Self.addingEAPIClientHeader(to: json, fields: $0)
+            } ?? json
+            let clientCookie = try clientHeaderFields.map(XEAPICodec.encodedCookie)
+            let body = try EAPICodec.requestBody(path: endpoint.logicalPath, json: requestJSON)
             return try await performRequest(
                 endpoint,
                 body: body,
                 cookie: cookie,
                 musicU: musicU,
+                credentialRevision: snapshot.value.revision,
+                expectedCredentialRevision: expectedCredentialRevision ?? snapshot.value.revision,
                 vip: vip,
                 macOSClient: macOSClient,
                 iPhoneClient: iPhoneClient,
                 cookieHeaderOverride: clientCookie,
-                retryable: retryable && !invalidatesAccountCache,
+                retryable: retryable
+                    && expectedCredentialRevision == nil
+                    && invalidatesGroups.isEmpty
+                    && !invalidatesAccountCache,
                 additionalHeaders: additionalHeaders
             )
+        }
+
+        let response: EAPIParsedResponse
+        switch policy {
+        case .none:
+            response = try await loader()
+            if response.businessError == nil, !invalidatesGroups.isEmpty {
+                await responseCache.invalidate(account: account, groups: invalidatesGroups)
+            }
         case let .read(ttl, staleIfError):
             let key = EAPIResponseCache.Key(
                 account: account,
@@ -1262,42 +1480,19 @@ struct EAPITransport: Sendable {
                 ),
                 group: cache ?? .detail
             )
-            return try await responseCache.value(
+            response = try await responseCache.parsedValue(
                 for: key,
                 ttl: ttl,
-                staleIfError: staleIfError
-            ) { [self] in
-                try await performRequest(
-                    endpoint,
-                    body: body,
-                    cookie: cookie,
-                    musicU: musicU,
-                    vip: vip,
-                    macOSClient: macOSClient,
-                    iPhoneClient: iPhoneClient,
-                    cookieHeaderOverride: clientCookie,
-                    retryable: retryable,
-                    additionalHeaders: additionalHeaders
-                )
-            }
-        case .invalidateAccount:
-            let data = try await performRequest(
-                endpoint,
-                body: body,
-                cookie: cookie,
-                musicU: musicU,
-                vip: vip,
-                macOSClient: macOSClient,
-                iPhoneClient: iPhoneClient,
-                cookieHeaderOverride: clientCookie,
-                retryable: false,
-                additionalHeaders: additionalHeaders
+                staleIfError: staleIfError,
+                refresh: refreshCache,
+                loader: loader
             )
-            if EAPIResponseCache.isSuccessfulResponse(data) {
-                await responseCache.invalidate(account: account)
-            }
-            return data
+        case .invalidateAccount:
+            response = try await loader()
+            if response.businessError == nil { await responseCache.invalidate(account: account) }
         }
+        if !allowsDomainBusinessCodes, let error = response.businessError { throw error }
+        return response
     }
 
     func invalidateAllCachedResponses() async {
@@ -1306,34 +1501,77 @@ struct EAPITransport: Sendable {
 
     func invalidateCachedResponses(in groups: Set<EAPIReadCache>) async {
         guard !groups.isEmpty else { return }
-        let (cookie, musicU) = credentials()
+        guard let snapshot = try? resolvedCredentialSnapshot() else { return }
         await responseCache.invalidate(
-            account: Self.accountFingerprint(cookie: cookie, musicU: musicU),
+            account: Self.accountFingerprint(
+                cookie: snapshot.credentials.cookie,
+                musicU: snapshot.credentials.musicU,
+                revision: snapshot.value.revision
+            ),
             groups: groups
         )
     }
 
-    func requestCommentLike(threadID: String, commentID: Int64, liked: Bool) async throws -> Data {
-        let action = liked ? "like" : "unlike"
-        return try await requestWEAPI(
-            path: "/weapi/v1/comment/\(action)",
-            payload: ["threadId": threadID, "commentId": String(commentID)]
+    func requestCommentLike(threadID: String, commentID: Int64, liked: Bool) async throws -> [String: Any] {
+        try await requestCommentLike(
+            threadID: threadID,
+            commentID: commentID,
+            liked: liked,
+            expectedCredentialRevision: credentialSnapshot.load().revision
         )
     }
 
-    func requestFMTrash(songID: Int64, algorithm: String, playedSeconds: Int) async throws -> Data {
+    func requestCommentLike(
+        threadID: String,
+        commentID: Int64,
+        liked: Bool,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [String: Any] {
+        let action = liked ? "like" : "unlike"
+        return try await requestWEAPIJSONObject(
+            path: "/weapi/v1/comment/\(action)",
+            payload: ["threadId": threadID, "commentId": String(commentID)],
+            expectedCredentialRevision: expectedCredentialRevision,
+            invalidatesGroups: [.comments],
+            invalidatesAccountCache: false
+        )
+    }
+
+    func requestFMTrash(songID: Int64, algorithm: String, playedSeconds: Int) async throws -> [String: Any] {
+        try await requestFMTrash(
+            songID: songID,
+            algorithm: algorithm,
+            playedSeconds: playedSeconds,
+            expectedCredentialRevision: credentialSnapshot.load().revision
+        )
+    }
+
+    func requestFMTrash(
+        songID: Int64,
+        algorithm: String,
+        playedSeconds: Int,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [String: Any] {
         guard songID > 0, playedSeconds > 0 else { throw EAPIError.invalidPayload }
-        return try await requestWEAPI(
+        return try await requestWEAPIJSONObject(
             path: "/weapi/radio/trash/add",
             payload: [
                 "songId": songID,
                 "alg": algorithm.isEmpty ? "RT" : algorithm,
                 "time": playedSeconds
-            ]
+            ],
+            expectedCredentialRevision: expectedCredentialRevision,
+            invalidatesGroups: [.listeningHistory],
+            invalidatesAccountCache: false
         )
     }
 
-    func requestRecentPlayback(path: String, limit: Int) async throws -> Data {
+    func requestRecentPlayback(
+        path: String,
+        limit: Int,
+        refreshCache: Bool = false,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [String: Any] {
         let paths = [
             "/api/play-record/song/list",
             "/api/play-record/album/list",
@@ -1343,43 +1581,60 @@ struct EAPITransport: Sendable {
             "/api/play-record/djradio/list"
         ]
         guard paths.contains(path), (1...100).contains(limit) else { throw EAPIError.invalidPayload }
-        return try await requestWEAPI(
+        return try await requestWEAPIJSONObject(
             path: path.replacingOccurrences(of: "/api/", with: "/weapi/"),
             payload: ["limit": limit],
-            cache: .library
+            cache: .listeningHistory,
+            refreshCache: refreshCache,
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 
-    func requestCloudSongs(offset: Int, limit: Int) async throws -> Data {
+    func requestCloudSongs(
+        offset: Int,
+        limit: Int,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [String: Any] {
         guard offset >= 0, (1...100).contains(limit) else { throw EAPIError.invalidPayload }
-        return try await requestWEAPI(
+        return try await requestWEAPIJSONObject(
             path: "/weapi/v1/cloud/get",
             payload: ["offset": offset, "limit": limit],
             cache: .library,
+            expectedCredentialRevision: expectedCredentialRevision,
             invalidatesAccountCache: false
         )
     }
 
-    func requestCloudSongDetails(ids: [Int64]) async throws -> Data {
+    func requestCloudSongDetails(
+        ids: [Int64],
+        expectedCredentialRevision: UInt64
+    ) async throws -> [String: Any] {
         guard !ids.isEmpty, ids.count <= 50, ids.allSatisfy({ $0 > 0 }) else {
             throw EAPIError.invalidPayload
         }
-        return try await requestWEAPI(
+        return try await requestWEAPIJSONObject(
             path: "/weapi/v1/cloud/get/byids",
             payload: ["songIds": ids],
             cache: .detail,
+            expectedCredentialRevision: expectedCredentialRevision,
             invalidatesAccountCache: false
         )
     }
 
-    func requestRecommendationHistory(date: String? = nil) async throws -> Data {
+    func requestRecommendationHistory(
+        date: String? = nil,
+        refreshCache: Bool = false,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [String: Any] {
         let path = date == nil
             ? "/weapi/discovery/recommend/songs/history/recent"
             : "/weapi/discovery/recommend/songs/history/detail"
-        return try await requestWEAPI(
+        return try await requestWEAPIJSONObject(
             path: path,
             payload: date.map { ["date": $0] } ?? [:],
             cache: .library,
+            refreshCache: refreshCache,
+            expectedCredentialRevision: expectedCredentialRevision,
             invalidatesAccountCache: false
         )
     }
@@ -1388,54 +1643,144 @@ struct EAPITransport: Sendable {
         path: String,
         payload: [String: Any],
         cache: EAPIReadCache? = nil,
+        refreshCache: Bool = false,
+        expectedCredentialRevision: UInt64? = nil,
+        invalidatesGroups: Set<EAPIReadCache> = [],
         invalidatesAccountCache: Bool = true,
         vip: Bool = false,
         useStoredCookieForVIP: Bool = false,
         additionalHeaders: [String: String] = [:],
         restrictsRedirects: Bool = false
     ) async throws -> Data {
-        let (cookie, musicU) = credentials()
-        let requesterMusicU = useStoredCookieForVIP ? "" : musicU
-        let timestamp = Date().timeIntervalSince1970
-        let requestCookie = vip ? EAPICookieHeader.value(
-            cookie: cookie,
-            musicU: requesterMusicU,
-            vip: true,
-            buildVersion: Int(timestamp),
-            requestID: "\(Int(timestamp * 1_000))_\(String(format: "%04d", Int.random(in: 0..<10_000)))"
-        ) : cookie
-        var payload = payload
-        payload["csrf_token"] = WEAPICodec.csrfToken(in: requestCookie)
-        payload["e_r"] = false
-        let json = try compactJSON(payload)
-        let body = if let weapiSecretKeyOverride {
-            try WEAPICodec.requestBody(json: json, secretKey: weapiSecretKeyOverride)
-        } else {
-            try WEAPICodec.requestBody(json: json)
-        }
-        var request = URLRequest(
-            url: URL(string: "https://music.163.com\(path)")!,
-            timeoutInterval: 15
-        )
-        request.httpMethod = "POST"
-        request.httpBody = body
-        request.setValue("application/x-www-form-urlencoded;charset=utf-8", forHTTPHeaderField: "Content-Type")
-        request.setValue("https://music.163.com/", forHTTPHeaderField: "Referer")
-        request.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            forHTTPHeaderField: "User-Agent"
-        )
-        if !requestCookie.isEmpty { request.setValue(requestCookie, forHTTPHeaderField: "Cookie") }
-        for (name, value) in additionalHeaders { request.setValue(value, forHTTPHeaderField: name) }
-        let preparedRequest = request
-        let shouldRestrictRedirects = restrictsRedirects || vip || !additionalHeaders.isEmpty
+        try await requestWEAPIParsed(
+            path: path,
+            payload: payload,
+            cache: cache,
+            refreshCache: refreshCache,
+            expectedCredentialRevision: expectedCredentialRevision,
+            invalidatesGroups: invalidatesGroups,
+            invalidatesAccountCache: invalidatesAccountCache,
+            vip: vip,
+            useStoredCookieForVIP: useStoredCookieForVIP,
+            additionalHeaders: additionalHeaders,
+            restrictsRedirects: restrictsRedirects
+        ).data
+    }
 
+    func requestWEAPIJSONObject(
+        path: String,
+        payload: [String: Any],
+        cache: EAPIReadCache? = nil,
+        refreshCache: Bool = false,
+        expectedCredentialRevision: UInt64? = nil,
+        invalidatesGroups: Set<EAPIReadCache> = [],
+        invalidatesAccountCache: Bool = true,
+        vip: Bool = false,
+        useStoredCookieForVIP: Bool = false,
+        additionalHeaders: [String: String] = [:],
+        restrictsRedirects: Bool = false,
+        allowsDomainBusinessCodes: Bool = false
+    ) async throws -> [String: Any] {
+        let response = try await requestWEAPIParsed(
+            path: path,
+            payload: payload,
+            cache: cache,
+            refreshCache: refreshCache,
+            expectedCredentialRevision: expectedCredentialRevision,
+            invalidatesGroups: invalidatesGroups,
+            invalidatesAccountCache: invalidatesAccountCache,
+            vip: vip,
+            useStoredCookieForVIP: useStoredCookieForVIP,
+            additionalHeaders: additionalHeaders,
+            restrictsRedirects: restrictsRedirects,
+            allowsDomainBusinessCodes: allowsDomainBusinessCodes
+        )
+        guard let object = response.object else { throw EAPIError.invalidResponse }
+        return object
+    }
+
+    private func requestWEAPIParsed(
+        path: String,
+        payload: [String: Any],
+        cache: EAPIReadCache? = nil,
+        refreshCache: Bool = false,
+        expectedCredentialRevision: UInt64? = nil,
+        invalidatesGroups: Set<EAPIReadCache> = [],
+        invalidatesAccountCache: Bool = true,
+        vip: Bool = false,
+        useStoredCookieForVIP: Bool = false,
+        additionalHeaders: [String: String] = [:],
+        restrictsRedirects: Bool = false,
+        allowsDomainBusinessCodes: Bool = false
+    ) async throws -> EAPIParsedResponse {
+        guard !refreshCache || cache != nil,
+              cache == nil || invalidatesGroups.isEmpty
+        else { throw EAPIError.invalidPayload }
+        let snapshot = try resolvedCredentialSnapshot()
+        try validateExpectedCredentialRevision(expectedCredentialRevision)
+        let cookie = snapshot.credentials.cookie
+        let musicU = snapshot.credentials.musicU
+        let requesterMusicU = useStoredCookieForVIP ? "" : musicU
+        let rawJSON = try compactJSON(payload)
+        let account = Self.accountFingerprint(
+            cookie: cookie,
+            musicU: musicU,
+            revision: snapshot.value.revision
+        )
+        let loader: @Sendable () async throws -> EAPIParsedResponse = { [self] in
+            try validateExpectedCredentialRevision(expectedCredentialRevision)
+            let timestamp = Date().timeIntervalSince1970
+            let requestCookie = vip ? EAPICookieHeader.value(
+                cookie: cookie,
+                musicU: requesterMusicU,
+                vip: true,
+                buildVersion: Int(timestamp),
+                requestID: "\(Int(timestamp * 1_000))_\(String(format: "%04d", Int.random(in: 0..<10_000)))"
+            ) : cookie
+            guard var requestPayload = try JSONSerialization.jsonObject(with: rawJSON) as? [String: Any] else {
+                throw EAPIError.invalidPayload
+            }
+            requestPayload["csrf_token"] = WEAPICodec.csrfToken(in: requestCookie)
+            requestPayload["e_r"] = false
+            let json = try compactJSON(requestPayload)
+            let body = if let weapiSecretKeyOverride {
+                try WEAPICodec.requestBody(json: json, secretKey: weapiSecretKeyOverride)
+            } else {
+                try WEAPICodec.requestBody(json: json)
+            }
+            var request = URLRequest(
+                url: URL(string: "https://music.163.com\(path)")!,
+                timeoutInterval: 15
+            )
+            request.httpMethod = "POST"
+            request.httpBody = body
+            request.setValue("application/x-www-form-urlencoded;charset=utf-8", forHTTPHeaderField: "Content-Type")
+            request.setValue("https://music.163.com/", forHTTPHeaderField: "Referer")
+            request.setValue(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                forHTTPHeaderField: "User-Agent"
+            )
+            if !requestCookie.isEmpty { request.setValue(requestCookie, forHTTPHeaderField: "Cookie") }
+            for (name, value) in additionalHeaders { request.setValue(value, forHTTPHeaderField: name) }
+            return try await performWEAPIRequest(
+                request,
+                musicU: requesterMusicU,
+                credentialRevision: snapshot.value.revision,
+                expectedCredentialRevision: expectedCredentialRevision ?? snapshot.value.revision,
+                vip: vip,
+                retryable: (cache != nil || (!invalidatesAccountCache && invalidatesGroups.isEmpty))
+                    && expectedCredentialRevision == nil,
+                restrictsRedirects: restrictsRedirects || !requestCookie.isEmpty || !additionalHeaders.isEmpty
+            )
+        }
+
+        let response: EAPIParsedResponse
         if let cache, case let .read(ttl, staleIfError) = cache.policy {
             let key = EAPIResponseCache.Key(
-                account: Self.accountFingerprint(cookie: cookie, musicU: musicU),
+                account: account,
                 request: Self.requestFingerprint(
                     endpoint: EAPIEndpoint(path, signing: path, responseEncoding: .json),
-                    json: json,
+                    json: rawJSON,
                     vip: vip,
                     useStoredCookieForVIP: useStoredCookieForVIP,
                     macOSClient: true,
@@ -1443,73 +1788,138 @@ struct EAPITransport: Sendable {
                 ),
                 group: cache
             )
-            return try await responseCache.value(for: key, ttl: ttl, staleIfError: staleIfError) {
-                try await performWEAPIRequest(
-                    preparedRequest,
-                    musicU: requesterMusicU,
-                    vip: vip,
-                    restrictsRedirects: shouldRestrictRedirects
-                )
+            response = try await responseCache.parsedValue(
+                for: key,
+                ttl: ttl,
+                staleIfError: staleIfError,
+                refresh: refreshCache,
+                loader: loader
+            )
+        } else {
+            response = try await loader()
+            if response.businessError == nil {
+                if invalidatesAccountCache {
+                    await responseCache.invalidate(account: account)
+                } else if !invalidatesGroups.isEmpty {
+                    await responseCache.invalidate(account: account, groups: invalidatesGroups)
+                }
             }
         }
-
-        let data = try await performWEAPIRequest(
-            preparedRequest,
-            musicU: requesterMusicU,
-            vip: vip,
-            restrictsRedirects: shouldRestrictRedirects
-        )
-        if invalidatesAccountCache, EAPIResponseCache.isSuccessfulResponse(data) {
-            await responseCache.invalidate(account: Self.accountFingerprint(cookie: cookie, musicU: musicU))
-        }
-        return data
+        if !allowsDomainBusinessCodes, let error = response.businessError { throw error }
+        return response
     }
 
-    func requestRaw(_ request: URLRequest, restrictsRedirects: Bool = false) async throws -> Data {
-        let delegate = restrictsRedirects ? SensitiveHeaderRedirectDelegate(originalURL: request.url!) : nil
+    func requestRaw(
+        _ request: URLRequest,
+        restrictsRedirects: Bool = false,
+        expectedCredentialRevision: UInt64? = nil,
+        validateResponse: @Sendable (Data) throws -> Void = { _ in },
+        invalidatesGroups: Set<EAPIReadCache> = []
+    ) async throws -> Data {
+        let snapshot = try resolvedCredentialSnapshot()
+        let delegate = restrictsRedirects || SensitiveHeaderRedirectPolicy.requiresProtection(request)
+            ? SensitiveHeaderRedirectDelegate(originalURL: request.url!)
+            : nil
+        if expectedCredentialRevision != nil { await beforeSendingRequest?() }
+        try validateExpectedCredentialRevision(expectedCredentialRevision)
         let (data, response) = try await session.data(for: request, delegate: delegate)
         guard let http = response as? HTTPURLResponse else { throw EAPIError.invalidResponse }
         guard (200..<300).contains(http.statusCode) else { throw EAPIError.http(http.statusCode) }
+        try validateResponse(data)
+        if !invalidatesGroups.isEmpty {
+            await responseCache.invalidate(
+                account: Self.accountFingerprint(
+                    cookie: snapshot.credentials.cookie,
+                    musicU: snapshot.credentials.musicU,
+                    revision: snapshot.value.revision
+                ),
+                groups: invalidatesGroups
+            )
+        }
         return data
     }
 
     private func performWEAPIRequest(
         _ request: URLRequest,
         musicU: String,
+        credentialRevision: UInt64,
+        expectedCredentialRevision: UInt64?,
         vip: Bool,
+        retryable: Bool,
         restrictsRedirects: Bool = false
-    ) async throws -> Data {
+    ) async throws -> EAPIParsedResponse {
         let delegate = restrictsRedirects ? SensitiveHeaderRedirectDelegate(originalURL: request.url!) : nil
-        let (responseData, response) = try await session.data(for: request, delegate: delegate)
-        guard let http = response as? HTTPURLResponse else { throw EAPIError.invalidResponse }
-        guard (200..<300).contains(http.statusCode) else {
-            if http.statusCode == 401 || http.statusCode == 403 {
-                reportCredentialIssue(vip && !musicU.isEmpty ? .musicU : .cookie)
+        var lastError: Error = EAPIError.invalidResponse
+        let attemptCount = retryable ? 3 : 1
+        for attempt in 0..<attemptCount {
+            try Task.checkCancellation()
+            if attempt > 0 {
+                try await Task.sleep(for: .milliseconds(250 << (attempt - 1)))
             }
-            throw EAPIError.http(http.statusCode)
+            do {
+                if expectedCredentialRevision != nil { await beforeSendingRequest?() }
+                try validateExpectedCredentialRevision(expectedCredentialRevision)
+                let (responseData, response) = try await session.data(for: request, delegate: delegate)
+                guard let http = response as? HTTPURLResponse else { throw EAPIError.invalidResponse }
+                guard (200..<300).contains(http.statusCode) else {
+                    if http.statusCode == 401 || http.statusCode == 403 {
+                        reportCredentialIssue(
+                            vip && !musicU.isEmpty ? .musicU : .cookie,
+                            credentialRevision: credentialRevision
+                        )
+                    }
+                    throw EAPIError.http(http.statusCode)
+                }
+                let decoded = try EAPICodec.decodedResponse(responseData)
+                guard let object = decoded.object as? [String: Any] else {
+                    throw EAPIError.invalidResponse
+                }
+                try validateBusinessResponse(
+                    object,
+                    vip: vip,
+                    musicU: musicU,
+                    credentialRevision: credentialRevision
+                )
+                return EAPIParsedResponse(data: decoded.data, object: object)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                if let error = error as? URLError, error.code == .cancelled, Task.isCancelled {
+                    throw CancellationError()
+                }
+                lastError = error
+                guard attempt + 1 < attemptCount, Self.isTransient(error) else { throw error }
+            }
         }
-        let data = try EAPICodec.responseData(responseData)
-        if let issue = SessionCredentialIssue.detect(in: data, vip: vip, musicU: musicU) {
-            reportCredentialIssue(issue)
-        }
-        return data
+        throw lastError
     }
 
-    func credentials() -> (cookie: String, musicU: String) {
-        let credentials = resolvedCredentials()
+    func credentials() throws -> (cookie: String, musicU: String) {
+        let credentials = try resolvedCredentials()
         return (credentials.cookie, credentials.musicU)
     }
 
-    func playbackCredentials() -> (cookie: String, deviceID: String, clientID: String) {
-        let credentials = resolvedCredentials()
-        return (credentials.cookie, credentials.deviceID, playbackClientID)
+    func playbackCredentials(
+        expectedCredentialRevision: UInt64
+    ) throws -> (cookie: String, deviceID: String, clientID: String) {
+        let snapshot = try resolvedCredentialSnapshot()
+        guard snapshot.value.revision == expectedCredentialRevision else {
+            throw CredentialRevisionMismatch(
+                expected: expectedCredentialRevision,
+                actual: snapshot.value.revision
+            )
+        }
+        try validateExpectedCredentialRevision(expectedCredentialRevision)
+        return (snapshot.credentials.cookie, snapshot.credentials.deviceID, playbackClientID)
     }
+
+    func credentialSnapshotValue() -> CredentialSnapshotValue { credentialSnapshot.load() }
 
     func withVIPRequesterFallback<Value>(
         fallbackOn: (Error) -> Bool = { _ in false },
         operation: (VIPRequesterCredential) async throws -> Value
     ) async throws -> Value {
-        let credentials = credentials()
+        let credentials = try credentials()
         guard !credentials.musicU.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return try await operation(.storedCookie)
         }
@@ -1529,15 +1939,43 @@ struct EAPITransport: Sendable {
         }
     }
 
-    private func resolvedCredentials() -> (cookie: String, musicU: String, deviceID: String) {
-        let cookie = cookieOverride
-        let musicU = musicUOverride
-        if cookie != nil || musicU != nil {
-            let cookie = cookie ?? ""
-            return (cookie, musicU ?? "", NeteaseCookieHeader.value(named: "deviceId", in: cookie))
+    private func resolvedCredentialSnapshot() throws -> (
+        value: CredentialSnapshotValue,
+        credentials: (cookie: String, musicU: String, deviceID: String)
+    ) {
+        let value = credentialSnapshot.load()
+        let stored: (cookie: String, musicU: String, deviceID: String)
+        switch value.state {
+        case .unavailable:
+            guard cookieOverride != nil || musicUOverride != nil else {
+                throw CredentialUnavailable()
+            }
+            stored = ("", "", "")
+        case .guest:
+            stored = ("", "", "")
+        case let .authenticated(credentials):
+            stored = (credentials.cookie, credentials.musicU, credentials.deviceID)
         }
-        let stored = loadStoredCredentials()
-        return (stored?.cookie ?? "", stored?.musicU ?? "", stored?.deviceID ?? "")
+        let cookie = cookieOverride ?? stored.cookie
+        let overriddenDeviceID = cookieOverride.map {
+            NeteaseCookieHeader.value(named: "deviceId", in: $0)
+        } ?? ""
+        return (
+            value,
+            (cookie, musicUOverride ?? stored.musicU, overriddenDeviceID.isEmpty ? stored.deviceID : overriddenDeviceID)
+        )
+    }
+
+    private func resolvedCredentials() throws -> (cookie: String, musicU: String, deviceID: String) {
+        try resolvedCredentialSnapshot().credentials
+    }
+
+    private func validateExpectedCredentialRevision(_ expected: UInt64?) throws {
+        guard let expected else { return }
+        let actual = credentialSnapshot.load().revision
+        guard expected == actual else {
+            throw CredentialRevisionMismatch(expected: expected, actual: actual)
+        }
     }
 
     private func performRequest(
@@ -1545,18 +1983,23 @@ struct EAPITransport: Sendable {
         body: Data,
         cookie: String,
         musicU: String,
+        credentialRevision: UInt64,
+        expectedCredentialRevision: UInt64?,
         vip: Bool,
         macOSClient: Bool,
         iPhoneClient: Bool,
         cookieHeaderOverride: String?,
         retryable: Bool,
-        additionalHeaders: [String: String] = [:]
-    ) async throws -> Data {
-        try await performHTTPRequest(
+        additionalHeaders: [String: String] = [:],
+        validatesBusinessResponse: Bool = true
+    ) async throws -> EAPIParsedResponse {
+        let response = try await performHTTPRequest(
             endpoint,
             body: body,
             cookie: cookie,
             musicU: musicU,
+            credentialRevision: credentialRevision,
+            expectedCredentialRevision: expectedCredentialRevision,
             vip: vip,
             macOSClient: macOSClient,
             iPhoneClient: iPhoneClient,
@@ -1565,8 +2008,11 @@ struct EAPITransport: Sendable {
             cookieStorage: nil,
             cookieHeaderOverride: cookieHeaderOverride,
             userAgentOverride: nil,
-            additionalHeaders: additionalHeaders
-        ).data
+            additionalHeaders: additionalHeaders,
+            validatesBusinessResponse: validatesBusinessResponse,
+            allowsDomainBusinessCodes: true
+        )
+        return EAPIParsedResponse(data: response.data, object: response.object)
     }
 
     private func performHTTPRequest(
@@ -1574,6 +2020,8 @@ struct EAPITransport: Sendable {
         body: Data,
         cookie: String,
         musicU: String,
+        credentialRevision: UInt64 = 0,
+        expectedCredentialRevision: UInt64? = nil,
         vip: Bool,
         macOSClient: Bool,
         iPhoneClient: Bool,
@@ -1583,7 +2031,9 @@ struct EAPITransport: Sendable {
         cookieHeaderOverride: String?,
         userAgentOverride: String?,
         additionalHeaders: [String: String] = [:],
-        method: String = "POST"
+        method: String = "POST",
+        validatesBusinessResponse: Bool = true,
+        allowsDomainBusinessCodes: Bool = false
     ) async throws -> EAPIHTTPResponse {
         var lastError: Error = EAPIError.invalidResponse
         let attemptCount = retryable ? 3 : 1
@@ -1628,28 +2078,45 @@ struct EAPITransport: Sendable {
             for (name, value) in additionalHeaders { request.setValue(value, forHTTPHeaderField: name) }
 
             do {
-                let delegate = vip || !additionalHeaders.isEmpty
+                if expectedCredentialRevision != nil { await beforeSendingRequest?() }
+                try validateExpectedCredentialRevision(expectedCredentialRevision)
+                let delegate = !sessionCookie.isEmpty || vip || !additionalHeaders.isEmpty
                     ? SensitiveHeaderRedirectDelegate(originalURL: request.url!)
                     : nil
                 let (responseData, response) = try await session.data(for: request, delegate: delegate)
                 guard let http = response as? HTTPURLResponse else { throw EAPIError.invalidResponse }
-                let decodedData = try? EAPICodec.responseData(
-                    responseData,
-                    encoding: endpoint.responseEncoding
-                )
                 guard (200..<300).contains(http.statusCode) else {
                     retryAfter = Self.retryAfter(from: http)
-                    if let decodedData,
-                       let issue = SessionCredentialIssue.detect(in: decodedData, vip: vip, musicU: musicU) {
-                        reportCredentialIssue(issue)
+                    let decoded = try? EAPICodec.decodedResponse(
+                        responseData,
+                        encoding: endpoint.responseEncoding
+                    )
+                    if let object = decoded?.object as? [String: Any],
+                       let issue = SessionCredentialIssue.detect(in: object, vip: vip, musicU: musicU) {
+                        reportCredentialIssue(issue, credentialRevision: credentialRevision)
                     } else if http.statusCode == 401 || http.statusCode == 403 {
-                        reportCredentialIssue(vip && !musicU.isEmpty ? .musicU : .cookie)
+                        reportCredentialIssue(
+                            vip && !musicU.isEmpty ? .musicU : .cookie,
+                            credentialRevision: credentialRevision
+                        )
                     }
                     throw EAPIError.http(http.statusCode)
                 }
-                let data = try EAPICodec.responseData(responseData, encoding: endpoint.responseEncoding)
-                if let issue = SessionCredentialIssue.detect(in: data, vip: vip, musicU: musicU) {
-                    reportCredentialIssue(issue)
+                let decoded = try EAPICodec.decodedResponse(responseData, encoding: endpoint.responseEncoding)
+                guard let object = decoded.object as? [String: Any] else {
+                    throw EAPIError.invalidResponse
+                }
+                if validatesBusinessResponse {
+                    try validateBusinessResponse(
+                        object,
+                        vip: vip,
+                        musicU: musicU,
+                        credentialRevision: credentialRevision
+                    )
+                    if !allowsDomainBusinessCodes,
+                       let error = EAPIParsedResponse.businessError(in: object) {
+                        throw error
+                    }
                 }
                 let headers = http.allHeaderFields.reduce(into: [String: String]()) { result, field in
                     result[String(describing: field.key)] = String(describing: field.value)
@@ -1660,7 +2127,8 @@ struct EAPITransport: Sendable {
                     for: endpoint.physicalURL
                 )
                 return EAPIHTTPResponse(
-                    data: data,
+                    data: decoded.data,
+                    object: object,
                     statusCode: http.statusCode,
                     headers: headers,
                     cookies: storedCookies + headerCookies
@@ -1758,8 +2226,35 @@ struct EAPITransport: Sendable {
         return (storage?.cookies ?? []) + HTTPCookie.cookies(withResponseHeaderFields: headers, for: url)
     }
 
-    private static func accountFingerprint(cookie: String, musicU: String) -> String {
-        sha256(Data("account\u{0}\(cookie)\u{0}\(musicU)".utf8))
+    private func authenticationFlow() -> (session: URLSession, cookieStorage: HTTPCookieStorage?) {
+        let configuration = authenticationSession.configuration
+        configuration.httpCookieStorage = URLSessionConfiguration.ephemeral.httpCookieStorage
+        let session = URLSession(configuration: configuration)
+        return (session, configuration.httpCookieStorage)
+    }
+
+    private func validateBusinessResponse(
+        _ object: [String: Any],
+        vip: Bool,
+        musicU: String,
+        credentialRevision: UInt64
+    ) throws {
+        if let issue = SessionCredentialIssue.detect(in: object, vip: vip, musicU: musicU) {
+            reportCredentialIssue(issue, credentialRevision: credentialRevision)
+        }
+        guard let error = EAPIParsedResponse.businessError(in: object) else { return }
+        switch error {
+        case .invalidResponse:
+            throw error
+        case let .service(code, _) where Self.isTransientStatus(code):
+            throw error
+        default:
+            return
+        }
+    }
+
+    private static func accountFingerprint(cookie: String, musicU: String, revision: UInt64 = 0) -> String {
+        sha256(Data("account\u{0}\(revision)\u{0}\(cookie)\u{0}\(musicU)".utf8))
     }
 
     private static func requestFingerprint(
@@ -1789,9 +2284,10 @@ struct EAPITransport: Sendable {
         if error is CancellationError { return false }
         if let error = error as? EAPIError {
             switch error {
-            case let .http(status): return status == 408 || status == 429 || status >= 500
+            case let .http(status): return isTransientStatus(status)
+            case let .service(status, _): return isTransientStatus(status)
             case .invalidCiphertext, .invalidPadding, .invalidResponse: return true
-            case .invalidPayload, .service, .missingData: return false
+            case .invalidPayload, .missingData: return false
             }
         } else if let error = error as? URLError {
             switch error.code {
@@ -1807,17 +2303,26 @@ struct EAPITransport: Sendable {
         }
     }
 
+    fileprivate static func isTransientStatus(_ status: Int) -> Bool {
+        status == 408 || status == 429 || (500..<600).contains(status)
+    }
+
     private static func sha256(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    private func reportCredentialIssue(_ issue: SessionCredentialIssue) {
+    private func reportCredentialIssue(_ issue: SessionCredentialIssue, credentialRevision: UInt64) {
         guard cookieOverride == nil, musicUOverride == nil else { return }
-        NotificationCenter.default.post(name: .neteaseCredentialIssue, object: issue.rawValue)
+        NotificationCenter.default.post(
+            name: .neteaseCredentialIssue,
+            object: SessionCredentialIssueEvent(issue: issue, credentialRevision: credentialRevision)
+        )
     }
 }
 
 actor EAPIResponseCache {
+    private struct CacheInvalidated: Error {}
+
     struct Key: Hashable, Sendable {
         let account: String
         let request: String
@@ -1831,7 +2336,7 @@ actor EAPIResponseCache {
     }
 
     private struct Entry: Sendable {
-        let data: Data
+        let response: EAPIParsedResponse
         let expiresAt: Date
         let staleUntil: Date
         var lastAccess: Date
@@ -1840,10 +2345,11 @@ actor EAPIResponseCache {
     private struct InFlight {
         let id: UUID
         let accountGeneration: Int
-        let task: Task<Data, Error>
+        let task: Task<EAPIParsedResponse, Error>
         let ttl: TimeInterval
         let staleIfError: TimeInterval
-        var waiters: [UUID: CheckedContinuation<Data, Error>] = [:]
+        let refresh: Bool
+        var waiters: [UUID: CheckedContinuation<EAPIParsedResponse, Error>] = [:]
     }
 
     private let countLimit: Int
@@ -1858,6 +2364,10 @@ actor EAPIResponseCache {
         self.costLimit = costLimit
     }
 
+    func waiterCount(for key: Key) -> Int {
+        inFlight[key]?.waiters.count ?? 0
+    }
+
     deinit {
         for request in inFlight.values {
             request.task.cancel()
@@ -1869,21 +2379,67 @@ actor EAPIResponseCache {
         for key: Key,
         ttl: TimeInterval,
         staleIfError: TimeInterval,
+        refresh: Bool = false,
         loader: @escaping @Sendable () async throws -> Data
     ) async throws -> Data {
+        try await parsedValue(
+            for: key,
+            ttl: ttl,
+            staleIfError: staleIfError,
+            refresh: refresh
+        ) {
+            EAPIParsedResponse(data: try await loader(), object: nil)
+        }.data
+    }
+
+    func parsedValue(
+        for key: Key,
+        ttl: TimeInterval,
+        staleIfError: TimeInterval,
+        refresh: Bool = false,
+        loader: @escaping @Sendable () async throws -> EAPIParsedResponse
+    ) async throws -> EAPIParsedResponse {
+        var invalidationRetries = 0
+        while true {
+            do {
+                return try await valueOnce(
+                    for: key,
+                    ttl: ttl,
+                    staleIfError: staleIfError,
+                    refresh: refresh,
+                    loader: loader
+                )
+            } catch is CacheInvalidated {
+                try Task.checkCancellation()
+                guard invalidationRetries == 0 else { throw CacheInvalidated() }
+                invalidationRetries += 1
+            }
+        }
+    }
+
+    private func valueOnce(
+        for key: Key,
+        ttl: TimeInterval,
+        staleIfError: TimeInterval,
+        refresh: Bool,
+        loader: @escaping @Sendable () async throws -> EAPIParsedResponse
+    ) async throws -> EAPIParsedResponse {
         try Task.checkCancellation()
         let now = Date()
         removeExpired(before: now)
-        if var entry = entries[key], entry.expiresAt > now {
+        if !refresh, inFlight[key]?.refresh != true, var entry = entries[key], entry.expiresAt > now {
             entry.lastAccess = now
             entries[key] = entry
-            return entry.data
+            return entry.response
         }
 
         let requestID: UUID
-        if let existing = inFlight[key] {
+        if let existing = inFlight[key], !refresh || existing.refresh {
             requestID = existing.id
         } else {
+            if let existing = inFlight.removeValue(forKey: key) {
+                cancel(existing, with: CacheInvalidated())
+            }
             let id = UUID()
             let task = Task { try await loader() }
             inFlight[key] = InFlight(
@@ -1891,7 +2447,8 @@ actor EAPIResponseCache {
                 accountGeneration: accountGenerations[key.account, default: 0],
                 task: task,
                 ttl: ttl,
-                staleIfError: staleIfError
+                staleIfError: staleIfError,
+                refresh: refresh
             )
             requestID = id
             Task { [weak self, task] in
@@ -1901,10 +2458,11 @@ actor EAPIResponseCache {
         }
 
         let waiterID = UUID()
-        let data = try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
+        let response = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<EAPIParsedResponse, Error>) in
                 guard var request = inFlight[key], request.id == requestID else {
-                    continuation.resume(throwing: CancellationError())
+                    continuation.resume(throwing: CacheInvalidated())
                     return
                 }
                 request.waiters[waiterID] = continuation
@@ -1914,7 +2472,7 @@ actor EAPIResponseCache {
             Task { await self.cancelWaiter(waiterID, for: key, requestID: requestID) }
         }
         try Task.checkCancellation()
-        return data
+        return response
     }
 
     func invalidate(account: String) {
@@ -1922,7 +2480,7 @@ actor EAPIResponseCache {
     }
 
     func invalidate(account: String, groups: Set<EAPIReadCache>?) {
-        accountGenerations[account, default: 0] &+= 1
+        if groups == nil { accountGenerations[account, default: 0] += 1 }
         let keys = entries.keys.filter {
             $0.account == account && (groups == nil || groups?.contains($0.group) == true)
         }
@@ -1932,40 +2490,43 @@ actor EAPIResponseCache {
         }
         for (key, request) in tasks {
             inFlight[key] = nil
-            cancel(request)
+            cancel(request, with: CacheInvalidated())
         }
     }
 
     func invalidateAll() {
         entries.removeAll(keepingCapacity: false)
         totalCost = 0
-        for request in inFlight.values { cancel(request) }
+        for request in inFlight.values { cancel(request, with: CacheInvalidated()) }
         inFlight.removeAll(keepingCapacity: false)
         accountGenerations.removeAll(keepingCapacity: false)
     }
 
-    private func complete(_ result: Result<Data, Error>, for key: Key, requestID: UUID) {
+    private func complete(_ result: Result<EAPIParsedResponse, Error>, for key: Key, requestID: UUID) {
         guard let request = inFlight[key], request.id == requestID else { return }
         inFlight[key] = nil
-        let response: Result<Data, Error>
+        let response: Result<EAPIParsedResponse, Error>
         switch result {
-        case let .success(data):
-            if request.accountGeneration == accountGenerations[key.account, default: 0],
-               Self.isSuccessfulResponse(data) {
+        case let .success(value):
+            if value.businessError == nil,
+               request.accountGeneration == accountGenerations[key.account, default: 0] {
                 let storedAt = Date()
                 store(
-                    data,
+                    value,
                     for: key,
                     expiresAt: storedAt.addingTimeInterval(max(0, request.ttl)),
                     staleUntil: storedAt.addingTimeInterval(max(0, request.ttl + request.staleIfError))
                 )
             }
-            response = .success(data)
+            response = .success(value)
         case let .failure(error):
-            if Self.canUseStale(after: error), var entry = entries[key], entry.staleUntil > Date() {
+            if !request.refresh,
+               Self.canUseStale(after: error),
+               var entry = entries[key],
+               entry.staleUntil > Date() {
                 entry.lastAccess = Date()
                 entries[key] = entry
-                response = .success(entry.data)
+                response = .success(entry.response)
             } else {
                 response = .failure(error)
             }
@@ -1986,15 +2547,15 @@ actor EAPIResponseCache {
         continuation.resume(throwing: CancellationError())
     }
 
-    private func cancel(_ request: InFlight) {
+    private func cancel(_ request: InFlight, with error: Error) {
         request.task.cancel()
-        request.waiters.values.forEach { $0.resume(throwing: CancellationError()) }
+        request.waiters.values.forEach { $0.resume(throwing: error) }
     }
 
-    private func store(_ data: Data, for key: Key, expiresAt: Date, staleUntil: Date) {
-        if let previous = entries[key] { totalCost -= previous.data.count }
-        entries[key] = Entry(data: data, expiresAt: expiresAt, staleUntil: staleUntil, lastAccess: Date())
-        totalCost += data.count
+    private func store(_ response: EAPIParsedResponse, for key: Key, expiresAt: Date, staleUntil: Date) {
+        if let previous = entries[key] { totalCost -= previous.response.data.count }
+        entries[key] = Entry(response: response, expiresAt: expiresAt, staleUntil: staleUntil, lastAccess: Date())
+        totalCost += response.data.count
         trimIfNeeded()
     }
 
@@ -2014,27 +2575,22 @@ actor EAPIResponseCache {
 
     private func removeValue(for key: Key) {
         guard let removed = entries.removeValue(forKey: key) else { return }
-        totalCost -= removed.data.count
-    }
-
-    static func isSuccessfulResponse(_ data: Data) -> Bool {
-        guard !data.isEmpty,
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return false }
-        guard let value = root["code"] else { return true }
-        let code = (value as? NSNumber)?.intValue ?? (value as? String).flatMap(Int.init) ?? 0
-        return (200..<300).contains(code)
+        totalCost -= removed.response.data.count
     }
 
     private static func canUseStale(after error: Error) -> Bool {
-        if error is CancellationError { return false }
+        if error is CancellationError || error is CacheInvalidated || error is CredentialRevisionMismatch {
+            return false
+        }
         if let error = error as? EAPIError {
             switch error {
             case let .http(status):
-                return status == 408 || status == 429 || status >= 500
+                return EAPITransport.isTransientStatus(status)
+            case let .service(status, _):
+                return EAPITransport.isTransientStatus(status)
             case .invalidCiphertext, .invalidPadding, .invalidResponse:
                 return true
-            case .invalidPayload, .service, .missingData:
+            case .invalidPayload, .missingData:
                 return false
             }
         }
@@ -2087,14 +2643,11 @@ func decodedJSONObject(_ data: Data) throws -> [String: Any] {
     guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
         throw EAPIError.invalidResponse
     }
-    if object["code"] != nil {
-        let code = object.int("code")
-        guard code != 0 else { throw EAPIError.invalidResponse }
-        if !(200..<300).contains(code) {
-            let message = object.string("message")
-            throw EAPIError.service(code: code, message: message.isEmpty ? object.string("msg") : message)
-        }
-    }
+    return try decodedJSONObject(object)
+}
+
+func decodedJSONObject(_ object: [String: Any]) throws -> [String: Any] {
+    if let error = EAPIParsedResponse.businessError(in: object) { throw error }
     return object
 }
 

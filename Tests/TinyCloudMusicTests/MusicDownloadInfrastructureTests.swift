@@ -34,7 +34,7 @@ struct MusicDownloadInfrastructureTests {
     }
 
     @Test("Pending requests and resume data survive a new store instance")
-    func requestAndResumeDataSurviveRestart() throws {
+    func requestAndResumeDataSurviveRestart() async throws {
         let root = FileManager.default.temporaryDirectory
             .appending(path: UUID().uuidString, directoryHint: .isDirectory)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -42,10 +42,12 @@ struct MusicDownloadInfrastructureTests {
         let storeDirectory = root.appending(path: "resume", directoryHint: .isDirectory)
         let request = request(destination: root)
 
-        MusicDownloadResumeStore(directory: storeDirectory).save(request)
+        let original = MusicDownloadResumeStore(directory: storeDirectory)
+        original.save(request)
+        try await original.flush()
         let restarted = MusicDownloadResumeStore(directory: storeDirectory)
-        #expect(restarted.load(for: request) == nil)
-        let pending = try #require(restarted.recoverableDownloads().first)
+        #expect(try await restarted.load(for: request) == nil)
+        let pending = try #require((await restarted.recoverableDownloadsAsync()).downloads.first)
         #expect(pending.resumeData == nil)
         #expect(pending.request.songID == request.songID)
         #expect(pending.request.source == request.source)
@@ -53,25 +55,27 @@ struct MusicDownloadInfrastructureTests {
 
         let resumeData = Data([1, 3, 5, 7])
         restarted.save(resumeData, for: request)
+        try await restarted.flush()
         let resumed = MusicDownloadResumeStore(directory: storeDirectory)
-        #expect(resumed.load(for: request) == resumeData)
-        #expect(resumed.recoverableDownloads().first?.resumeData == resumeData)
+        #expect(try await resumed.load(for: request) == resumeData)
+        #expect((await resumed.recoverableDownloadsAsync()).downloads.first?.resumeData == resumeData)
     }
 
     @Test("Enumeration prunes expired records")
-    func enumerationPrunesExpiredRecords() throws {
+    func enumerationPrunesExpiredRecords() async throws {
         let root = FileManager.default.temporaryDirectory
             .appending(path: UUID().uuidString, directoryHint: .isDirectory)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = MusicDownloadResumeStore(directory: root, maximumAge: 1)
         store.save(request(destination: root))
+        try await store.flush()
 
-        #expect(store.recoverableDownloads(now: Date().addingTimeInterval(2)).isEmpty)
+        #expect((await store.recoverableDownloadsAsync(now: Date().addingTimeInterval(2))).downloads.isEmpty)
         #expect((try? FileManager.default.contentsOfDirectory(atPath: root.path))?.isEmpty == true)
     }
 
     @Test("Resume updates preserve original FIFO order")
-    func resumeUpdatesPreserveFIFO() {
+    func resumeUpdatesPreserveFIFO() async throws {
         let root = FileManager.default.temporaryDirectory
             .appending(path: UUID().uuidString, directoryHint: .isDirectory)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -79,12 +83,25 @@ struct MusicDownloadInfrastructureTests {
         let first = request(destination: root, songID: 41)
         let second = request(destination: root, songID: 42)
         store.save(first)
-        Thread.sleep(forTimeInterval: 0.01)
+        try await store.flush()
+        let firstURL = root.appending(path: "41.resume.plist")
+        let initialModification = try #require(firstURL.resourceValues(
+            forKeys: [.contentModificationDateKey]
+        ).contentModificationDate)
+        try await Task.sleep(for: .milliseconds(10))
+        store.save(first)
+        try await store.flush()
+        #expect(try firstURL.resourceValues(
+            forKeys: [.contentModificationDateKey]
+        ).contentModificationDate == initialModification)
+        try await Task.sleep(for: .milliseconds(10))
         store.save(second)
-        Thread.sleep(forTimeInterval: 0.01)
+        try await store.flush()
+        try await Task.sleep(for: .milliseconds(10))
         store.save(first, resumeData: Data([1]))
+        try await store.flush()
 
-        #expect(store.recoverableDownloads().map(\.request.songID) == [41, 42])
+        #expect((await store.recoverableDownloadsAsync()).downloads.map(\.request.songID) == [41, 42])
     }
 
     @Test("Stale cleanup only removes UUID part files")

@@ -5,6 +5,27 @@ enum SidebarItem: Hashable {
     case home, search, videos, audio, personalFM, library, history, downloads, session
 }
 
+enum LibraryMutationKey: Hashable, Sendable {
+    case songLike(Int64)
+    case playlistSubscription(Int64)
+    case albumSubscription(Int64)
+    case artistFollow(Int64)
+    case userFollow(Int64)
+    case playlistSong(playlistID: Int64, songID: Int64)
+}
+
+struct FavoriteSongsFailure: LocalizedError, Sendable {
+    let successfulIDs: [Int64]
+    let failedID: Int64
+    let unattemptedIDs: [Int64]
+    let causeDescription: String
+
+    var errorDescription: String? {
+        "已收藏 \(successfulIDs.count) 首；歌曲 \(failedID) 收藏失败，"
+            + "另有 \(unattemptedIDs.count) 首未尝试：\(causeDescription)"
+    }
+}
+
 enum HomeSectionLoad: Equatable {
     case idle
     case loading
@@ -42,6 +63,28 @@ enum DetailLoad: Equatable {
 private struct HomeTaskEntry {
     let id: UUID
     let task: Task<Void, Never>
+}
+
+private struct MutationTaskEntry {
+    let id: UUID
+    let task: Task<Void, Never>
+}
+
+private struct ResolvedFolders: Sendable {
+    let download: URL?
+    let video: URL?
+    let image: URL?
+    let sheet: URL?
+    let cache: URL?
+}
+
+private actor ArtworkFileWriter {
+    func write(_ data: Data, to destination: URL, folder: URL) throws {
+        let hasSecurityScope = folder.startAccessingSecurityScopedResource()
+        defer { if hasSecurityScope { folder.stopAccessingSecurityScopedResource() } }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try data.write(to: destination, options: .atomic)
+    }
 }
 
 private struct DetailCacheEntry {
@@ -84,9 +127,14 @@ final class AppModel {
     var playlistSubscriptionOverrides: [Int64: Bool] = [:]
     var videoSubscriptionOverrides: [VideoPageResource: Bool] = [:]
     private(set) var videoSubscriptionRevision = 0
+    private(set) var loadedVideoSubscriptionRevision = 0
     var albumSubscriptionOverrides: [Int64: Bool] = [:]
     var artistFollowOverrides: [Int64: Bool] = [:]
     var userFollowOverrides: [Int64: Bool] = [:]
+    private(set) var pendingMutations: Set<LibraryMutationKey> = []
+    private var podcastSubscriptionOverrides: [Int64: Bool] = [:]
+    private(set) var podcastSubscriptionRevision: UInt64 = 0
+    private(set) var cacheConfigurationRevision: UInt64 = 0
     var broadcastCollectionOverrides: [String: Bool] = [:]
     var currentUserID: Int64? {
         didSet {
@@ -119,6 +167,16 @@ final class AppModel {
     @ObservationIgnored private var searchHintGeneration = 0
     @ObservationIgnored private var hotSearchGeneration = 0
     @ObservationIgnored private var accountRefreshGeneration = 0
+    @ObservationIgnored private var accountCredentialRevision: UInt64?
+    @ObservationIgnored private var accountPlaylistsTask: (
+        id: UUID,
+        userID: Int64,
+        credentialRevision: UInt64,
+        task: Task<[Playlist], any Error>,
+        loadedAt: Date?
+    )?
+    @ObservationIgnored private var accountPlaylistsProgress: (taskID: UUID, values: [Playlist])?
+    @ObservationIgnored private var accountPlaylistObservers: [UUID: ([Playlist]) -> Void] = [:]
     @ObservationIgnored private var detailGenerations: [Route: Int] = [:]
     @ObservationIgnored private var homeCache: [String: HomeSection] = [:]
     @ObservationIgnored private var homeTasks: [String: HomeTaskEntry] = [:]
@@ -133,7 +191,23 @@ final class AppModel {
     @ObservationIgnored private var searchDirectMatchTask: Task<Void, Never>?
     @ObservationIgnored private var detailTasks: [Route: Task<Void, Never>] = [:]
     @ObservationIgnored private var playlistLoadMoreTasks: [Int64: Task<Void, Never>] = [:]
+    @ObservationIgnored private var playlistLoadMoreTaskIDs: [Int64: UUID] = [:]
+    @ObservationIgnored private var mutationTasks: [LibraryMutationKey: MutationTaskEntry] = [:]
+    @ObservationIgnored private var favoriteTask: Task<Int, any Error>?
+    @ObservationIgnored private var favoriteTaskID: UUID?
     @ObservationIgnored private var interactionMessageTask: Task<Void, Never>?
+    @ObservationIgnored private let artworkFileWriter = ArtworkFileWriter()
+    @ObservationIgnored private var savingArtworkDestinations: Set<URL> = []
+    @ObservationIgnored private var resolvedDownloadFolder: URL?
+    @ObservationIgnored private var resolvedVideoDownloadFolder: URL?
+    @ObservationIgnored private var resolvedImageFolder: URL?
+    @ObservationIgnored private var resolvedSheetFolder: URL?
+    @ObservationIgnored private var resolvedCacheFolder: URL?
+    @ObservationIgnored private var bookmarkResolveTask: Task<Void, Never>?
+    @ObservationIgnored private var bookmarkGeneration = 0
+    @ObservationIgnored private let downloadCacheConfigurator: @MainActor (URL) -> Void
+    @ObservationIgnored private let bookmarkResolver: @Sendable (Data?) async -> URL?
+    @ObservationIgnored private(set) var bookmarkResolutionCompletionCount: UInt64 = 0
 
     init(
         repository: any MusicRepository,
@@ -145,7 +219,11 @@ final class AppModel {
         downloads: MusicDownloadManager? = nil,
         uploads: AudioUploadManager? = nil,
         session: SessionController? = nil,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        downloadCacheConfigurator: (@MainActor (URL) -> Void)? = nil,
+        bookmarkResolver: @escaping @Sendable (Data?) async -> URL? = {
+            AppModel.resolveFolder($0)
+        }
     ) {
         self.repository = repository
         self.library = library
@@ -157,6 +235,10 @@ final class AppModel {
         self.uploads = uploads
         self.session = session
         self.defaults = defaults
+        self.downloadCacheConfigurator = downloadCacheConfigurator ?? { [weak downloads] root in
+            downloads?.configure(cacheRoot: root)
+        }
+        self.bookmarkResolver = bookmarkResolver
         homeDescriptors = repository.homeDescriptors
 
         let validSectionIDs = Set(homeDescriptors.map(\.id))
@@ -191,8 +273,9 @@ final class AppModel {
             cacheBookmark: defaults.data(forKey: "cacheBookmark")
         )
         downloads?.setMaximumConcurrentDownloads(settings.downloadConcurrency)
-        downloads?.configure(cacheRoot: cacheFolderURL)
+        self.downloadCacheConfigurator(cacheFolderURL.standardizedFileURL)
         rebuildHomeSlots()
+        restoreBookmarkedFolders()
     }
 
     func selectSidebar(_ item: SidebarItem) {
@@ -239,6 +322,7 @@ final class AppModel {
         searchState.offset = 0
         searchGeneration += 1
         searchTask?.cancel()
+        searchTask = nil
         searchLoad = .idle
         isSearchLoadingMore = false
         searchLoadMoreError = nil
@@ -301,29 +385,30 @@ final class AppModel {
 
     private func loadHotSearch(using extras: LiveMusicExtras) {
         guard hotSearchItems.isEmpty, !isHotSearchLoading else { return }
-        hotSearchGeneration &+= 1
+        hotSearchGeneration += 1
         let generation = hotSearchGeneration
         isHotSearchLoading = true
         hotSearchTask = Task { @MainActor [weak self, extras] in
+            defer {
+                if let self, self.hotSearchGeneration == generation {
+                    self.isHotSearchLoading = false
+                    self.hotSearchTask = nil
+                }
+            }
             do {
                 let items = try await extras.hotSearch()
                 try Task.checkCancellation()
                 guard let self, self.hotSearchGeneration == generation else { return }
                 self.hotSearchItems = items
-                self.isHotSearchLoading = false
-                self.hotSearchTask = nil
             } catch is CancellationError {
             } catch {
-                guard let self, self.hotSearchGeneration == generation else { return }
-                self.isHotSearchLoading = false
-                self.hotSearchTask = nil
             }
         }
     }
 
     private func cancelHotSearchLoad() {
         guard hotSearchTask != nil || isHotSearchLoading else { return }
-        hotSearchGeneration &+= 1
+        hotSearchGeneration += 1
         hotSearchTask?.cancel()
         hotSearchTask = nil
         isHotSearchLoading = false
@@ -358,43 +443,71 @@ final class AppModel {
 
     func refreshAccountState() async {
         guard let library, let extras else { return }
+        let credentialRevision = library.transport.credentialSnapshotValue().revision
         accountRefreshGeneration += 1
-        let generation = accountRefreshGeneration
+        var generation = accountRefreshGeneration
         if let session, session.state != .authenticated {
             if currentUserID != nil {
                 await library.invalidateAllCachedResponses()
                 guard accountRefreshGeneration == generation else { return }
-                resetAccountScopedState(userID: nil)
+                _ = resetAccountScopedState(userID: nil)
             }
             return
         }
         do {
-            let login = try await library.loginState()
+            let login = try await library.loginState(
+                expectedCredentialRevision: credentialRevision
+            )
             try Task.checkCancellation()
-            guard accountRefreshGeneration == generation else { return }
+            guard accountRefreshGeneration == generation,
+                  library.transport.credentialSnapshotValue().revision == credentialRevision
+            else { return }
             guard case let .loggedIn(user) = login else {
                 if currentUserID != nil {
                     await library.invalidateAllCachedResponses()
                     guard accountRefreshGeneration == generation else { return }
-                    resetAccountScopedState(userID: nil)
+                    _ = resetAccountScopedState(userID: nil)
                 } else {
                     likedSongIDs = []
                 }
                 return
             }
-            if currentUserID != user.id {
+            if currentUserID != user.id || accountCredentialRevision != credentialRevision {
                 await library.invalidateAllCachedResponses()
-                guard accountRefreshGeneration == generation else { return }
-                resetAccountScopedState(userID: user.id)
+                guard accountRefreshGeneration == generation,
+                      library.transport.credentialSnapshotValue().revision == credentialRevision
+                else { return }
+                generation = resetAccountScopedState(userID: user.id)
             }
-            let favorites = try await extras.favoriteSongIDs(userID: user.id)
+            let playlists = try await accountPlaylists(
+                userID: user.id,
+                credentialRevision: credentialRevision
+            )
             try Task.checkCancellation()
-            guard accountRefreshGeneration == generation, currentUserID == user.id else { return }
+            guard accountRefreshGeneration == generation,
+                  currentUserID == user.id,
+                  library.transport.credentialSnapshotValue().revision == credentialRevision
+            else { return }
+            let favorites = try await extras.favoriteSongIDs(
+                userID: user.id,
+                playlists: playlists,
+                expectedCredentialRevision: credentialRevision
+            )
+            try Task.checkCancellation()
+            guard accountRefreshGeneration == generation,
+                  currentUserID == user.id,
+                  library.transport.credentialSnapshotValue().revision == credentialRevision
+            else { return }
             likedSongIDs = Set(favorites)
+            if librarySnapshot?.user.id == user.id {
+                _ = storeCachedPlaylists(playlists, playlistRevision: playlistContentRevision)
+            }
             libraryMessage = nil
         } catch is CancellationError {
         } catch {
-            guard accountRefreshGeneration == generation else { return }
+            guard accountRefreshGeneration == generation,
+                  library.transport.credentialSnapshotValue().revision == credentialRevision
+            else { return }
             libraryMessage = error.localizedDescription
         }
     }
@@ -406,6 +519,9 @@ final class AppModel {
     func search(offset: Int? = nil) {
         let query = searchState.query.precomposedStringWithCompatibilityMapping
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            searchGeneration += 1
+            searchTask?.cancel()
+            searchTask = nil
             searchLoad = .idle
             isSearchLoadingMore = false
             searchLoadMoreError = nil
@@ -424,6 +540,12 @@ final class AppModel {
         if previousPage == nil { searchLoad = .loading }
 
         searchTask = Task { @MainActor [weak self, repository] in
+            defer {
+                if let self, self.searchGeneration == generation {
+                    self.isSearchLoadingMore = false
+                    self.searchTask = nil
+                }
+            }
             do {
                 let page = try await repository.search(query: query, scope: scope, offset: requestOffset, limit: 20)
                 try Task.checkCancellation()
@@ -431,14 +553,12 @@ final class AppModel {
                       self.searchState.scope == scope,
                       self.searchState.offset == requestOffset
                 else { return }
-                self.searchLoad = .loaded(previousPage?.appending(page) ?? page)
-                self.isSearchLoadingMore = false
+                self.searchLoad = .loaded(Self.mergedSearchPage(previousPage, page))
             } catch is CancellationError {
             } catch {
                 guard let self, self.searchGeneration == generation else { return }
                 if previousPage != nil {
                     self.searchLoadMoreError = error.localizedDescription
-                    self.isSearchLoadingMore = false
                 } else {
                     self.searchLoad = .failed(error.localizedDescription)
                 }
@@ -454,14 +574,28 @@ final class AppModel {
         search(offset: page.offset + 20)
     }
 
+    static func mergedSearchPage(_ existing: SearchPage?, _ page: SearchPage) -> SearchPage {
+        var seen = Set(existing?.items.map(\.id) ?? [])
+        var pageSeen = Set<String>()
+        let uniquePage = page.items.filter { pageSeen.insert($0.id).inserted }
+        let additions = uniquePage.filter { seen.insert($0.id).inserted }
+        let progressed = existing.map { page.offset > $0.offset && !additions.isEmpty } ?? !uniquePage.isEmpty
+        return SearchPage(
+            items: (existing?.items ?? []) + additions,
+            offset: max(existing?.offset ?? page.offset, page.offset),
+            hasMore: page.hasMore && progressed
+        )
+    }
+
     func loadDetail(_ route: Route, reload: Bool = false) {
-        guard path.contains(route) else { return }
+        guard path.last == route else { return }
         let needsRefresh = reload || staleDetailRoutes.contains(route)
         if !needsRefresh, case .loaded? = detailLoads[route] { return }
 
         if needsRefresh, case let .playlist(id) = route {
             playlistLoadMoreTasks[id]?.cancel()
             playlistLoadMoreTasks[id] = nil
+            playlistLoadMoreTaskIDs[id] = nil
             loadingPlaylistIDs.remove(id)
             playlistLoadMoreErrors[id] = nil
         }
@@ -476,16 +610,39 @@ final class AppModel {
         }
 
         let generation = (detailGenerations[route] ?? 0) + 1
+        let isAccountScopedDetail = switch route {
+        case .album, .playlist, .user: true
+        default: false
+        }
+        let accountGeneration = isAccountScopedDetail ? accountRefreshGeneration : nil
+        let accountID = currentUserID
+        let credentialRevision = isAccountScopedDetail ? repository.currentCredentialRevision : nil
         detailGenerations[route] = generation
         detailTasks[route]?.cancel()
         detailLoads[route] = cached.map { .loaded($0.content) } ?? .loading
-        detailTasks[route] = Task { @MainActor [weak self, repository] in
+        detailTasks[route] = Task { @MainActor [weak self, repository, library] in
             do {
-                let detail = try await repository.detail(for: route)
+                if needsRefresh,
+                   case let .playlist(id) = route,
+                   let credentialRevision {
+                    try await library?.refreshPlaylistDetail(
+                        id,
+                        expectedCredentialRevision: credentialRevision
+                    )
+                }
+                let detail = try await repository.detail(
+                    for: route,
+                    expectedCredentialRevision: credentialRevision
+                )
                 try Task.checkCancellation()
                 guard let self,
                       self.detailGenerations[route] == generation,
-                      self.path.contains(route)
+                      self.path.last == route,
+                      (accountGeneration.map {
+                          self.accountRefreshGeneration == $0
+                              && self.currentUserID == accountID
+                              && repository.currentCredentialRevision == credentialRevision
+                      } ?? true)
                 else { return }
                 self.storeDetail(detail, for: route)
                 self.staleDetailRoutes.remove(route)
@@ -495,7 +652,12 @@ final class AppModel {
                 guard let self,
                       !Task.isCancelled,
                       self.detailGenerations[route] == generation,
-                      self.path.contains(route)
+                      self.path.last == route,
+                      (accountGeneration.map {
+                          self.accountRefreshGeneration == $0
+                              && self.currentUserID == accountID
+                              && repository.currentCredentialRevision == credentialRevision
+                      } ?? true)
                 else { return }
                 self.detailTasks[route] = nil
                 self.loadDetail(route, reload: true)
@@ -503,7 +665,12 @@ final class AppModel {
                 guard let self,
                       !Task.isCancelled,
                       self.detailGenerations[route] == generation,
-                      self.path.contains(route)
+                      self.path.last == route,
+                      (accountGeneration.map {
+                          self.accountRefreshGeneration == $0
+                              && self.currentUserID == accountID
+                              && repository.currentCredentialRevision == credentialRevision
+                      } ?? true)
                 else { return }
                 self.detailLoads[route] = cached.map { .loaded($0.content) }
                     ?? .failed(error.localizedDescription)
@@ -515,20 +682,32 @@ final class AppModel {
     func reloadPlaylist(_ playlistID: Int64) async throws -> Playlist {
         let route = Route.playlist(playlistID)
         let generation = (detailGenerations[route] ?? 0) + 1
+        let accountGeneration = accountRefreshGeneration
+        let accountID = currentUserID
+        let credentialRevision = repository.currentCredentialRevision
         detailGenerations[route] = generation
         detailTasks[route]?.cancel()
         detailTasks[route] = nil
-        await library?.invalidateCachedResponses(in: [.detail, .library])
+        try await library?.refreshPlaylistDetail(
+            playlistID,
+            expectedCredentialRevision: credentialRevision
+        )
 
-        let detail = try await repository.detail(for: route)
+        let detail = try await repository.detail(
+            for: route,
+            expectedCredentialRevision: credentialRevision
+        )
         try Task.checkCancellation()
         guard detailGenerations[route] == generation,
+              accountRefreshGeneration == accountGeneration,
+              currentUserID == accountID,
+              repository.currentCredentialRevision == credentialRevision,
               case let .playlist(playlist, _, _, _) = detail
         else { throw CancellationError() }
 
         storeDetail(detail, for: route)
         staleDetailRoutes.remove(route)
-        if path.contains(route) { detailLoads[route] = .loaded(detail) }
+        if path.last == route { detailLoads[route] = .loaded(detail) }
         if let index = librarySnapshot?.playlists.firstIndex(where: { $0.id == playlistID }) {
             librarySnapshot?.playlists[index] = playlist
         }
@@ -562,11 +741,54 @@ final class AppModel {
         if isFavoritePlaylist {
             if containsSong { likedSongIDs.insert(songID) } else { likedSongIDs.remove(songID) }
         }
-        playlistContentsDidChange(playlistID)
+        playlistSummariesDidChange()
+        let route = Route.playlist(playlistID)
+        guard case let .loaded(content)? = detailLoads[route],
+              case let .playlist(originalPlaylist, songs, trackIDs, loadedTrackCount) = content
+        else {
+            staleDetailRoutes.insert(route)
+            if path.last == route { loadDetail(route, reload: true) }
+            return
+        }
+
+        var playlist = originalPlaylist
+        var updatedSongs = songs
+        var updatedTrackIDs = trackIDs
+        var updatedLoadedCount = loadedTrackCount
+        if containsSong {
+            guard !trackIDs.contains(songID) else { return }
+            guard let song = playlistPickerSong, song.id == songID else {
+                staleDetailRoutes.insert(route)
+                if path.last == route { loadDetail(route, reload: true) }
+                return
+            }
+            updatedTrackIDs.append(songID)
+            updatedSongs.append(song)
+            updatedLoadedCount += 1
+        } else {
+            updatedTrackIDs.removeAll { $0 == songID }
+            updatedSongs.removeAll { $0.id == songID }
+            updatedLoadedCount = min(updatedLoadedCount, updatedTrackIDs.count)
+        }
+        playlist.trackCount = updatedTrackIDs.count
+        let updated = DetailContent.playlist(
+            playlist,
+            songs: updatedSongs,
+            trackIDs: updatedTrackIDs,
+            loadedTrackCount: updatedLoadedCount
+        )
+        detailLoads[route] = .loaded(updated)
+        storeDetail(updated, for: route)
+        staleDetailRoutes.remove(route)
+        if let index = librarySnapshot?.playlists.firstIndex(where: { $0.id == playlistID }) {
+            librarySnapshot?.playlists[index].trackCount = updatedTrackIDs.count
+        }
     }
 
     func playlistSummariesDidChange() {
-        playlistContentRevision &+= 1
+        accountPlaylistsTask?.task.cancel()
+        accountPlaylistsTask = nil
+        playlistContentRevision += 1
     }
 
     func cachedPlaylistsAreFresh(at now: Date = Date()) -> Bool {
@@ -583,6 +805,79 @@ final class AppModel {
         librarySnapshot = snapshot
         cachedPlaylistRevision = playlistRevision
         cachedPlaylistsLoadedAt = loadedAt
+    }
+
+    func accountPlaylists(
+        userID: Int64,
+        credentialRevision: UInt64,
+        onUpdate: (([Playlist]) -> Void)? = nil
+    ) async throws -> [Playlist] {
+        guard userID > 0, let library else { throw EAPIError.invalidPayload }
+        if currentUserID == userID,
+           accountCredentialRevision == credentialRevision,
+           let snapshot = librarySnapshot,
+           snapshot.user.id == userID,
+           cachedPlaylistsAreFresh() {
+            onUpdate?(snapshot.playlists)
+            return snapshot.playlists
+        }
+
+        let taskID: UUID
+        let task: Task<[Playlist], any Error>
+        if let existing = accountPlaylistsTask,
+           existing.userID == userID,
+           existing.credentialRevision == credentialRevision,
+           existing.loadedAt.map({ Date().timeIntervalSince($0) < 90 }) ?? true {
+            taskID = existing.id
+            task = existing.task
+        } else {
+            accountPlaylistsTask?.task.cancel()
+            taskID = UUID()
+            accountPlaylistsProgress = nil
+            accountPlaylistObservers.removeAll()
+            task = Task { @MainActor [weak self, library] in
+                try await library.userPlaylists(
+                    userID: userID,
+                    expectedCredentialRevision: credentialRevision
+                ) { values in
+                    guard let self, self.accountPlaylistsTask?.id == taskID else { return }
+                    self.accountPlaylistsProgress = (taskID, values)
+                    self.accountPlaylistObservers.values.forEach { $0(values) }
+                }
+            }
+            accountPlaylistsTask = (taskID, userID, credentialRevision, task, nil)
+        }
+
+        let observerID = onUpdate.map { observer -> UUID in
+            let id = UUID()
+            accountPlaylistObservers[id] = observer
+            if accountPlaylistsProgress?.taskID == taskID,
+               let values = accountPlaylistsProgress?.values {
+                observer(values)
+            }
+            return id
+        }
+        defer { if let observerID { accountPlaylistObservers[observerID] = nil } }
+
+        let playlists: [Playlist]
+        do {
+            playlists = try await task.value
+            if accountPlaylistsTask?.id == taskID, accountPlaylistsTask?.loadedAt == nil {
+                accountPlaylistsTask?.loadedAt = Date()
+            }
+        } catch {
+            if accountPlaylistsTask?.id == taskID {
+                accountPlaylistsTask = nil
+                accountPlaylistsProgress = nil
+            }
+            throw error
+        }
+        try Task.checkCancellation()
+        guard currentUserID == userID,
+              accountCredentialRevision == credentialRevision,
+              library.transport.credentialSnapshotValue().revision == credentialRevision
+        else { throw CancellationError() }
+        return playlists
     }
 
     @discardableResult
@@ -602,7 +897,7 @@ final class AppModel {
 
     func loadMorePlaylistSongs(_ playlistID: Int64) {
         let route = Route.playlist(playlistID)
-        guard path.contains(route), playlistLoadMoreTasks[playlistID] == nil,
+        guard path.last == route, playlistLoadMoreTasks[playlistID] == nil,
               case let .loaded(content)? = detailLoads[route],
               case let .playlist(_, _, trackIDs, loadedTrackCount) = content,
               let range = PlaylistSongPaging.nextRange(total: trackIDs.count, loaded: loadedTrackCount)
@@ -610,11 +905,14 @@ final class AppModel {
 
         loadingPlaylistIDs.insert(playlistID)
         playlistLoadMoreErrors[playlistID] = nil
+        let taskID = UUID()
+        playlistLoadMoreTaskIDs[playlistID] = taskID
         playlistLoadMoreTasks[playlistID] = Task { @MainActor [weak self, repository] in
+            defer { self?.finishPlaylistLoadMore(playlistID, taskID: taskID) }
             do {
                 let page = try await repository.songs(ids: Array(trackIDs[range]))
                 try Task.checkCancellation()
-                guard let self, self.path.contains(route),
+                guard let self, self.path.last == route,
                       case let .loaded(current)? = self.detailLoads[route],
                       case let .playlist(currentPlaylist, currentSongs, currentTrackIDs, currentLoadedCount) = current,
                       currentTrackIDs == trackIDs,
@@ -630,27 +928,28 @@ final class AppModel {
                 )
                 self.detailLoads[route] = .loaded(updated)
                 self.storeDetail(updated, for: route)
-                self.loadingPlaylistIDs.remove(playlistID)
-                self.playlistLoadMoreTasks[playlistID] = nil
             } catch is CancellationError {
             } catch {
-                guard let self, self.path.contains(route) else { return }
+                guard let self, self.path.last == route else { return }
                 self.playlistLoadMoreErrors[playlistID] = error.localizedDescription
-                self.loadingPlaylistIDs.remove(playlistID)
-                self.playlistLoadMoreTasks[playlistID] = nil
             }
         }
     }
 
+    private func finishPlaylistLoadMore(_ playlistID: Int64, taskID: UUID) {
+        guard playlistLoadMoreTaskIDs[playlistID] == taskID else { return }
+        playlistLoadMoreTaskIDs[playlistID] = nil
+        playlistLoadMoreTasks[playlistID] = nil
+        loadingPlaylistIDs.remove(playlistID)
+    }
+
     private func discardInactiveDetails() {
-        let activeRoutes = Set(path)
+        let activeRoutes = Set(path.last.map { [$0] } ?? [])
         detailTasks
             .filter { !activeRoutes.contains($0.key) }
             .values
             .forEach { $0.cancel() }
         detailTasks = detailTasks.filter { activeRoutes.contains($0.key) }
-        detailGenerations = detailGenerations.filter { activeRoutes.contains($0.key) }
-        detailLoads = detailLoads.filter { activeRoutes.contains($0.key) }
 
         let activePlaylistIDs = Set(activeRoutes.compactMap { route -> Int64? in
             guard case let .playlist(id) = route else { return nil }
@@ -661,6 +960,7 @@ final class AppModel {
             .values
             .forEach { $0.cancel() }
         playlistLoadMoreTasks = playlistLoadMoreTasks.filter { activePlaylistIDs.contains($0.key) }
+        playlistLoadMoreTaskIDs = playlistLoadMoreTaskIDs.filter { activePlaylistIDs.contains($0.key) }
         loadingPlaylistIDs.formIntersection(activePlaylistIDs)
         playlistLoadMoreErrors = playlistLoadMoreErrors.filter { activePlaylistIDs.contains($0.key) }
     }
@@ -726,7 +1026,17 @@ final class AppModel {
         settings.homeSectionIDs = ids
         defaults.set(ids, forKey: "homeSectionIDs")
         showToast("首页栏目已更新")
-        loadHome()
+        if enabled {
+            let title = homeDescriptors.first(where: { $0.id == id })?.title ?? id
+            homeSlots.append(HomeSlot(id: id, title: title, load: .loading))
+            homeSlots.sort { descriptorIndex($0.id) < descriptorIndex($1.id) }
+            startHomeTask(id: id, generation: homeGeneration)
+        } else {
+            homeTasks[id]?.task.cancel()
+            homeTasks[id] = nil
+            homeCache[id] = nil
+            homeSlots.removeAll { $0.id == id }
+        }
     }
 
     func setDownloadFolder(_ url: URL) {
@@ -734,6 +1044,8 @@ final class AppModel {
             let bookmark = try folderBookmark(for: url)
             settings.downloadBookmark = bookmark
             defaults.set(bookmark, forKey: "downloadBookmark")
+            resolvedDownloadFolder = url
+            restoreBookmarkedFolders()
             settingsMessage = nil
             showToast("音频下载位置已保存")
         } catch {
@@ -746,6 +1058,8 @@ final class AppModel {
             let bookmark = try folderBookmark(for: url)
             settings.videoDownloadBookmark = bookmark
             defaults.set(bookmark, forKey: "videoDownloadBookmark")
+            resolvedVideoDownloadFolder = url
+            restoreBookmarkedFolders()
             settingsMessage = nil
             showToast("视频下载位置已保存")
         } catch {
@@ -758,7 +1072,8 @@ final class AppModel {
             let bookmark = try folderBookmark(for: url)
             settings.cacheBookmark = bookmark
             defaults.set(bookmark, forKey: "cacheBookmark")
-            downloads?.configure(cacheRoot: cacheFolderURL)
+            commitCacheFolder(url)
+            restoreBookmarkedFolders()
             settingsMessage = nil
             showToast("缓存位置已保存")
         } catch {
@@ -766,11 +1081,23 @@ final class AppModel {
         }
     }
 
+    func clearCacheFolder() {
+        guard settings.cacheBookmark != nil || resolvedCacheFolder != nil else { return }
+        settings.cacheBookmark = nil
+        defaults.removeObject(forKey: "cacheBookmark")
+        commitCacheFolder(nil)
+        restoreBookmarkedFolders()
+        settingsMessage = nil
+        showToast("缓存位置已恢复默认")
+    }
+
     func setImageFolder(_ url: URL) {
         do {
             let bookmark = try folderBookmark(for: url)
             settings.imageBookmark = bookmark
             defaults.set(bookmark, forKey: "imageBookmark")
+            resolvedImageFolder = url
+            restoreBookmarkedFolders()
             settingsMessage = nil
             showToast("图片保存位置已保存")
         } catch {
@@ -783,6 +1110,8 @@ final class AppModel {
             let bookmark = try folderBookmark(for: url)
             settings.sheetBookmark = bookmark
             defaults.set(bookmark, forKey: "sheetBookmark")
+            resolvedSheetFolder = url
+            restoreBookmarkedFolders()
             settingsMessage = nil
             showToast("琴谱保存位置已保存")
         } catch {
@@ -810,23 +1139,24 @@ final class AppModel {
         let missingIDs = trackIDs.filter { songsByID[$0] == nil }
         for song in try await repository.songs(ids: missingIDs) { songsByID[song.id] = song }
 
-        return trackIDs.compactMap { songsByID[$0] }.reduce(into: 0) { count, song in
-            if downloads.enqueue(
-                song: song,
-                to: downloadFolderURL,
-                quality: quality,
-                includeLyrics: true
-            ) {
-                count += 1
-            }
-        }
+        return downloads.enqueue(
+            songs: trackIDs.compactMap { songsByID[$0] },
+            to: downloadFolderURL,
+            quality: quality,
+            includeLyrics: true
+        )
     }
 
     func download(_ song: CloudSong) {
-        guard let downloads, let userID = currentUserID else { return }
+        guard let downloads,
+              let userID = currentUserID,
+              let credentialRevision = accountCredentialRevision,
+              library?.transport.credentialSnapshotValue().revision == credentialRevision
+        else { return }
         downloads.enqueue(
             cloudSong: song,
             userID: userID,
+            expectedCredentialRevision: credentialRevision,
             to: downloadFolderURL,
             includeLyrics: true
         )
@@ -834,19 +1164,17 @@ final class AppModel {
 
     func saveArtwork(from sourceURL: URL, title: String) {
         let destinationFolder = imageFolderURL
+        let cleanedTitle = MusicDownloadFiles.sanitizedFileName(title)
+        let fileName = cleanedTitle.isEmpty ? "封面" : cleanedTitle
+        let fileExtension = sourceURL.pathExtension.lowercased() == "png" ? "png" : "jpg"
+        let destination = destinationFolder.appending(path: fileName).appendingPathExtension(fileExtension)
+        guard savingArtworkDestinations.insert(destination).inserted else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
+            defer { self.savingArtworkDestinations.remove(destination) }
             do {
                 let data = try await ArtworkPipeline.shared.loadData(for: sourceURL)
-                let hasSecurityScope = destinationFolder.startAccessingSecurityScopedResource()
-                defer { if hasSecurityScope { destinationFolder.stopAccessingSecurityScopedResource() } }
-                try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
-
-                let cleanedTitle = MusicDownloadFiles.sanitizedFileName(title)
-                let fileName = cleanedTitle.isEmpty ? "封面" : cleanedTitle
-                let fileExtension = sourceURL.pathExtension.lowercased() == "png" ? "png" : "jpg"
-                let destination = destinationFolder.appending(path: fileName).appendingPathExtension(fileExtension)
-                try data.write(to: destination, options: .atomic)
+                try await artworkFileWriter.write(data, to: destination, folder: destinationFolder)
                 showToast("图片保存成功")
             } catch {
                 libraryMessage = "图片保存失败：\(error.localizedDescription)"
@@ -869,44 +1197,119 @@ final class AppModel {
     func toggleSongLiked(_ songID: Int64) {
         guard let library else { return }
         let liked = !likedSongIDs.contains(songID)
-        Task { @MainActor [weak self] in
-            do {
-                try await library.setSongLiked(songID, liked: liked)
-                guard let self else { return }
-                if liked { self.likedSongIDs.insert(songID) } else { self.likedSongIDs.remove(songID) }
-                self.playlistContentsDidChange()
-                self.showToast(liked ? "已喜欢歌曲" : "已取消喜欢")
-            } catch {
-                self?.libraryMessage = error.localizedDescription
-            }
+        startMutation(.songLike(songID), transport: library.transport, operation: { revision in
+            try await library.setSongLiked(
+                songID,
+                liked: liked,
+                expectedCredentialRevision: revision
+            )
+        }) { model in
+            if liked { model.likedSongIDs.insert(songID) } else { model.likedSongIDs.remove(songID) }
+            model.playlistContentsDidChange()
+            model.showToast(liked ? "已喜欢歌曲" : "已取消喜欢")
         }
     }
 
     func favoriteSongs(_ songIDs: [Int64]) async throws -> Int {
-        guard let library else { return 0 }
-        var count = 0
-        defer { if count > 0 { playlistContentsDidChange() } }
-        for songID in songIDs where songID > 0 && !likedSongIDs.contains(songID) {
-            try Task.checkCancellation()
-            try await library.setSongLiked(songID, liked: true)
-            likedSongIDs.insert(songID)
-            count += 1
+        if let favoriteTask {
+            _ = try await favoriteTask.value
+            return try await favoriteSongs(songIDs)
         }
-        return count
+        guard let library, let userID = currentUserID else { return 0 }
+        var seen = Set<Int64>()
+        let ids = songIDs.filter {
+            $0 > 0 && seen.insert($0).inserted && !likedSongIDs.contains($0)
+        }
+        guard !ids.isEmpty else { return 0 }
+
+        let generation = accountRefreshGeneration
+        let revision = library.transport.credentialSnapshotValue().revision
+        let keys = Set(ids.map(LibraryMutationKey.songLike))
+        guard pendingMutations.isDisjoint(with: keys) else { return 0 }
+        let taskID = UUID()
+        favoriteTaskID = taskID
+        pendingMutations.formUnion(keys)
+        let task = Task { @MainActor [weak self, library] () throws -> Int in
+            guard let self else { throw CancellationError() }
+            var successfulIDs: [Int64] = []
+            defer {
+                if !successfulIDs.isEmpty,
+                   self.accountContextMatches(
+                       generation: generation,
+                       userID: userID,
+                       credentialRevision: revision,
+                       transport: library.transport
+                   ) {
+                    self.playlistContentsDidChange()
+                }
+                self.finishFavoriteTask(id: taskID, keys: keys)
+            }
+            for songID in ids {
+                try Task.checkCancellation()
+                guard self.accountContextMatches(
+                    generation: generation,
+                    userID: userID,
+                    credentialRevision: revision,
+                    transport: library.transport
+                ) else { throw CancellationError() }
+                do {
+                    try await library.setSongLiked(
+                        songID,
+                        liked: true,
+                        expectedCredentialRevision: revision
+                    )
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    guard self.accountContextMatches(
+                        generation: generation,
+                        userID: userID,
+                        credentialRevision: revision,
+                        transport: library.transport
+                    ) else { throw CancellationError() }
+                    let failedIndex = successfulIDs.count
+                    throw FavoriteSongsFailure(
+                        successfulIDs: successfulIDs,
+                        failedID: songID,
+                        unattemptedIDs: Array(ids.dropFirst(failedIndex + 1)),
+                        causeDescription: error.localizedDescription
+                    )
+                }
+                try Task.checkCancellation()
+                guard self.accountContextMatches(
+                    generation: generation,
+                    userID: userID,
+                    credentialRevision: revision,
+                    transport: library.transport
+                ) else { throw CancellationError() }
+                self.likedSongIDs.insert(songID)
+                successfulIDs.append(songID)
+            }
+            return successfulIDs.count
+        }
+        favoriteTask = task
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     func setPlaylistSubscribed(_ id: Int64, subscribed: Bool) {
         guard let library else { return }
-        Task { @MainActor [weak self] in
-            do {
-                try await library.setPlaylistSubscribed(id, subscribed: subscribed)
-                guard let self else { return }
-                self.playlistSubscriptionOverrides[id] = subscribed
-                self.playlistSummariesDidChange()
-                self.showToast(subscribed ? "歌单已收藏" : "已取消收藏歌单")
-            } catch {
-                self?.libraryMessage = error.localizedDescription
+        startMutation(.playlistSubscription(id), transport: library.transport, operation: { revision in
+            try await library.setPlaylistSubscribed(
+                id,
+                subscribed: subscribed,
+                expectedCredentialRevision: revision
+            )
+        }) { model in
+            model.playlistSubscriptionOverrides[id] = subscribed
+            if let index = model.librarySnapshot?.playlists.firstIndex(where: { $0.id == id }) {
+                model.librarySnapshot?.playlists[index].isSubscribed = subscribed
             }
+            model.playlistSummariesDidChange()
+            model.showToast(subscribed ? "歌单已收藏" : "已取消收藏歌单")
         }
     }
 
@@ -914,54 +1317,113 @@ final class AppModel {
         for resource in resources where videoSubscriptionOverrides[resource] == nil {
             videoSubscriptionOverrides[resource] = true
         }
+        loadedVideoSubscriptionRevision = videoSubscriptionRevision
     }
 
     func videoSubscriptionDidChange(_ resource: VideoPageResource, subscribed: Bool) {
         videoSubscriptionOverrides[resource] = subscribed
-        videoSubscriptionRevision &+= 1
+        videoSubscriptionRevision += 1
         showToast(subscribed ? "\(resource.displayName)已收藏" : "已取消收藏\(resource.displayName)")
     }
 
     func setAlbumSubscribed(_ id: Int64, subscribed: Bool) {
         guard let library else { return }
-        Task { @MainActor [weak self] in
-            do {
-                try await library.setAlbumSubscribed(id, subscribed: subscribed)
-                guard let self else { return }
-                self.albumSubscriptionOverrides[id] = subscribed
-                self.showToast(subscribed ? "专辑已收藏" : "已取消收藏专辑")
-            } catch {
-                self?.libraryMessage = error.localizedDescription
-            }
+        startMutation(.albumSubscription(id), transport: library.transport, operation: { revision in
+            try await library.setAlbumSubscribed(
+                id,
+                subscribed: subscribed,
+                expectedCredentialRevision: revision
+            )
+        }) { model in
+            model.albumSubscriptionOverrides[id] = subscribed
+            model.showToast(subscribed ? "专辑已收藏" : "已取消收藏专辑")
         }
     }
 
     func setArtistFollowed(_ id: Int64, followed: Bool) {
         guard let library else { return }
-        Task { @MainActor [weak self] in
-            do {
-                try await library.setArtistFollowed(id, followed: followed)
-                guard let self else { return }
-                self.artistFollowOverrides[id] = followed
-                self.showToast(followed ? "已关注歌手" : "已取消关注歌手")
-            } catch {
-                self?.libraryMessage = error.localizedDescription
-            }
+        startMutation(.artistFollow(id), transport: library.transport, operation: { revision in
+            try await library.setArtistFollowed(
+                id,
+                followed: followed,
+                expectedCredentialRevision: revision
+            )
+        }) { model in
+            model.artistFollowOverrides[id] = followed
+            model.showToast(followed ? "已关注歌手" : "已取消关注歌手")
         }
     }
 
     func setUserFollowed(_ id: Int64, followed: Bool) {
         guard let library else { return }
-        Task { @MainActor [weak self] in
-            do {
-                try await library.setUserFollowed(id, followed: followed)
-                guard let self else { return }
-                self.userFollowOverrides[id] = followed
-                self.showToast(followed ? "已关注用户" : "已取消关注用户")
-            } catch {
-                self?.libraryMessage = error.localizedDescription
-            }
+        startMutation(.userFollow(id), transport: library.transport, operation: { revision in
+            try await library.setUserFollowed(
+                id,
+                followed: followed,
+                expectedCredentialRevision: revision
+            )
+        }) { model in
+            model.userFollowOverrides[id] = followed
+            model.showToast(followed ? "已关注用户" : "已取消关注用户")
         }
+    }
+
+    func addSongToPlaylist(_ songID: Int64, playlistID: Int64, isFavoritePlaylist: Bool) {
+        guard let library else { return }
+        startMutation(
+            .playlistSong(playlistID: playlistID, songID: songID),
+            transport: library.transport,
+            operation: { revision in
+                try await library.addSongs(
+                    [songID],
+                    to: playlistID,
+                    expectedCredentialRevision: revision
+                )
+            }
+        ) { model in
+            model.songPlaylistMembershipDidChange(
+                songID,
+                playlistID: playlistID,
+                isFavoritePlaylist: isFavoritePlaylist,
+                containsSong: true
+            )
+            model.playlistPickerSong = nil
+            model.showToast("已加入歌单")
+        }
+    }
+
+    func removeSongFromPlaylist(_ songID: Int64, playlistID: Int64, isFavoritePlaylist: Bool) {
+        guard let library else { return }
+        startMutation(
+            .playlistSong(playlistID: playlistID, songID: songID),
+            transport: library.transport,
+            operation: { revision in
+                try await library.removeSongs(
+                    [songID],
+                    from: playlistID,
+                    expectedCredentialRevision: revision
+                )
+            }
+        ) { model in
+            model.songPlaylistMembershipDidChange(
+                songID,
+                playlistID: playlistID,
+                isFavoritePlaylist: isFavoritePlaylist,
+                containsSong: false
+            )
+            model.showToast("已从歌单移除")
+        }
+    }
+
+    func podcastSubscriptionOverride(for id: Int64) -> Bool? {
+        podcastSubscriptionOverrides[id]
+    }
+
+    func commitPodcastSubscription(id: Int64, subscribed: Bool) {
+        guard podcastSubscriptionOverrides[id] != subscribed else { return }
+        podcastSubscriptionOverrides[id] = subscribed
+        podcastSubscriptionRevision &+= 1
+        showToast(subscribed ? "播客已订阅" : "已取消订阅播客")
     }
 
     var downloadPath: String {
@@ -985,26 +1447,109 @@ final class AppModel {
     }
 
     var cacheFolderURL: URL {
-        resolveFolder(settings.cacheBookmark) ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        resolvedCacheFolder ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appending(path: "TinyCloudMusic", directoryHint: .isDirectory)
+    }
+
+    private func startMutation(
+        _ key: LibraryMutationKey,
+        transport: EAPITransport,
+        operation: @escaping @Sendable (UInt64) async throws -> Void,
+        commit: @escaping @MainActor (AppModel) -> Void
+    ) {
+        guard let userID = currentUserID, !pendingMutations.contains(key) else { return }
+        let generation = accountRefreshGeneration
+        let revision = transport.credentialSnapshotValue().revision
+        let taskID = UUID()
+        pendingMutations.insert(key)
+        let task = Task { @MainActor [weak self] in
+            defer { self?.finishMutation(key, taskID: taskID) }
+            guard let self,
+                  self.accountContextMatches(
+                      generation: generation,
+                      userID: userID,
+                      credentialRevision: revision,
+                      transport: transport
+                  )
+            else { return }
+            do {
+                try await operation(revision)
+                try Task.checkCancellation()
+                guard self.accountContextMatches(
+                    generation: generation,
+                    userID: userID,
+                    credentialRevision: revision,
+                    transport: transport
+                ) else { return }
+                commit(self)
+            } catch is CancellationError {
+            } catch {
+                guard self.accountContextMatches(
+                    generation: generation,
+                    userID: userID,
+                    credentialRevision: revision,
+                    transport: transport
+                ) else { return }
+                self.libraryMessage = error.localizedDescription
+            }
+        }
+        mutationTasks[key] = MutationTaskEntry(id: taskID, task: task)
+    }
+
+    private func finishMutation(_ key: LibraryMutationKey, taskID: UUID) {
+        guard mutationTasks[key]?.id == taskID else { return }
+        mutationTasks[key] = nil
+        pendingMutations.remove(key)
+    }
+
+    private func finishFavoriteTask(id: UUID, keys: Set<LibraryMutationKey>) {
+        guard favoriteTaskID == id else { return }
+        favoriteTask = nil
+        favoriteTaskID = nil
+        pendingMutations.subtract(keys)
+    }
+
+    private func accountContextMatches(
+        generation: Int,
+        userID: Int64,
+        credentialRevision: UInt64,
+        transport: EAPITransport
+    ) -> Bool {
+        accountRefreshGeneration == generation
+            && currentUserID == userID
+            && transport.credentialSnapshotValue().revision == credentialRevision
     }
 
     private func startHomeTask(id: String, generation: Int) {
         let taskID = UUID()
+        let accountGeneration = accountRefreshGeneration
+        let accountID = currentUserID
+        let credentialRevision = repository.currentCredentialRevision
         let task = Task { @MainActor [weak self, repository] in
             defer { self?.finishHomeTask(id: id, taskID: taskID) }
             do {
-                let section = try await repository.homeSection(id: id)
+                let section = try await repository.homeSection(
+                    id: id,
+                    expectedCredentialRevision: credentialRevision
+                )
                 try Task.checkCancellation()
                 guard let self,
                       self.homeGeneration == generation,
-                      self.homeSlots.contains(where: { $0.id == id })
+                      self.homeSlots.contains(where: { $0.id == id }),
+                      self.accountRefreshGeneration == accountGeneration,
+                      self.currentUserID == accountID,
+                      repository.currentCredentialRevision == credentialRevision
                 else { return }
                 self.homeCache[id] = section
                 self.updateHomeSlot(id: id, load: .loaded(section))
             } catch is CancellationError {
             } catch {
-                guard let self, self.homeGeneration == generation else { return }
+                guard let self,
+                      self.homeGeneration == generation,
+                      self.accountRefreshGeneration == accountGeneration,
+                      self.currentUserID == accountID,
+                      repository.currentCredentialRevision == credentialRevision
+                else { return }
                 self.updateHomeSlot(
                     id: id,
                     load: self.homeCache[id].map(HomeSectionLoad.loaded)
@@ -1054,21 +1599,33 @@ final class AppModel {
         }.first
     }
 
-    private func resetAccountScopedState(userID: Int64?) {
-        downloads?.cancelCloudDownloads(exceptUserID: userID)
-        homeGeneration &+= 1
+    @discardableResult
+    private func resetAccountScopedState(userID: Int64?) -> Int {
+        accountRefreshGeneration += 1
+        let generation = accountRefreshGeneration
+        mutationTasks.values.forEach { $0.task.cancel() }
+        mutationTasks.removeAll()
+        favoriteTask?.cancel()
+        favoriteTask = nil
+        favoriteTaskID = nil
+        accountPlaylistsTask?.task.cancel()
+        accountPlaylistsTask = nil
+        accountPlaylistsProgress = nil
+        accountPlaylistObservers.removeAll()
+        pendingMutations.removeAll()
+        homeGeneration += 1
         homeTasks.values.forEach { $0.task.cancel() }
         homeTasks.removeAll()
         homeCache.removeAll()
         rebuildHomeSlots()
 
-        searchGeneration &+= 1
+        searchGeneration += 1
         searchTask?.cancel()
         searchTask = nil
         searchLoad = .idle
         isSearchLoadingMore = false
         searchLoadMoreError = nil
-        searchHintGeneration &+= 1
+        searchHintGeneration += 1
         searchHintTask?.cancel()
         searchHintTask = nil
         searchDirectMatchTask?.cancel()
@@ -1076,7 +1633,7 @@ final class AppModel {
         searchHints = []
         searchDirectMatches = []
         searchHintCache.removeAll()
-        hotSearchGeneration &+= 1
+        hotSearchGeneration += 1
         hotSearchTask?.cancel()
         hotSearchTask = nil
         hotSearchItems = []
@@ -1086,6 +1643,7 @@ final class AppModel {
         detailTasks.removeAll()
         playlistLoadMoreTasks.values.forEach { $0.cancel() }
         playlistLoadMoreTasks.removeAll()
+        playlistLoadMoreTaskIDs.removeAll()
         loadingPlaylistIDs.removeAll()
         playlistLoadMoreErrors.removeAll()
         detailGenerations.removeAll()
@@ -1098,17 +1656,29 @@ final class AppModel {
         playlistSubscriptionOverrides.removeAll()
         videoSubscriptionOverrides.removeAll()
         videoSubscriptionRevision = 0
+        loadedVideoSubscriptionRevision = 0
         albumSubscriptionOverrides.removeAll()
         artistFollowOverrides.removeAll()
         userFollowOverrides.removeAll()
+        podcastSubscriptionOverrides.removeAll()
+        podcastSubscriptionRevision &+= 1
         broadcastCollectionOverrides.removeAll()
         librarySnapshot = nil
         playlistContentRevision = 0
         cachedPlaylistRevision = -1
         cachedPlaylistsLoadedAt = nil
         playlistPickerSong = nil
+        accountCredentialRevision = userID == nil
+            ? nil
+            : library?.transport.credentialSnapshotValue().revision
+        downloads?.setCloudDownloadAccount(
+            userID: userID,
+            credentialRevision: accountCredentialRevision
+        )
+        personalFM?.setAccount(userID)
         uploads?.setAccount(userID)
         currentUserID = userID
+        return generation
     }
 
     private func rebuildHomeSlots(load: HomeSectionLoad = .idle) {
@@ -1128,26 +1698,24 @@ final class AppModel {
     }
 
     var downloadFolderURL: URL {
-        customDownloadFolderURL ?? defaultDownloadRoot
+        resolvedDownloadFolder ?? defaultDownloadRoot
             .appending(path: "歌曲", directoryHint: .isDirectory)
     }
 
     var videoDownloadFolderURL: URL {
-        resolveFolder(settings.videoDownloadBookmark) ?? defaultDownloadRoot
+        resolvedVideoDownloadFolder ?? defaultDownloadRoot
             .appending(path: "视频", directoryHint: .isDirectory)
     }
 
     var imageFolderURL: URL {
-        resolveFolder(settings.imageBookmark) ?? customDownloadFolderURL ?? defaultDownloadRoot
+        resolvedImageFolder ?? resolvedDownloadFolder ?? defaultDownloadRoot
             .appending(path: "图片", directoryHint: .isDirectory)
     }
 
     var sheetFolderURL: URL {
-        resolveFolder(settings.sheetBookmark) ?? customDownloadFolderURL ?? defaultDownloadRoot
+        resolvedSheetFolder ?? resolvedDownloadFolder ?? defaultDownloadRoot
             .appending(path: "琴谱", directoryHint: .isDirectory)
     }
-
-    private var customDownloadFolderURL: URL? { resolveFolder(settings.downloadBookmark) }
 
     private var defaultDownloadRoot: URL {
         FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
@@ -1158,7 +1726,55 @@ final class AppModel {
         try url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
     }
 
-    private func resolveFolder(_ bookmark: Data?) -> URL? {
+    private func restoreBookmarkedFolders() {
+        bookmarkGeneration += 1
+        let generation = bookmarkGeneration
+        bookmarkResolveTask?.cancel()
+        let bookmarks = (
+            settings.downloadBookmark,
+            settings.videoDownloadBookmark,
+            settings.imageBookmark,
+            settings.sheetBookmark,
+            settings.cacheBookmark
+        )
+        let resolver = bookmarkResolver
+        bookmarkResolveTask = Task { @MainActor [weak self] in
+            let resolved = await Task.detached(priority: .utility) {
+                let download = await resolver(bookmarks.0)
+                let video = await resolver(bookmarks.1)
+                let image = await resolver(bookmarks.2)
+                let sheet = await resolver(bookmarks.3)
+                let cache = await resolver(bookmarks.4)
+                return ResolvedFolders(
+                    download: download,
+                    video: video,
+                    image: image,
+                    sheet: sheet,
+                    cache: cache
+                )
+            }.value
+            guard let self else { return }
+            defer { self.bookmarkResolutionCompletionCount &+= 1 }
+            guard self.bookmarkGeneration == generation, !Task.isCancelled else { return }
+            self.resolvedDownloadFolder = resolved.download
+            self.resolvedVideoDownloadFolder = resolved.video
+            self.resolvedImageFolder = resolved.image
+            self.resolvedSheetFolder = resolved.sheet
+            self.commitCacheFolder(resolved.cache)
+            self.bookmarkResolveTask = nil
+        }
+    }
+
+    private func commitCacheFolder(_ folder: URL?) {
+        let previousRoot = cacheFolderURL.standardizedFileURL
+        resolvedCacheFolder = folder?.standardizedFileURL
+        let root = cacheFolderURL.standardizedFileURL
+        guard root != previousRoot else { return }
+        downloadCacheConfigurator(root)
+        cacheConfigurationRevision &+= 1
+    }
+
+    nonisolated private static func resolveFolder(_ bookmark: Data?) -> URL? {
         guard let bookmark else { return nil }
         var stale = false
         return try? URL(

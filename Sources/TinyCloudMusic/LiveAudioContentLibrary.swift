@@ -17,21 +17,26 @@ struct LiveAudioContentLibrary: Sendable {
         ))
     }
 
-    func recommendedPodcasts(categoryID: Int64) async throws -> [Podcast] {
+    func recommendedPodcasts(
+        categoryID: Int64,
+        refreshCache: Bool = false
+    ) async throws -> [Podcast] {
         guard categoryID > 0 else { throw EAPIError.invalidPayload }
         return AudioContentDecoder.podcasts(try await weapi(
             "/weapi/djradio/recommend",
             payload: ["cateId": categoryID],
-            cache: .detail
+            cache: .detail,
+            refreshCache: refreshCache
         ))
     }
 
-    func podcast(id: Int64) async throws -> Podcast {
+    func podcast(id: Int64, refreshCache: Bool = false) async throws -> Podcast {
         guard id > 0 else { throw EAPIError.invalidPayload }
         guard let podcast = AudioContentDecoder.podcast(try await weapi(
             "/weapi/djradio/v2/get",
             payload: ["id": id],
-            cache: .detail
+            cache: .detail,
+            refreshCache: refreshCache
         )) else { throw EAPIError.missingData("data") }
         return podcast
     }
@@ -40,7 +45,8 @@ struct LiveAudioContentLibrary: Sendable {
         podcastID: Int64,
         offset: Int = 0,
         limit: Int = 30,
-        ascending: Bool = false
+        ascending: Bool = false,
+        refreshCache: Bool = false
     ) async throws -> PodcastEpisodePage {
         guard podcastID > 0, offset >= 0, (1...100).contains(limit) else {
             throw EAPIError.invalidPayload
@@ -54,7 +60,8 @@ struct LiveAudioContentLibrary: Sendable {
                     "offset": offset,
                     "asc": ascending
                 ],
-                cache: .detail
+                cache: .detail,
+                refreshCache: refreshCache
             ),
             podcastID: podcastID,
             offset: offset,
@@ -76,25 +83,45 @@ struct LiveAudioContentLibrary: Sendable {
         return episode
     }
 
-    func subscribedPodcasts(offset: Int = 0, limit: Int = 30) async throws -> PodcastPage {
+    func subscribedPodcasts(
+        offset: Int = 0,
+        limit: Int = 30,
+        refreshCache: Bool = false,
+        expectedCredentialRevision: UInt64
+    ) async throws -> PodcastPage {
         guard offset >= 0, (1...100).contains(limit) else { throw EAPIError.invalidPayload }
         return AudioContentDecoder.podcastPage(
             try await weapi(
                 "/weapi/djradio/get/subed",
                 payload: ["limit": limit, "offset": offset, "total": true],
-                cache: .library
+                cache: .library,
+                refreshCache: refreshCache,
+                expectedCredentialRevision: expectedCredentialRevision
             ),
             offset: offset,
             limit: limit
         )
     }
 
-    func setPodcastSubscribed(_ id: Int64, subscribed: Bool) async throws {
+    func setPodcastSubscribed(
+        _ id: Int64,
+        subscribed: Bool,
+        expectedCredentialRevision: UInt64
+    ) async throws {
         guard id > 0 else { throw EAPIError.invalidPayload }
-        _ = try decodedJSONObject(try await transport.requestWEAPI(
+        _ = try await transport.requestWEAPIJSONObject(
             path: subscribed ? "/weapi/djradio/sub" : "/weapi/djradio/unsub",
-            payload: ["id": id]
-        ))
+            payload: ["id": id],
+            expectedCredentialRevision: expectedCredentialRevision,
+            invalidatesAccountCache: false
+        )
+    }
+
+    func resolvedPodcastEpisode(id: Int64) async throws -> PodcastEpisode {
+        try await PodcastEpisodeEndpointFallback.load(
+            primary: { try await podcastEpisode(id: id) },
+            fallback: { try await voiceDetail(id: id) }
+        )
     }
 
     func voiceDetail(id: Int64) async throws -> PodcastEpisode {
@@ -160,19 +187,27 @@ struct LiveAudioContentLibrary: Sendable {
         )
     }
 
-    func broadcastCurrentInfo(channelID rawID: String) async throws -> BroadcastCurrentInfo {
+    func broadcastCurrentInfo(
+        channelID rawID: String,
+        expectedCredentialRevision: UInt64? = nil
+    ) async throws -> BroadcastCurrentInfo {
         let id = try resourceID(rawID)
         return try AudioContentDecoder.broadcastCurrentInfo(
             await eapi(
                 "/eapi/voice/broadcast/channel/currentinfo",
                 signing: "/api/voice/broadcast/channel/currentinfo",
-                payload: ["channelId": id]
+                payload: ["channelId": id],
+                expectedCredentialRevision: expectedCredentialRevision
             ),
             channelID: id
         )
     }
 
-    func setBroadcastCollected(_ rawID: String, collected: Bool) async throws {
+    func setBroadcastCollected(
+        _ rawID: String,
+        collected: Bool,
+        expectedCredentialRevision: UInt64
+    ) async throws {
         let id = try resourceID(rawID)
         _ = try await eapi(
             "/eapi/content/interact/collect",
@@ -182,13 +217,9 @@ struct LiveAudioContentLibrary: Sendable {
                 "contentId": id,
                 "cancelCollect": collected ? "false" : "true"
             ],
-            invalidatesAccountCache: true,
+            expectedCredentialRevision: expectedCredentialRevision,
             retryable: false
         )
-    }
-
-    func invalidateCachedResponses(in groups: Set<EAPIReadCache>) async {
-        await transport.invalidateCachedResponses(in: groups)
     }
 
     private var songDecoder: LiveMusicRepository {
@@ -198,14 +229,18 @@ struct LiveAudioContentLibrary: Sendable {
     private func weapi(
         _ path: String,
         payload: [String: Any],
-        cache: EAPIReadCache
+        cache: EAPIReadCache,
+        refreshCache: Bool = false,
+        expectedCredentialRevision: UInt64? = nil
     ) async throws -> [String: Any] {
-        try decodedJSONObject(try await transport.requestWEAPI(
+        try await transport.requestWEAPIJSONObject(
             path: path,
             payload: payload,
             cache: cache,
+            refreshCache: refreshCache,
+            expectedCredentialRevision: expectedCredentialRevision,
             invalidatesAccountCache: false
-        ))
+        )
     }
 
     private func eapi(
@@ -213,16 +248,20 @@ struct LiveAudioContentLibrary: Sendable {
         signing logicalPath: String,
         payload: [String: Any],
         cache: EAPIReadCache? = nil,
+        refreshCache: Bool = false,
+        expectedCredentialRevision: UInt64? = nil,
         invalidatesAccountCache: Bool = false,
         retryable: Bool = true
     ) async throws -> [String: Any] {
-        try decodedJSONObject(try await transport.request(
+        try await transport.requestJSONObject(
             EAPIEndpoint(physicalPath, signing: logicalPath, host: Self.eapiHost),
             json: compactJSON(payload),
             cache: cache,
+            refreshCache: refreshCache,
+            expectedCredentialRevision: expectedCredentialRevision,
             invalidatesAccountCache: invalidatesAccountCache,
             retryable: retryable
-        ))
+        )
     }
 
     private func resourceID(_ rawID: String) throws -> String {

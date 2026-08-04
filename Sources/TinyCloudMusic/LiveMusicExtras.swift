@@ -82,10 +82,29 @@ struct LiveMusicExtras: Sendable {
         )
     }
 
-    func favoriteSongIDs(userID: Int64) async throws -> [Int64] {
+    func favoriteSongIDs(
+        userID: Int64,
+        expectedCredentialRevision: UInt64
+    ) async throws -> [Int64] {
         guard userID > 0 else { throw EAPIError.invalidPayload }
-        let playlists = try await userPlaylistResponse(userID: userID, offset: 0, limit: 1_000)
-        guard let favoriteID = MusicExtraDecoder.favoritePlaylistID(playlists), favoriteID != 0 else { return [] }
+        let playlists = try await LiveMusicLibrary(transport: transport).userPlaylists(
+            userID: userID,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
+        return try await favoriteSongIDs(
+            userID: userID,
+            playlists: playlists,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
+    }
+
+    func favoriteSongIDs(
+        userID: Int64,
+        playlists: [Playlist],
+        expectedCredentialRevision: UInt64
+    ) async throws -> [Int64] {
+        guard userID > 0 else { throw EAPIError.invalidPayload }
+        guard let favoriteID = playlists.first(where: { $0.specialType == 5 })?.id else { return [] }
 
         let root = try await call(
             EAPIEndpoint(
@@ -102,7 +121,8 @@ struct LiveMusicExtras: Sendable {
                 "n": "300",
                 "s": "5"
             ],
-            cache: .library
+            cache: .playlistSummaries,
+            expectedCredentialRevision: expectedCredentialRevision
         )
         return MusicExtraDecoder.trackIDs(root.object("playlist"))
     }
@@ -110,7 +130,8 @@ struct LiveMusicExtras: Sendable {
     func artistAlbums(
         artistID: Int64,
         offset: Int = 0,
-        limit: Int = 20
+        limit: Int = 20,
+        expectedCredentialRevision: UInt64
     ) async throws -> MusicArtistAlbumPage {
         guard artistID > 0, offset >= 0, limit > 0 else { throw EAPIError.invalidPayload }
         let root = try await call(
@@ -119,7 +140,8 @@ struct LiveMusicExtras: Sendable {
                 signing: "/api/artist/albums/\(artistID)",
                 host: Self.interfaceHost
             ),
-            payload: ["offset": offset, "limit": String(limit), "verifyId": 1, "e_r": true]
+            payload: ["offset": offset, "limit": String(limit), "verifyId": 1, "e_r": true],
+            expectedCredentialRevision: expectedCredentialRevision
         )
         let albums = root.array("hotAlbums").compactMap { value -> MusicArtistAlbum? in
             guard let album = repository.decodeLiveAlbum(value) else { return nil }
@@ -131,7 +153,8 @@ struct LiveMusicExtras: Sendable {
     func artistSongs(
         artistID: Int64,
         offset: Int = 0,
-        limit: Int = 100
+        limit: Int = 100,
+        expectedCredentialRevision: UInt64
     ) async throws -> MusicArtistSongPage {
         guard artistID > 0, offset >= 0, (1...100).contains(limit) else { throw EAPIError.invalidPayload }
         let root = try await call(
@@ -147,7 +170,8 @@ struct LiveMusicExtras: Sendable {
                 "order": "hot",
                 "offset": offset,
                 "limit": limit
-            ]
+            ],
+            expectedCredentialRevision: expectedCredentialRevision
         )
         return MusicArtistSongPage(
             songs: root.array("songs").compactMap(repository.decodeLiveSong),
@@ -157,7 +181,10 @@ struct LiveMusicExtras: Sendable {
         )
     }
 
-    func albumSubscription(albumID: Int64) async throws -> MusicAlbumSubscription {
+    func albumSubscription(
+        albumID: Int64,
+        expectedCredentialRevision: UInt64
+    ) async throws -> MusicAlbumSubscription {
         guard albumID > 0 else { throw EAPIError.invalidPayload }
         let root = try await call(
             EAPIEndpoint(
@@ -165,12 +192,16 @@ struct LiveMusicExtras: Sendable {
                 signing: "/api/album/detail/dynamic",
                 host: Self.interfaceHost
             ),
-            payload: ["id": String(albumID), "e_r": true, "verifyId": 1]
+            payload: ["id": String(albumID), "e_r": true, "verifyId": 1],
+            expectedCredentialRevision: expectedCredentialRevision
         )
         return MusicExtraDecoder.albumSubscription(root)
     }
 
-    func artistFollowStatus(artistID: Int64) async throws -> MusicArtistFollowStatus {
+    func artistFollowStatus(
+        artistID: Int64,
+        expectedCredentialRevision: UInt64
+    ) async throws -> MusicArtistFollowStatus {
         guard artistID > 0 else { throw EAPIError.invalidPayload }
         let root = try await call(
             EAPIEndpoint(
@@ -178,7 +209,8 @@ struct LiveMusicExtras: Sendable {
                 signing: "/api/artist/follow/count/get",
                 host: Self.interfaceHost
             ),
-            payload: ["id": String(artistID), "verifyId": 1, "e_r": true]
+            payload: ["id": String(artistID), "verifyId": 1, "e_r": true],
+            expectedCredentialRevision: expectedCredentialRevision
         )
         return MusicExtraDecoder.artistFollowStatus(root)
     }
@@ -186,7 +218,8 @@ struct LiveMusicExtras: Sendable {
     func availablePlaylists(
         userID: Int64,
         trackID: Int64,
-        offset: Int = 0
+        offset: Int = 0,
+        expectedCredentialRevision: UInt64
     ) async throws -> MusicAvailablePlaylistPage {
         guard userID > 0, trackID > 0, offset >= 0 else { throw EAPIError.invalidPayload }
         let root = try await call(
@@ -205,16 +238,24 @@ struct LiveMusicExtras: Sendable {
                 "trackIds": String(trackID),
                 "e_r": true
             ],
-            cache: .library
+            cache: .library,
+            expectedCredentialRevision: expectedCredentialRevision
         )
-        let playlists = root.array("playlist").compactMap { value -> MusicAvailablePlaylist? in
+        let raw = root.array("playlist")
+        let nextOffset = offset.addingReportingOverflow(raw.count)
+        guard !nextOffset.overflow else { throw EAPIError.invalidResponse }
+        let playlists = raw.compactMap { value -> MusicAvailablePlaylist? in
             guard let playlist = MusicLibraryDecoder.playlist(value) else { return nil }
             return MusicAvailablePlaylist(playlist: playlist, containsTrack: value.bool("containsTracks"))
         }
-        return MusicAvailablePlaylistPage(playlists: playlists, offset: offset, hasMore: root.bool("more"))
+        return MusicAvailablePlaylistPage(
+            playlists: playlists,
+            offset: nextOffset.partialValue,
+            hasMore: root.bool("more")
+        )
     }
 
-    func recommendedUsers() async throws -> [MusicRecommendedUser] {
+    func recommendedUsers(expectedCredentialRevision: UInt64) async throws -> [MusicRecommendedUser] {
         let root = try await call(
             EAPIEndpoint(
                 "/eapi/user/unfollow/recommend/v1",
@@ -227,7 +268,8 @@ struct LiveMusicExtras: Sendable {
                 "e_r": true,
                 "addressPermission": false
             ],
-            cache: .library
+            cache: .library,
+            expectedCredentialRevision: expectedCredentialRevision
         )
         return root.array("users").compactMap(MusicExtraDecoder.recommendedUser)
     }
@@ -240,17 +282,21 @@ struct LiveMusicExtras: Sendable {
         try await call(
             EAPIEndpoint("/eapi/user/playlist", signing: "/api/user/playlist"),
             payload: ["uid": userID, "offset": offset, "limit": limit],
-            cache: .library
+            cache: .playlistSummaries
         )
     }
 
     private func call(
         _ endpoint: EAPIEndpoint,
         payload: [String: Any],
-        cache: EAPIReadCache = .detail
+        cache: EAPIReadCache = .detail,
+        expectedCredentialRevision: UInt64? = nil
     ) async throws -> [String: Any] {
-        try decodedJSONObject(
-            try await transport.request(endpoint, json: compactJSON(payload), cache: cache)
+        try await transport.requestJSONObject(
+            endpoint,
+            json: compactJSON(payload),
+            cache: cache,
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 }

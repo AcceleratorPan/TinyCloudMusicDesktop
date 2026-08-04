@@ -15,13 +15,15 @@ private final class CloudMusicProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) private static var detailRequestCount = 0
     nonisolated(unsafe) private static var blockAudio = false
     nonisolated(unsafe) private static var audioStarted = false
+    nonisolated(unsafe) private static var denyCloudAccess = false
 
-    static func reset(blockAudio: Bool = false) {
+    static func reset(blockAudio: Bool = false, denyCloudAccess: Bool = false) {
         lock.withLock {
             paths = []
             detailRequestCount = 0
             self.blockAudio = blockAudio
             audioStarted = false
+            self.denyCloudAccess = denyCloudAccess
         }
     }
 
@@ -36,11 +38,11 @@ private final class CloudMusicProtocol: URLProtocol, @unchecked Sendable {
 
     override func startLoading() {
         let path = request.url?.path ?? ""
-        let state = Self.lock.withLock { () -> (detailBatch: Int, blockAudio: Bool) in
+        let state = Self.lock.withLock { () -> (detailBatch: Int, blockAudio: Bool, denyCloudAccess: Bool) in
             Self.paths.append(path)
             if path == "/weapi/v1/cloud/get/byids" { Self.detailRequestCount += 1 }
             if path == "/cloud-audio" { Self.audioStarted = true }
-            return (Self.detailRequestCount, Self.blockAudio)
+            return (Self.detailRequestCount, Self.blockAudio, Self.denyCloudAccess)
         }
         if path == "/cloud-audio", state.blockAudio { return }
 
@@ -53,13 +55,17 @@ private final class CloudMusicProtocol: URLProtocol, @unchecked Sendable {
                 "data": ids.map { ["songId": $0, "songName": "Song \($0)"] }
             ])
         case "/eapi/cloud/dowonload":
-            body = Data(#"{"code":200,"data":{"url":"https://m1.music.126.net/cloud-audio","type":""}}"#.utf8)
+            body = state.denyCloudAccess
+                ? Data(#"{"code":403,"message":"forbidden"}"#.utf8)
+                : Data(#"{"code":0,"data":{"url":"https://m1.music.126.net/cloud-audio","type":""}}"#.utf8)
         case "/eapi/v1/user/info":
             body = Data(#"{"code":200,"userPoint":{"userId":7}}"#.utf8)
         case "/eapi/v1/user/detail":
             body = Data(#"{"code":200,"profile":{"userId":7,"nickname":"Tester"}}"#.utf8)
         case "/eapi/cloud/lyric/get":
-            body = Data(#"{"code":200,"lrc":{"lyric":""},"tlyric":{"lyric":""}}"#.utf8)
+            body = state.denyCloudAccess
+                ? Data(#"{"code":403,"message":"forbidden"}"#.utf8)
+                : Data(#"{"code":0,"lrc":{"lyric":""},"tlyric":{"lyric":""}}"#.utf8)
         case "/cloud-audio":
             body = Data("fLaC".utf8)
         default:
@@ -86,7 +92,7 @@ private func cloudTransport() -> (EAPITransport, URLSession) {
     return (
         EAPITransport(
             session: session,
-            cookie: "MUSIC_A=test; __csrf=test",
+            cookie: "MUSIC_U=test; __csrf=test",
             musicU: "",
             weapiSecretKey: "abcdefghijklmnop"
         ),
@@ -165,17 +171,126 @@ private func verifyCloudDetailBatchingAndURLCache() async throws {
     CloudMusicProtocol.reset()
     let (transport, _) = cloudTransport()
     let library = LiveMusicLibrary(transport: transport)
+    let credentialRevision = library.transport.credentialSnapshotValue().revision
     let ids = (1...51).map(Int64.init)
-    let details = try await library.cloudSongDetails(ids: ids)
+    let details = try await library.cloudSongDetails(
+        ids: ids,
+        expectedCredentialRevision: credentialRevision
+    )
     guard details.map(\.id) == ids,
           CloudMusicProtocol.requestCount(for: "/weapi/v1/cloud/get/byids") == 2
     else { throw CloudMusicCheckError.failed("Cloud detail batching or order failed") }
 
-    _ = try await library.cloudDownloadSource(songID: 1)
-    _ = try await library.cloudDownloadSource(songID: 1)
+    _ = try await library.cloudDownloadSource(
+        userID: 7,
+        songID: 1,
+        expectedCredentialRevision: credentialRevision
+    )
+    _ = try await library.cloudDownloadSource(
+        userID: 7,
+        songID: 1,
+        expectedCredentialRevision: credentialRevision
+    )
     guard CloudMusicProtocol.requestCount(for: "/eapi/cloud/dowonload") == 2 else {
         throw CloudMusicCheckError.failed("Cloud download URLs were cached")
     }
+}
+
+@MainActor
+private func verifyCloudLocalCredentialFence() async throws {
+    CloudMusicProtocol.reset()
+    let (transport, session) = cloudTransport()
+    defer { session.invalidateAndCancel() }
+    let library = LiveMusicLibrary(transport: transport)
+    let credentialRevision = library.transport.credentialSnapshotValue().revision
+
+    _ = try await library.cloudLyrics(
+        userID: 7,
+        songID: 1,
+        expectedCredentialRevision: credentialRevision
+    )
+    _ = try await library.cloudLyrics(
+        userID: 7,
+        songID: 2,
+        expectedCredentialRevision: credentialRevision
+    )
+    _ = try await library.cloudDownloadSource(
+        userID: 7,
+        songID: 3,
+        expectedCredentialRevision: credentialRevision
+    )
+    guard CloudMusicProtocol.requestCount(for: "/eapi/v1/user/info") == 0,
+          CloudMusicProtocol.requestCount(for: "/eapi/v1/user/detail") == 0,
+          CloudMusicProtocol.requestCount(for: "/eapi/cloud/lyric/get") == 2,
+          CloudMusicProtocol.requestCount(for: "/eapi/cloud/dowonload") == 1
+    else { throw CloudMusicCheckError.failed("Cloud access performed a remote login check") }
+
+    let guestLibrary = LiveMusicLibrary(transport: EAPITransport(
+        session: session,
+        credentialSnapshot: CredentialSnapshot(.guest),
+        weapiSecretKey: "abcdefghijklmnop"
+    ))
+    do {
+        _ = try await guestLibrary.cloudLyrics(
+            userID: 7,
+            songID: 4,
+            expectedCredentialRevision: guestLibrary.transport.credentialSnapshotValue().revision
+        )
+        throw CloudMusicCheckError.failed("Guest cloud lyrics reached the endpoint")
+    } catch let error as EAPIError {
+        guard case .service(code: 403, _) = error else { throw error }
+    }
+    guard CloudMusicProtocol.requestCount(for: "/eapi/cloud/lyric/get") == 2 else {
+        throw CloudMusicCheckError.failed("Guest cloud request was sent")
+    }
+
+    let registeredGuestLibrary = LiveMusicLibrary(transport: EAPITransport(
+        session: session,
+        credentialSnapshot: CredentialSnapshot(.authenticated(try SessionCredentials(
+            cookie: "MUSIC_A=guest-token; __csrf=guest",
+            musicU: "",
+            deviceID: "guest-device"
+        ))),
+        weapiSecretKey: "abcdefghijklmnop"
+    ))
+    do {
+        _ = try await registeredGuestLibrary.cloudDownloadSource(
+            userID: 7,
+            songID: 4,
+            expectedCredentialRevision: registeredGuestLibrary.transport.credentialSnapshotValue().revision
+        )
+        throw CloudMusicCheckError.failed("Registered guest cloud source reached the endpoint")
+    } catch let error as EAPIError {
+        guard case .service(code: 403, _) = error else { throw error }
+    }
+    guard CloudMusicProtocol.requestCount(for: "/eapi/cloud/dowonload") == 1 else {
+        throw CloudMusicCheckError.failed("Registered guest cloud request was sent")
+    }
+
+    CloudMusicProtocol.reset(denyCloudAccess: true)
+    do {
+        _ = try await library.cloudLyrics(
+            userID: 7,
+            songID: 5,
+            expectedCredentialRevision: credentialRevision
+        )
+        throw CloudMusicCheckError.failed("Cloud lyric permission error was swallowed")
+    } catch let error as EAPIError {
+        guard case .service(code: 403, _) = error else { throw error }
+    }
+    do {
+        _ = try await library.cloudDownloadSource(
+            userID: 7,
+            songID: 5,
+            expectedCredentialRevision: credentialRevision
+        )
+        throw CloudMusicCheckError.failed("Cloud source permission error was swallowed")
+    } catch let error as EAPIError {
+        guard case .service(code: 403, _) = error else { throw error }
+    }
+    guard CloudMusicProtocol.requestCount(for: "/eapi/v1/user/info") == 0,
+          CloudMusicProtocol.requestCount(for: "/eapi/v1/user/detail") == 0
+    else { throw CloudMusicCheckError.failed("Denied cloud access performed a remote login check") }
 }
 
 @MainActor
@@ -201,7 +316,12 @@ private func verifyCloudDownloadWithoutLyricsAndCancellation() async throws {
         fileSize: 4,
         addedAt: nil
     )
-    manager.enqueue(cloudSong: cloudSong, userID: 7, to: root)
+    manager.enqueue(
+        cloudSong: cloudSong,
+        userID: 7,
+        expectedCredentialRevision: transport.credentialSnapshotValue().revision,
+        to: root
+    )
     guard manager.items[cloudSong.id] == MusicDownloadItem(
         id: cloudSong.id,
         title: cloudSong.name,
@@ -229,7 +349,13 @@ private func verifyCloudDownloadWithoutLyricsAndCancellation() async throws {
         id: 91, song: nil, name: "Cancel", artist: "", album: "", fileName: "cancel.mp3",
         fileSize: 4, addedAt: nil
     )
-    manager.enqueue(cloudSong: cancelledSong, userID: 7, to: root, includeLyrics: false)
+    manager.enqueue(
+        cloudSong: cancelledSong,
+        userID: 7,
+        expectedCredentialRevision: transport.credentialSnapshotValue().revision,
+        to: root,
+        includeLyrics: false
+    )
     for _ in 0..<100 where !CloudMusicProtocol.didStartAudio {
         try await Task.sleep(for: .milliseconds(10))
     }
@@ -270,6 +396,7 @@ private func verifyDownloadConcurrencyLimit() async throws {
                 addedAt: nil
             ),
             userID: 7,
+            expectedCredentialRevision: transport.credentialSnapshotValue().revision,
             to: root,
             includeLyrics: false
         )
@@ -294,6 +421,7 @@ private func verifyDownloadConcurrencyLimit() async throws {
             addedAt: nil
         ),
         userID: 7,
+        expectedCredentialRevision: transport.credentialSnapshotValue().revision,
         to: root,
         includeLyrics: false
     )
@@ -364,6 +492,7 @@ private func verifyCloudRecoveryAccountFilter() throws {
                 addedAt: nil
             ),
             userID: userID,
+            expectedCredentialRevision: transport.credentialSnapshotValue().revision,
             to: root,
             includeLyrics: false
         )
@@ -379,6 +508,80 @@ private func verifyCloudRecoveryAccountFilter() throws {
           recoveredUserIDs == [7]
     else { throw CloudMusicCheckError.failed("Matching cloud recovery was cancelled during account setup") }
     manager.cancelAll()
+}
+
+@MainActor
+private func verifyQueuedCloudDownloadKeepsIntentRevision() async throws {
+    CloudMusicProtocol.reset(blockAudio: true)
+    let snapshot = CredentialSnapshot(.authenticated(try SessionCredentials(
+        cookie: "MUSIC_U=account-a; __csrf=test",
+        musicU: "",
+        deviceID: "cloud-download-test-device"
+    )))
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [CloudMusicProtocol.self]
+    let session = URLSession(configuration: configuration)
+    defer { session.invalidateAndCancel() }
+    let transport = EAPITransport(
+        session: session,
+        credentialSnapshot: snapshot,
+        weapiSecretKey: "abcdefghijklmnop"
+    )
+    let root = FileManager.default.temporaryDirectory
+        .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let manager = MusicDownloadManager(
+        transport: transport,
+        session: session,
+        maximumConcurrentDownloads: 1,
+        resumeStore: MusicDownloadResumeStore(directory: root.appending(path: "resume")),
+        targetAllocator: MusicDownloadTargetAllocator()
+    )
+    let revisionA = snapshot.load().revision
+    manager.setCloudDownloadAccount(userID: 7, credentialRevision: revisionA)
+
+    for songID in [401 as Int64, 402] {
+        guard manager.enqueue(
+            cloudSong: CloudSong(
+                id: songID,
+                song: nil,
+                name: "Queued \(songID)",
+                artist: "Artist",
+                album: "",
+                fileName: "\(songID).flac",
+                fileSize: 4,
+                addedAt: nil
+            ),
+            userID: 7,
+            expectedCredentialRevision: revisionA,
+            to: root,
+            includeLyrics: false
+        ) else { throw CloudMusicCheckError.failed("Cloud intent was not enqueued") }
+    }
+    for _ in 0..<100 where !CloudMusicProtocol.didStartAudio {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    guard CloudMusicProtocol.didStartAudio,
+          CloudMusicProtocol.requestCount(for: "/eapi/cloud/dowonload") == 1,
+          manager.states[402] == .queued
+    else { throw CloudMusicCheckError.failed("Cloud fixture did not leave the second intent queued") }
+
+    _ = snapshot.store(.authenticated(try SessionCredentials(
+        cookie: "MUSIC_U=account-b; __csrf=test",
+        musicU: "",
+        deviceID: "cloud-download-test-device"
+    )))
+    manager.cancel(songID: 401)
+    for _ in 0..<100 where manager.states[402] != .cancelled {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    guard manager.states[402] == .cancelled,
+          CloudMusicProtocol.requestCount(for: "/eapi/cloud/dowonload") == 1
+    else { throw CloudMusicCheckError.failed("Queued A cloud intent sent with B credentials") }
+    manager.setCloudDownloadAccount(
+        userID: 7,
+        credentialRevision: snapshot.load().revision
+    )
 }
 
 #if CLOUD_MUSIC_CHECK
@@ -408,6 +611,11 @@ struct CloudMusicTests {
         try await verifyCloudDetailBatchingAndURLCache()
     }
 
+    @Test("Cloud lyrics and sources use only the local credential fence")
+    func localCredentialFence() async throws {
+        try await verifyCloudLocalCredentialFence()
+    }
+
     @Test("Empty lyrics still commit audio and cancellation removes part files")
     func downloadWithoutLyricsAndCancellation() async throws {
         try await verifyCloudDownloadWithoutLyricsAndCancellation()
@@ -421,6 +629,11 @@ struct CloudMusicTests {
     @Test("Account setup keeps matching recovered cloud downloads")
     func cloudRecoveryAccountFilter() throws {
         try verifyCloudRecoveryAccountFilter()
+    }
+
+    @Test("Queued cloud downloads keep the credential revision captured at enqueue")
+    func queuedCloudIntentRevision() async throws {
+        try await verifyQueuedCloudDownloadKeepsIntentRevision()
     }
 }
 #endif

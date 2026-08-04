@@ -1,0 +1,72 @@
+# Private source artifacts (not committed; local paths are under dist/diagnostics/)
+a5dd35b43ddcc8aea950fa550f85be30088a39813f46afd9645ea0e5d51237ed  private-source/annual-2019.json
+f3345b953c581a5f06dfda0888a63ce76c0c82fe5d360e43abde925e084f5c0d  private-source/annual-2024.json
+
+# Sanitized repository evidence
+2995c8acef5adbb6610f035f22b880142ad61090d55f6e20c58e545dee9657c1  annual-report-legacy-sanitized.json
+d1cdf00ff581582b4f124ba1da31e42224f64fee13f35b0c3893aef0a6287caf  annual-report-current-sanitized.json
+74cdda6fb6a22bb9117d0b3b7137d6c8ef7306213ae87a7dee4fb420eadaa955  EVIDENCE_REPORT.md
+82bc64471938f4b7defdf616b43e45d8da924775b8ac39b553689dcbfac4ebd4  NIM_RUNTIME_CONTRACT_10.9.40.md
+
+# Official NIM 10.9.40 macOS arm64 archive and archive members
+867a5fcfc3013a706ba47282bcfff99d35d6ebeafb713f69f8bddea3b53987c3  external/NIM-10.9.40/nim-darwin-arm64-10-9-40-4284-build-3172678.tar.gz
+16f3b8f17dc2ee650005e7154f5a30236304c7dc048a35a2d4f68ab0c1395359  external/NIM-10.9.40/wrapper/LICENSE
+d4f2613fcd91866318be405e793da9f3bf9555461269d8f466778cfb4ecfae69  external/NIM-10.9.40/include/nim_client.h
+a9d196d4050f2342453a35bfbc7055d2a57efb31acdd7ed44342714360152e29  external/NIM-10.9.40/include/nim_client_def.h
+79f6d85e4db2e1c4b6345add7e87426edb9b2c2f06b373512e65c3efc37729bd  external/NIM-10.9.40/include/nim_global_def.h
+194749f4882b5eed79f8c8512180d432cb0e09f3f9a594ea65c419413206923b  external/NIM-10.9.40/include/nim_talk.h
+a20cd00b77ba573a711c1237c9e76c1e81338989a7d6ed03daa324650e38c62b  external/NIM-10.9.40/include/nim_talk_def.h
+c58cb5da6b6960a37a365cb3cc6a448a55f2437e23d4fa0ee7629cb7d1ed113d  external/NIM-10.9.40/include/nim_nos_def.h
+3a427aaf0d5009c29a3d254b6344ee30f0088a701a260d8c1919d3492914a069  external/NIM-10.9.40/include/nim_session_def.h
+efe64fb445e69bd8116d8e1d02a07b573033d56ba80a3d638ee369dd9bcc7c6b  external/NIM-10.9.40/include/nim_sysmsg.h
+e4d62a066ee9e266d854cab8c5f62b0edab8092c09ab99ee276722fdfa149f5a  external/NIM-10.9.40/include/nim_sysmsg_def.h
+af09569dae480d960e1e7474e66c595f58d699fc2c55530c91f0688a9a7a28c6  external/NIM-10.9.40/include/nim_subscribe_event.h
+8e6e389b05233014e91358c25daf07951060ffcb89237227a0e543b4eaa5708c  external/NIM-10.9.40/include/nim_subscribe_event_def.h
+4356d5732d8a3b365c037ac4e3be81d69922724ebad185dbeb2146b08fba7c7f  external/NIM-10.9.40/include/nim_pass_through_proxy.h
+27a4f0628fd1a869bcf530ff991ebf9fbf9faadd2096a41e179c1f28e93cd04d  external/NIM-10.9.40/include/nim_pass_through_proxy_def.h
+39af0eaebdfad4f75edf7ab4a29dedb2f00c5c72b6085cdcd8d06d10d3eeae58  external/NIM-10.9.40/include/nim_plugin_in.h
+818675a41c1c25bb51d9820787835966aeb274db03eb1d0c0ba1662c3a7c3360  external/NIM-10.9.40/include/nim_plugin_in_def.h
+810d48db6e75744b1b36472d1819aed73bcb835cac39601a6de87726fcfcc1b2  external/NIM-10.9.40/include/nim_chatroom.h
+fbece7c0ae5f7311e69041844322ab2ee9d5a3923890c63bf8e1430e04f07b0a  external/NIM-10.9.40/include/nim_chatroom_def.h
+9a8beb6da53c7a2171459ccd083ef4d731d28ec60b881a00642119afe52df3e4  external/NIM-10.9.40/include/nim_base_types.h
+0c384a7541e5dfb90428c16012f591e5d437c99372922f18a8ebd6a6258caf15  external/NIM-10.9.40/include/nim_build_config.h
+73dcc47aba040832550e7733a82afed749d7b81c9c948f81073f5531974ebb49  external/NIM-10.9.40/include/public_defines.h
+72ac02d1042cfd7a81ab97398f2a9fc78ed5ff802767212df3393d3b07a47be5  external/NIM-10.9.40/include/stdbool.h
+de021c41a0e89939a722979c9a97792732e7f0ff883e944a0ed4beb47874e9cd  external/NIM-10.9.40/wrapper/nim_cpp_wrapper/api/nim_cpp_client.h
+d51e44a8f521372456986a23bdc6bc1285222197523b30c4209d03b46384eb18  external/NIM-10.9.40/wrapper/nim_cpp_wrapper/api/nim_cpp_client.cpp
+40054ccadf5f5ffa83f7a3e02b0951d6a904414c1e51737ccf81e7a7e254e2bc  external/NIM-10.9.40/wrapper/nim_cpp_wrapper/api/nim_cpp_pass_through_proxy.cpp
+d50863733dd1e0065b0b47d5944833de98bc124c9422e3dad280f0cd027208a4  external/NIM-10.9.40/wrapper/nim_cpp_wrapper/api/nim_cpp_pass_through_proxy.h
+57cf2d688ea57222aa5dbfaca4d954ea434ceaf7a3d87f6cd35d63e9cf7aa9a7  external/NIM-10.9.40/wrapper/nim_chatroom_cpp_wrapper/api/nim_chatroom_cpp.h
+597bace52d99e08e818fadb0644509b5fe5bf79aa0823128ab10e4676afa2e0d  external/NIM-10.9.40/wrapper/nim_chatroom_cpp_wrapper/api/nim_chatroom_cpp.cpp
+d06d0d0354f6d4632e39a9602a0a6d84d0a7877bcb194699dd3f0678ecf53a7a  external/NIM-10.9.40/wrapper/nim_wrapper_util/nim_string_util.cpp
+705e57eee97c6ed9cf816daff95ee2ceda2fe206935f8e955c56d2a8fdf8998b  external/NIM-10.9.40/wrapper/nim_wrapper_util/nim_string_util.h
+710fc857f2338e58e1b10432109e0a5526935abe81c33ceed9e1db4b689d4b58  external/NIM-10.9.40/wrapper/nim_wrapper_util/callback_proxy.cpp
+35afc6311c0a43e5229dae9bf9393b039df1aaf48cd071ea63c10f7f28755dc7  external/NIM-10.9.40/wrapper/nim_wrapper_util/callback_proxy.h
+
+# Signed dylibs as distributed by the official archive
+2962279b56b89a7ebe3df00f83d6684ce51ba34e2056b46159d680d4fe2863c8  external/NIM-10.9.40/lib/libnim.dylib
+36486d03d2215dbd61696cba8f611aec5dbabad6fc78c0975a4a466205a8f17e  external/NIM-10.9.40/lib/libnim_chatroom.dylib
+b95928ad4baf1a016a8b52e1a2047e48a5f0557a11d2c2be2f5da2016b40aa6b  external/NIM-10.9.40/lib/libh_available.dylib
+
+# Signed repository dylibs
+12595ee5a3a78780330a23cb0512bd4ce329115203566c387eb11e3fa1b9ab33  repository/Sources/TinyCloudMusic/Resources/NIMNative/libnim.dylib
+d8b71403019fe8a9a3ccaaf80eb9cbcb11f22ac3079bf1a95591b78bffc78eb2  repository/Sources/TinyCloudMusic/Resources/NIMNative/libnim_chatroom.dylib
+83ebc44a2fae0a2cd6b7af8e37fa187731cdba97668d6607a3054814a92ecbe6  repository/Sources/TinyCloudMusic/Resources/NIMNative/libh_available.dylib
+16f3b8f17dc2ee650005e7154f5a30236304c7dc048a35a2d4f68ab0c1395359  repository/Sources/TinyCloudMusic/Resources/NIMNative/LICENSE
+
+# Unsigned Mach-O content hashes (computed only on temporary copies)
+1c7c0c5be3038b9fcbc46cd99c0c69af7683352f53d7bb91157f5669172ee0dc  unsigned-both/libnim.dylib
+3003495bf4a56884ab0647223248a09cf7ff0e8e41bb4a78d929a29a0a455c8f  unsigned-both/libnim_chatroom.dylib
+a02171a92aac8d030ed057fe03da33e900752ccf107843d4ca0a718f8d40563a  unsigned-both/libh_available.dylib
+
+# Remote source snapshots retrieved 2026-07-31
+2c2b9d21131afdbcc234a2ac2a2f8b589ee7cb653ef1acead15d9634b1d60cf0  remote/admin.netease.im/publish-list-10.9.40.json
+4cfdb0617ae5e2a6df714b2769f16e8c91cd1231c37f804ab5cbb0a63089258b  remote/github.com/netease-im/node-nim/10.9.40/download-sdk.js
+ee39d72c814ff1794d2b1930f9273e5b7751ccb7b1151010d9e8da6b74a22244  remote/doc.yunxin.163.com/V10.9.40/doxygen-index.html
+d809c82c92cdd1013c893ddf9a46c461a3f0bd6c3bf97285b69a2ed4aefd0297  remote/doc.yunxin.163.com/V10.9.40/nim__pass__through__proxy__def_8h.html
+c17317b8b0be530b08778b51a07eb06c6bb1121eb3ab1289304abacb364a928b  remote/doc.yunxin.163.com/V10.9.40/nim__pass__through__proxy_8h.html
+2753c18684faedd4f9f8faedaf25c87dd5b8d8d6101b591b64a126e2754b4cef  remote/doc.yunxin.163.com/V10.9.40/classnim_1_1_client.html
+e2c882e4504618d36777ee4587b33e72e6daf3ff37db38b3a3753c66ba9e87b6  remote/doc.yunxin.163.com/V10.9.40/nim__client_8h.html
+1d80689c85c67046cc98281671559eb237c78cbf369d5ce75881f50ab19657bd  remote/doc.yunxin.163.com/V10.9.40/nim__chatroom_8h.html
+f52358e2f1e26a32858609f123c2bf19c7225b56761d2e3f6f5f99768c6b4f54  remote/doc.yunxin.163.com/V10.9.40/nim__chatroom__def_8h.html
+0f1cd795b6b58defed280bb7dfebf68578ab1896a2cfeb7553596af5fbdfcfb5  remote/doc.yunxin.163.com/messaging/docs/zc4NDA2NTY.canonical-article.json

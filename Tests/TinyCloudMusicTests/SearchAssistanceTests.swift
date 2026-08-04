@@ -74,7 +74,7 @@ struct SearchAssistanceTests {
 
         SearchAssistanceProtocol.reset()
         model.updateSearchQuery("周杰")
-        try await Task.sleep(for: .milliseconds(100))
+        await Task.yield()
         model.updateSearchQuery("周杰伦")
         try await Task.sleep(for: .milliseconds(500))
 

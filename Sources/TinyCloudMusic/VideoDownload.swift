@@ -1,6 +1,12 @@
 import Foundation
 
 enum VideoFileDownload {
+    typealias Transfer = @Sendable (
+        _ request: URLRequest,
+        _ resumeData: Data?,
+        _ progress: @escaping @Sendable (Int64, Int64, Int64) -> Void
+    ) async throws -> MusicDownloadTransferResult
+
     static func download(
         _ url: URL,
         title: String,
@@ -8,6 +14,12 @@ enum VideoFileDownload {
         to directory: URL,
         cacheIdentity: String? = nil,
         cacheRoot: URL? = nil,
+        resumeData: Data? = nil,
+        targetAllocator: MusicDownloadTargetAllocator = .shared,
+        cacheContext: MusicDownloadCacheContext? = nil,
+        cacheGeneration: MusicDownloadCacheGeneration? = nil,
+        cacheActivity: MusicDownloadCacheActivity? = nil,
+        transferDownload: Transfer? = nil,
         configuration: URLSessionConfiguration = .ephemeral,
         progress: @escaping @Sendable (Double?) -> Void
     ) async throws -> URL {
@@ -18,57 +30,76 @@ enum VideoFileDownload {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = 30
         configuration.timeoutIntervalForResource = 24 * 60 * 60
-        let seedSession = URLSession(configuration: configuration)
-        defer { seedSession.invalidateAndCancel() }
-        let transfer = MusicDownloadTransfer(
-            session: seedSession,
-            progress: { written, expected, responseExpected in
-                let total = max(expected, responseExpected)
-                progress(total > 0 ? min(1, max(0, Double(written) / Double(total))) : nil)
-            },
-            allowsRequest: { $0.url.map(VideoPlaybackURLPolicy.isAllowed) == true }
-        )
-        defer { transfer.invalidate() }
+        let reporter = MusicDownloadProgressReporter { progress($0) }
 
         let result: MusicDownloadTransferResult
         do {
-            result = try await transfer.download(
-                request: URLRequest(url: url, timeoutInterval: 60),
-                resumeData: nil
-            )
-        } catch is MusicDownloadTransferPaused {
-            throw CancellationError()
+            let request = URLRequest(url: url, timeoutInterval: 60)
+            if let transferDownload {
+                result = try await transferDownload(request, resumeData) { written, expected, responseExpected in
+                    reporter.update(
+                        totalBytesWritten: written,
+                        totalBytesExpectedToWrite: expected,
+                        responseExpectedContentLength: responseExpected
+                    )
+                }
+            } else {
+                let seedSession = URLSession(configuration: configuration)
+                defer { seedSession.invalidateAndCancel() }
+                let transfer = MusicDownloadTransfer(
+                    session: seedSession,
+                    progress: { written, expected, responseExpected in
+                        reporter.update(
+                            totalBytesWritten: written,
+                            totalBytesExpectedToWrite: expected,
+                            responseExpectedContentLength: responseExpected
+                        )
+                    },
+                    allowsRequest: { $0.url.map(VideoPlaybackURLPolicy.isAllowed) == true }
+                )
+                defer { transfer.invalidate() }
+                result = try await transfer.download(request: request, resumeData: resumeData)
+            }
+        } catch {
+            reporter.flush()
+            throw error
         }
         defer { try? FileManager.default.removeItem(at: result.temporaryURL) }
         guard let response = result.response as? HTTPURLResponse else {
             throw EAPIError.invalidResponse
         }
         guard (200..<300).contains(response.statusCode) else {
-            throw EAPIError.http(response.statusCode)
+            throw MusicDownloadHTTPError(statusCode: response.statusCode, retryAfter: nil)
         }
         guard response.url.map(VideoPlaybackURLPolicy.isAllowed) == true else {
             throw VideoLibraryError.unsafePlaybackURL
         }
         try Task.checkCancellation()
         guard let size = try? validatedMP4FileSize(at: result.temporaryURL),
-              response.expectedContentLength <= 0 || size == response.expectedContentLength
+              resumeData != nil || response.expectedContentLength <= 0 || size == response.expectedContentLength
         else {
             throw VideoLibraryError.unavailable("视频下载响应无效")
         }
 
-        let source: URL
         if let cacheIdentity, let cacheRoot {
-            source = try storeCachedFile(
+            _ = try? storeCachedFile(
                 result.temporaryURL,
                 identity: cacheIdentity,
                 resolution: resolution,
-                cacheRoot: cacheRoot
+                cacheRoot: cacheRoot,
+                context: cacheContext,
+                generation: cacheGeneration,
+                activity: cacheActivity
             )
-        } else {
-            source = result.temporaryURL
         }
-        let saved = try materialize(source, title: title, resolution: resolution, to: directory)
-        progress(1)
+        let saved = try await materialize(
+            result.temporaryURL,
+            title: title,
+            resolution: resolution,
+            to: directory,
+            targetAllocator: targetAllocator
+        )
+        reporter.finish()
         return saved
     }
 
@@ -77,16 +108,41 @@ enum VideoFileDownload {
         title: String,
         resolution: Int,
         cacheRoot: URL,
-        to directory: URL
+        to directory: URL,
+        targetAllocator: MusicDownloadTargetAllocator = .shared,
+        cacheContext: MusicDownloadCacheContext? = nil,
+        cacheGeneration: MusicDownloadCacheGeneration? = nil,
+        cacheActivity: MusicDownloadCacheActivity? = nil
     ) async throws -> URL? {
-        guard let cached = cachedFile(identity: identity, resolution: resolution, cacheRoot: cacheRoot) else {
+        cacheActivity?.begin()
+        defer { cacheActivity?.end() }
+        guard let cached = cachedFile(
+            identity: identity,
+            resolution: resolution,
+            cacheRoot: cacheRoot,
+            context: cacheContext,
+            generation: cacheGeneration
+        ) else {
             return nil
         }
-        return try materialize(cached, title: title, resolution: resolution, to: directory)
+        return try await materialize(
+            cached,
+            title: title,
+            resolution: resolution,
+            to: directory,
+            targetAllocator: targetAllocator
+        )
     }
 
-    static func cachedFile(identity: String, resolution: Int, cacheRoot: URL) -> URL? {
+    static func cachedFile(
+        identity: String,
+        resolution: Int,
+        cacheRoot: URL,
+        context: MusicDownloadCacheContext? = nil,
+        generation: MusicDownloadCacheGeneration? = nil
+    ) -> URL? {
         guard !identity.isEmpty, resolution > 0 else { return nil }
+        if let context, let generation, !generation.isCurrent(context) { return nil }
         let hasSecurityScope = cacheRoot.startAccessingSecurityScopedResource()
         defer { if hasSecurityScope { cacheRoot.stopAccessingSecurityScopedResource() } }
         let url = cacheURL(identity: identity, resolution: resolution, root: cacheRoot)
@@ -103,17 +159,18 @@ enum VideoFileDownload {
         return url
     }
 
-    private static func materialize(_ source: URL, title: String, resolution: Int, to directory: URL) throws -> URL {
+    private static func materialize(
+        _ source: URL,
+        title: String,
+        resolution: Int,
+        to directory: URL,
+        targetAllocator: MusicDownloadTargetAllocator
+    ) async throws -> URL {
         let hasSecurityScope = directory.startAccessingSecurityScopedResource()
         defer { if hasSecurityScope { directory.stopAccessingSecurityScopedResource() } }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let safeTitle = MusicDownloadFiles.sanitizedFileName(title)
         let stem = "【\(resolution)P】\(safeTitle.isEmpty ? "视频" : safeTitle)"
-        let targets = MusicDownloadFiles.availableTargets(
-            in: directory,
-            stem: stem,
-            audioExtension: "mp4"
-        )
         if let existing = MusicDownloadFiles.existingDownload(
             in: directory,
             stem: stem,
@@ -122,12 +179,19 @@ enum VideoFileDownload {
         ) {
             return existing.audioURL
         }
+        let targets = await targetAllocator.reserve(
+            in: directory,
+            stem: stem,
+            audioExtension: "mp4"
+        )
         do {
             try MusicDownloadFiles.stageCachedFile(source, at: targets.audioPart)
             try Task.checkCancellation()
             try MusicDownloadFiles.commit(partURL: targets.audioPart, finalURL: targets.audioFinal)
+            await targetAllocator.release(targets)
         } catch {
             try? FileManager.default.removeItem(at: targets.audioPart)
+            await targetAllocator.release(targets)
             throw error
         }
         return targets.audioFinal
@@ -137,11 +201,23 @@ enum VideoFileDownload {
         _ source: URL,
         identity: String,
         resolution: Int,
-        cacheRoot: URL
-    ) throws -> URL {
-        if let cached = cachedFile(identity: identity, resolution: resolution, cacheRoot: cacheRoot) {
+        cacheRoot: URL,
+        context: MusicDownloadCacheContext?,
+        generation: MusicDownloadCacheGeneration?,
+        activity: MusicDownloadCacheActivity?
+    ) throws -> URL? {
+        activity?.begin()
+        defer { activity?.end() }
+        if let cached = cachedFile(
+            identity: identity,
+            resolution: resolution,
+            cacheRoot: cacheRoot,
+            context: context,
+            generation: generation
+        ) {
             return cached
         }
+        if let context, let generation, !generation.isCurrent(context) { return nil }
         let hasSecurityScope = cacheRoot.startAccessingSecurityScopedResource()
         defer { if hasSecurityScope { cacheRoot.stopAccessingSecurityScopedResource() } }
         let destination = cacheURL(identity: identity, resolution: resolution, root: cacheRoot)
@@ -150,19 +226,26 @@ enum VideoFileDownload {
         defer { try? FileManager.default.removeItem(at: part) }
         try FileManager.default.copyItem(at: source, to: part)
         let size = try validatedMP4FileSize(at: part)
-        if FileManager.default.fileExists(atPath: destination.path) {
-            _ = try FileManager.default.replaceItemAt(destination, withItemAt: part)
-        } else {
-            try FileManager.default.moveItem(at: part, to: destination)
+        let install = {
+            if FileManager.default.fileExists(atPath: destination.path) {
+                _ = try FileManager.default.replaceItemAt(destination, withItemAt: part)
+            } else {
+                try FileManager.default.moveItem(at: part, to: destination)
+            }
+            do {
+                try Data(String(size).utf8).write(
+                    to: destination.appendingPathExtension("size"),
+                    options: .atomic
+                )
+            } catch {
+                try? FileManager.default.removeItem(at: destination)
+                throw error
+            }
         }
-        do {
-            try Data(String(size).utf8).write(
-                to: destination.appendingPathExtension("size"),
-                options: .atomic
-            )
-        } catch {
-            try? FileManager.default.removeItem(at: destination)
-            throw error
+        if let context, let generation {
+            guard try generation.withCurrent(context, install) != nil else { return nil }
+        } else {
+            try install()
         }
         return destination
     }

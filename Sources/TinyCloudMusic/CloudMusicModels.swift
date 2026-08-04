@@ -20,14 +20,21 @@ struct CloudSongPage: Equatable, Sendable {
     let totalCount: Int
 
     func appending(_ page: CloudSongPage) -> CloudSongPage {
+        merging(page).page
+    }
+
+    func merging(_ page: CloudSongPage) -> (page: CloudSongPage, addedUniqueCount: Int) {
         var seen = Set(songs.map(\.id))
-        let appended = songs + page.songs.filter { seen.insert($0.id).inserted }
-        return CloudSongPage(
+        var pageSeen = Set<Int64>()
+        let uniquePage = page.songs.filter { pageSeen.insert($0.id).inserted }
+        let additions = uniquePage.filter { seen.insert($0.id).inserted }
+        let appended = songs + additions
+        return (CloudSongPage(
             songs: appended,
-            offset: page.offset,
-            hasMore: page.hasMore,
+            offset: max(offset, page.offset),
+            hasMore: page.hasMore && page.offset > offset && !additions.isEmpty,
             totalCount: max(totalCount, page.totalCount, appended.count)
-        )
+        ), additions.count)
     }
 }
 
@@ -42,14 +49,22 @@ enum CloudMusicDecoder {
         offset: Int,
         decodeSong: ([String: Any]) -> Song?
     ) -> CloudSongPage {
-        let songs = root.array("data").compactMap { song($0, decodeSong: decodeSong) }
+        var seen = Set<Int64>()
+        let songs = root.array("data")
+            .compactMap { song($0, decodeSong: decodeSong) }
+            .filter { seen.insert($0.id).inserted }
         let totalCount = max(root.int("count"), offset + songs.count)
         let hasMore = root.keys.contains("hasMore")
             ? root.bool("hasMore")
             : root.keys.contains("more")
                 ? root.bool("more")
                 : offset + songs.count < totalCount
-        return CloudSongPage(songs: songs, offset: offset, hasMore: hasMore, totalCount: totalCount)
+        return CloudSongPage(
+            songs: songs,
+            offset: offset,
+            hasMore: hasMore && !songs.isEmpty,
+            totalCount: totalCount
+        )
     }
 
     static func songs(

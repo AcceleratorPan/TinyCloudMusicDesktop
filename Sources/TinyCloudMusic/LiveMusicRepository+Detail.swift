@@ -1,16 +1,28 @@
 import Foundation
 
 extension LiveMusicRepository {
-    func detail(for route: Route) async throws -> DetailContent {
+    func detail(
+        for route: Route,
+        expectedCredentialRevision: UInt64?
+    ) async throws -> DetailContent {
         switch route {
         case let .artist(id):
             return try await artistDetail(id: id)
         case let .album(id):
-            return try await albumDetail(id: id)
+            return try await albumDetail(
+                id: id,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
         case let .playlist(id):
-            return try await playlistDetail(id: id)
+            return try await playlistDetail(
+                id: id,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
         case let .user(id):
-            return try await userDetail(id: id)
+            return try await userDetail(
+                id: id,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
         case .home, .search, .cloudMusic, .comments, .similarSongs, .recommendationHistory, .listeningFootprints,
              .mv, .video, .podcast, .podcastEpisode, .broadcast, .podcastSubscriptions,
              .musicStyles, .musicStyle:
@@ -45,23 +57,33 @@ extension LiveMusicRepository {
             cache: .detail
         )
         let (homepageResponse, hotSongsResponse) = try await (homepageData, hotSongsData)
-        let artistValue = try decodedJSONObject(homepageResponse).object("data").object("artist")
+        let artistValue = homepageResponse.object("data").object("artist")
         guard let artist = decodeLiveArtist(artistValue) else {
             throw EAPIError.missingData("data.artist")
         }
-        let songs = try decodedJSONObject(hotSongsResponse).array("songs").compactMap(decodeLiveSong)
+        let songs = hotSongsResponse.array("songs").compactMap(decodeLiveSong)
         return .artist(artist, songs: songs)
     }
 
-    private func albumDetail(id: Int64) async throws -> DetailContent {
+    private func albumDetail(
+        id: Int64,
+        expectedCredentialRevision: UInt64?
+    ) async throws -> DetailContent {
         async let albumData = request(
             EAPIEndpoint("/eapi/album/v3/detail", signing: "/api/album/v3/detail"),
             payload: ["id": id, "cache_key": try EAPICodec.albumCacheKey(id: id)],
-            cache: .detail
+            cache: .detail,
+            expectedCredentialRevision: expectedCredentialRevision
         )
-        async let subscription = try? LiveMusicExtras(transport: transport).albumSubscription(albumID: id)
-        let (data, subscriptionStatus) = try await (albumData, subscription)
-        let root = try decodedJSONObject(data)
+        async let subscription: MusicAlbumSubscription? = if let expectedCredentialRevision {
+            try? await LiveMusicExtras(transport: transport).albumSubscription(
+                albumID: id,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
+        } else {
+            nil
+        }
+        let (root, subscriptionStatus) = try await (albumData, subscription)
         guard var album = decodeLiveAlbum(root.object("album")) else {
             throw EAPIError.missingData("album")
         }
@@ -72,8 +94,11 @@ extension LiveMusicRepository {
         return .album(album, songs: root.array("songs").compactMap(decodeLiveSong))
     }
 
-    private func playlistDetail(id: Int64) async throws -> DetailContent {
-        let data = try await request(
+    private func playlistDetail(
+        id: Int64,
+        expectedCredentialRevision: UInt64?
+    ) async throws -> DetailContent {
+        let root = try await request(
             EAPIEndpoint(
                 "/eapi/v6/playlist/detail",
                 signing: "/api/v6/playlist/detail",
@@ -88,9 +113,10 @@ extension LiveMusicRepository {
                 "n": "300",
                 "s": "5"
             ],
-            cache: .detail
+            cache: .detail,
+            expectedCredentialRevision: expectedCredentialRevision
         )
-        let value = try decodedJSONObject(data).object("playlist")
+        let value = root.object("playlist")
         guard let playlist = decodeLivePlaylist(value) else {
             throw EAPIError.missingData("playlist")
         }
@@ -99,9 +125,18 @@ extension LiveMusicRepository {
         let listedTrackIDs = value.array("trackIds").map { $0.int64("id") }.filter { $0 != 0 }
         let trackIDs = listedTrackIDs.isEmpty ? embeddedSongs.map(\.id) : listedTrackIDs
         let initialRange = PlaylistSongPaging.initialRange(total: trackIDs.count)
-        let songs = listedTrackIDs.isEmpty
-            ? Array(embeddedSongs.prefix(initialRange.count))
-            : try await songs(ids: Array(trackIDs[initialRange]))
+        let initialIDs = Array(trackIDs[initialRange])
+        var songsByID = Dictionary(embeddedSongs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let missingIDs = initialIDs.filter { songsByID[$0] == nil }
+        if !missingIDs.isEmpty {
+            for song in try await songs(
+                ids: missingIDs,
+                expectedCredentialRevision: expectedCredentialRevision
+            ) {
+                songsByID[song.id] = song
+            }
+        }
+        let songs = initialIDs.compactMap { songsByID[$0] }
         return .playlist(
             playlist,
             songs: songs,
@@ -110,32 +145,78 @@ extension LiveMusicRepository {
         )
     }
 
-    private func userDetail(id: Int64) async throws -> DetailContent {
+    private func userDetail(
+        id: Int64,
+        expectedCredentialRevision: UInt64?
+    ) async throws -> DetailContent {
         async let profileData = request(
             EAPIEndpoint("/eapi/v1/user/detail", signing: "/api/v1/user/detail/\(id)"),
             payload: [:],
-            cache: .detail
+            cache: .detail,
+            expectedCredentialRevision: expectedCredentialRevision
         )
-        async let playlistsData = request(
-            EAPIEndpoint("/eapi/user/playlist", signing: "/api/user/playlist"),
-            payload: ["uid": id, "offset": 0, "limit": 1_000],
-            cache: .detail
+        async let playlistsTask = userPlaylists(
+            id: id,
+            expectedCredentialRevision: expectedCredentialRevision
         )
-        let (profileResponse, playlistsResponse) = try await (profileData, playlistsData)
-        guard let profile = decodeLiveUserDetail(try decodedJSONObject(profileResponse)) else {
+        let (profileResponse, playlists) = try await (profileData, playlistsTask)
+        guard let profile = decodeLiveUserDetail(profileResponse) else {
             throw EAPIError.missingData("profile")
         }
-        let playlists = try decodedJSONObject(playlistsResponse).array("playlist").compactMap(decodeLivePlaylist)
         return .user(profile, playlists: playlists)
     }
 
+    private func userPlaylists(
+        id: Int64,
+        expectedCredentialRevision: UInt64?
+    ) async throws -> [Playlist] {
+        let pageSize = 100
+        var offset = 0
+        var playlists: [Playlist] = []
+        var seen = Set<Int64>()
+
+        while true {
+            try Task.checkCancellation()
+            let root = try await request(
+                EAPIEndpoint("/eapi/user/playlist", signing: "/api/user/playlist"),
+                payload: ["uid": id, "offset": offset, "limit": pageSize],
+                cache: .detail,
+                expectedCredentialRevision: expectedCredentialRevision
+            )
+            let values = root.array("playlist")
+            guard !values.isEmpty else { break }
+
+            let count = playlists.count
+            for playlist in values.compactMap(decodeLivePlaylist) where seen.insert(playlist.id).inserted {
+                playlists.append(playlist)
+            }
+            guard playlists.count > count else { break }
+
+            let (nextOffset, overflow) = offset.addingReportingOverflow(values.count)
+            guard !overflow, nextOffset > offset else { break }
+            let hasMore = root["more"] != nil
+                ? root.bool("more")
+                : root["hasMore"] != nil ? root.bool("hasMore") : values.count == pageSize
+            guard hasMore else { break }
+            offset = nextOffset
+        }
+        return playlists
+    }
+
     func songs(ids: [Int64]) async throws -> [Song] {
+        try await songs(ids: ids, expectedCredentialRevision: nil)
+    }
+
+    private func songs(
+        ids: [Int64],
+        expectedCredentialRevision: UInt64?
+    ) async throws -> [Song] {
         var songs: [Song] = []
         for start in stride(from: 0, to: ids.count, by: 100) {
             try Task.checkCancellation()
             let block = ids[start..<min(start + 100, ids.count)]
             let c = "[" + block.map { "{\"id\":\($0)}" }.joined(separator: ",") + "]"
-            let data = try await request(
+            let root = try await request(
                 EAPIEndpoint(
                     "/eapi/v3/song/detail",
                     signing: "/api/v3/song/detail",
@@ -148,9 +229,10 @@ extension LiveMusicRepository {
                     "source": "",
                     "c": c
                 ],
-                cache: .detail
+                cache: .detail,
+                expectedCredentialRevision: expectedCredentialRevision
             )
-            let page = try decodedJSONObject(data).array("songs").compactMap(decodeLiveSong)
+            let page = root.array("songs").compactMap(decodeLiveSong)
             let songsByID = Dictionary(page.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             songs += block.compactMap { songsByID[$0] }
         }

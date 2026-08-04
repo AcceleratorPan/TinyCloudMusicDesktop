@@ -206,18 +206,36 @@ private actor SwitchingPlaybackRepository: MusicRepository {
     func songs(ids: [Int64]) async throws -> [Song] { ids.compactMap { songsByID[$0] } }
     func songQualityDetails(for songID: Int64) async throws -> [SongQualityDetail] { [] }
     func lyrics(for songID: Int64) async throws -> SongLyrics { SongLyrics(lineLyrics: "") }
-    func recordPlaybackStart(for songID: Int64, sourceID: Int64, totalSeconds: Int) async throws {}
+    func recordPlaybackStart(
+        for songID: Int64,
+        sourceID: Int64,
+        totalSeconds: Int,
+        expectedCredentialRevision: UInt64
+    ) async throws {}
     func recordPlayback(
         for songID: Int64,
         sourceID: Int64,
         playedSeconds: Int,
-        totalSeconds: Int
+        totalSeconds: Int,
+        expectedCredentialRevision: UInt64
     ) async throws {}
-    func homeSection(id: String) async throws -> HomeSection { throw AppError.invalidRoute }
+    func recordPodcastPlayback(
+        for episodeID: Int64,
+        positionMilliseconds: Int,
+        completed: Bool,
+        expectedCredentialRevision: UInt64
+    ) async throws {}
+    func homeSection(
+        id: String,
+        expectedCredentialRevision: UInt64
+    ) async throws -> HomeSection { throw AppError.invalidRoute }
     func search(query: String, scope: SearchScope, offset: Int, limit: Int) async throws -> SearchPage {
         throw AppError.invalidRoute
     }
-    func detail(for route: Route) async throws -> DetailContent { throw AppError.invalidRoute }
+    func detail(
+        for route: Route,
+        expectedCredentialRevision: UInt64?
+    ) async throws -> DetailContent { throw AppError.invalidRoute }
 }
 
 private actor QualityRecordingRepository: MusicRepository {
@@ -250,18 +268,36 @@ private actor QualityRecordingRepository: MusicRepository {
     func songs(ids: [Int64]) async throws -> [Song] { ids.compactMap { songsByID[$0] } }
     func songQualityDetails(for songID: Int64) async throws -> [SongQualityDetail] { [] }
     func lyrics(for songID: Int64) async throws -> SongLyrics { SongLyrics(lineLyrics: "") }
-    func recordPlaybackStart(for songID: Int64, sourceID: Int64, totalSeconds: Int) async throws {}
+    func recordPlaybackStart(
+        for songID: Int64,
+        sourceID: Int64,
+        totalSeconds: Int,
+        expectedCredentialRevision: UInt64
+    ) async throws {}
     func recordPlayback(
         for songID: Int64,
         sourceID: Int64,
         playedSeconds: Int,
-        totalSeconds: Int
+        totalSeconds: Int,
+        expectedCredentialRevision: UInt64
     ) async throws {}
-    func homeSection(id: String) async throws -> HomeSection { throw AppError.invalidRoute }
+    func recordPodcastPlayback(
+        for episodeID: Int64,
+        positionMilliseconds: Int,
+        completed: Bool,
+        expectedCredentialRevision: UInt64
+    ) async throws {}
+    func homeSection(
+        id: String,
+        expectedCredentialRevision: UInt64
+    ) async throws -> HomeSection { throw AppError.invalidRoute }
     func search(query: String, scope: SearchScope, offset: Int, limit: Int) async throws -> SearchPage {
         throw AppError.invalidRoute
     }
-    func detail(for route: Route) async throws -> DetailContent { throw AppError.invalidRoute }
+    func detail(
+        for route: Route,
+        expectedCredentialRevision: UInt64?
+    ) async throws -> DetailContent { throw AppError.invalidRoute }
 }
 
 private func testSong(id: Int64, name: String) -> Song {

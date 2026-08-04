@@ -1,13 +1,16 @@
 import Foundation
 
 extension LiveMusicRepository {
-    func homeSection(id: String) async throws -> HomeSection {
+    func homeSection(
+        id: String,
+        expectedCredentialRevision: UInt64
+    ) async throws -> HomeSection {
         guard HomeBlockDecoder.supports(id) else {
             throw AppError.unavailable("不支持的首页栏目：\(id)")
         }
 
         let blockList = "[\"\(id)\"]"
-        let data = try await request(
+        let root = try await request(
             EAPIEndpoint(
                 "/eapi/link/page/rcmd/resource/show",
                 signing: "/api/link/page/rcmd/resource/show",
@@ -24,10 +27,11 @@ extension LiveMusicRepository {
                 "e_r": true,
                 "clientCacheBlockCode": "[]",
                 "isFirstScreen": false
-            ]
+            ],
+            expectedCredentialRevision: expectedCredentialRevision
         )
 
-        let blocks = try decodedJSONObject(data).object("data").array("blocks")
+        let blocks = root.object("data").array("blocks")
         guard let block = blocks.first(where: { $0.string("bizCode") == id }) else {
             throw EAPIError.missingData("data.blocks[\(id)]")
         }
@@ -36,7 +40,10 @@ extension LiveMusicRepository {
         let missingIDs = draft.resources.compactMap { resource in
             resource.kind == .song && resource.song == nil ? resource.id : nil
         }
-        let detailedSongs = try await songDetails(ids: missingIDs)
+        let detailedSongs = try await songDetails(
+            ids: missingIDs,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
         let songsByID = Dictionary(detailedSongs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
 
         let items = draft.resources.compactMap { resource -> HomeItem? in
@@ -68,19 +75,23 @@ extension LiveMusicRepository {
         return HomeSection(id: id, title: draft.title, subtitle: draft.subtitle, items: items)
     }
 
-    private func songDetails(ids: [Int64]) async throws -> [Song] {
+    private func songDetails(
+        ids: [Int64],
+        expectedCredentialRevision: UInt64
+    ) async throws -> [Song] {
         let ids = Array(Set(ids)).sorted()
         guard !ids.isEmpty else { return [] }
         let c = "[" + ids.map { "{\"id\":\($0)}" }.joined(separator: ",") + "]"
-        let data = try await request(
+        let root = try await request(
             EAPIEndpoint(
                 "/eapi/v3/song/detail",
                 signing: "/api/v3/song/detail",
                 host: "https://interface3.music.163.com"
             ),
-            payload: ["trialMode": 12, "e_r": true, "verifyId": 1, "source": "", "c": c]
+            payload: ["trialMode": 12, "e_r": true, "verifyId": 1, "source": "", "c": c],
+            expectedCredentialRevision: expectedCredentialRevision
         )
-        return try decodedJSONObject(data).array("songs").compactMap(decodeSong)
+        return root.array("songs").compactMap(decodeSong)
     }
 }
 

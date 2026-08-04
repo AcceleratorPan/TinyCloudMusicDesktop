@@ -57,13 +57,45 @@ enum MusicStyleResource: Identifiable, Equatable, Sendable {
 struct MusicStylePage: Equatable, Sendable {
     let items: [MusicStyleResource]
     let nextCursor: String?
+    private let itemIDs: Set<String>
+    private let seenCursors: Set<String>
+
+    init(items: [MusicStyleResource], nextCursor: String?) {
+        self.items = items
+        self.nextCursor = nextCursor
+        itemIDs = Set(items.map(\.id))
+        seenCursors = Set(nextCursor.map { [$0] } ?? [])
+    }
+
+    private init(
+        items: [MusicStyleResource],
+        nextCursor: String?,
+        itemIDs: Set<String>,
+        seenCursors: Set<String>
+    ) {
+        self.items = items
+        self.nextCursor = nextCursor
+        self.itemIDs = itemIDs
+        self.seenCursors = seenCursors
+    }
 
     func appending(_ page: Self) -> Self {
-        let existing = Set(items.map(\.id))
+        var allIDs = itemIDs
+        let additions = page.items.filter { allIDs.insert($0.id).inserted }
+        var allCursors = seenCursors
+        let nextCursor = page.nextCursor.flatMap { cursor in
+            !additions.isEmpty && allCursors.insert(cursor).inserted ? cursor : nil
+        }
         return Self(
-            items: items + page.items.filter { !existing.contains($0.id) },
-            nextCursor: page.nextCursor
+            items: items + additions,
+            nextCursor: nextCursor,
+            itemIDs: allIDs,
+            seenCursors: allCursors
         )
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.items == rhs.items && lhs.nextCursor == rhs.nextCursor
     }
 }
 
@@ -165,42 +197,6 @@ enum MusicSheetURLPolicy {
     }
 }
 
-enum MusicSheetTemporaryFiles {
-    private static var directory: URL {
-        FileManager.default.temporaryDirectory.appending(
-            path: "TinyCloudMusicSheetPreviews",
-            directoryHint: .isDirectory
-        )
-    }
-
-    static func cleanupExpired(now: Date = Date()) {
-        let manager = FileManager.default
-        guard let files = try? manager.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: [.contentModificationDateKey],
-            options: [.skipsHiddenFiles]
-        ) else { return }
-        for file in files {
-            let date = try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
-            if date.map({ now.timeIntervalSince($0) > 24 * 60 * 60 }) != false {
-                try? manager.removeItem(at: file)
-            }
-        }
-    }
-
-    static func write(_ data: Data) throws -> URL {
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let url = directory.appending(path: "\(UUID().uuidString).pdf")
-        try data.write(to: url, options: [.atomic])
-        return url
-    }
-
-    static func remove(_ url: URL?) {
-        guard let url, url.deletingLastPathComponent().standardizedFileURL == directory.standardizedFileURL else { return }
-        try? FileManager.default.removeItem(at: url)
-    }
-}
-
 struct MusicSheetSaveResult: Equatable, Sendable {
     let url: URL
     let saved: Bool
@@ -208,8 +204,14 @@ struct MusicSheetSaveResult: Equatable, Sendable {
 
 enum MusicSheetFileError: LocalizedError {
     case invalidPDF
+    case cacheClearing
 
-    var errorDescription: String? { "琴谱 PDF 文件无效" }
+    var errorDescription: String? {
+        switch self {
+        case .invalidPDF: "琴谱 PDF 文件无效"
+        case .cacheClearing: "琴谱缓存正在清理，请稍后重试"
+        }
+    }
 }
 
 enum MusicSheetFiles {
@@ -236,85 +238,6 @@ enum MusicSheetFiles {
         return stem + ".pdf"
     }
 
-    static func existingPDF(
-        song: Song,
-        sheet: MusicSheetSummary,
-        in directory: URL,
-        fileManager: FileManager = .default
-    ) -> URL? {
-        let hasSecurityScope = directory.startAccessingSecurityScopedResource()
-        defer { if hasSecurityScope { directory.stopAccessingSecurityScopedResource() } }
-        let url = directory.appending(path: fileName(song: song, sheet: sheet))
-        return isValidPDF(at: url, fileManager: fileManager) ? url : nil
-    }
-
-    static func cachedPDF(
-        sheetID: Int64,
-        cacheRoot: URL,
-        fileManager: FileManager = .default
-    ) -> URL? {
-        guard sheetID > 0 else { return nil }
-        let hasSecurityScope = cacheRoot.startAccessingSecurityScopedResource()
-        defer { if hasSecurityScope { cacheRoot.stopAccessingSecurityScopedResource() } }
-        let url = cacheURL(sheetID: sheetID, root: cacheRoot)
-        return isValidPDF(at: url, fileManager: fileManager) ? url : nil
-    }
-
-    static func cachePDF(
-        at source: URL,
-        sheetID: Int64,
-        cacheRoot: URL,
-        fileManager: FileManager = .default
-    ) throws -> URL {
-        guard sheetID > 0, isValidPDF(at: source, fileManager: fileManager) else {
-            throw MusicSheetFileError.invalidPDF
-        }
-        let hasSecurityScope = cacheRoot.startAccessingSecurityScopedResource()
-        defer { if hasSecurityScope { cacheRoot.stopAccessingSecurityScopedResource() } }
-        let destination = cacheURL(sheetID: sheetID, root: cacheRoot)
-        if isValidPDF(at: destination, fileManager: fileManager) { return destination }
-        try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let part = destination.appendingPathExtension("\(UUID().uuidString).part")
-        defer { try? fileManager.removeItem(at: part) }
-        try fileManager.copyItem(at: source, to: part)
-        if fileManager.fileExists(atPath: destination.path) {
-            _ = try fileManager.replaceItemAt(destination, withItemAt: part)
-        } else {
-            try fileManager.moveItem(at: part, to: destination)
-        }
-        return destination
-    }
-
-    static func savePDF(
-        at source: URL,
-        song: Song,
-        sheet: MusicSheetSummary,
-        to directory: URL,
-        fileManager: FileManager = .default
-    ) throws -> MusicSheetSaveResult {
-        let hasSecurityScope = directory.startAccessingSecurityScopedResource()
-        defer { if hasSecurityScope { directory.stopAccessingSecurityScopedResource() } }
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-
-        let destination = directory.appending(path: fileName(song: song, sheet: sheet))
-        if isValidPDF(at: destination, fileManager: fileManager) {
-            return MusicSheetSaveResult(url: destination, saved: false)
-        }
-        guard isValidPDF(at: source, fileManager: fileManager) else {
-            throw MusicSheetFileError.invalidPDF
-        }
-
-        let part = destination.appendingPathExtension("\(UUID().uuidString).part")
-        defer { try? fileManager.removeItem(at: part) }
-        try fileManager.copyItem(at: source, to: part)
-        if fileManager.fileExists(atPath: destination.path) {
-            _ = try fileManager.replaceItemAt(destination, withItemAt: part)
-        } else {
-            try fileManager.moveItem(at: part, to: destination)
-        }
-        return MusicSheetSaveResult(url: destination, saved: true)
-    }
-
     private static func sanitized(_ value: String) -> String {
         value.unicodeScalars
             .filter { !invalidCharacters.contains($0) }
@@ -324,28 +247,6 @@ enum MusicSheetFiles {
             .joined(separator: " ")
     }
 
-    private static func cacheURL(sheetID: Int64, root: URL) -> URL {
-        root.appending(path: "DownloadCache", directoryHint: .isDirectory)
-            .appending(path: "Sheets", directoryHint: .isDirectory)
-            .appending(path: "\(sheetID).pdf", directoryHint: .notDirectory)
-    }
-
-    private static func isValidPDF(at url: URL, fileManager: FileManager) -> Bool {
-        guard fileManager.fileExists(atPath: url.path),
-              let handle = try? FileHandle(forReadingFrom: url)
-        else { return false }
-        defer { try? handle.close() }
-        do {
-            let size = try handle.seekToEnd()
-            guard size >= 9 else { return false }
-            try handle.seek(toOffset: 0)
-            guard try handle.read(upToCount: 4)?.starts(with: Data("%PDF".utf8)) == true else { return false }
-            try handle.seek(toOffset: size - min(size, 1_024))
-            return try handle.readToEnd()?.range(of: Data("%%EOF".utf8)) != nil
-        } catch {
-            return false
-        }
-    }
 }
 
 enum MusicKnowledgeDecoder {
