@@ -702,7 +702,9 @@ struct PodcastDetailView: View {
             return
         }
         guard writeTask == nil, podcast.isSubscribed != subscribed else { return }
-        let credentialRevision = library.transport.credentialSnapshotValue().revision
+        guard let credentialRevision = model.confirmedAccountCredentialRevision,
+              library.transport.credentialSnapshotValue().revision == credentialRevision
+        else { return }
         let taskID = UUID()
         pendingSubscription = subscribed
         writeTaskID = taskID
@@ -711,6 +713,7 @@ struct PodcastDetailView: View {
             do {
                 try Task.checkCancellation()
                 guard model.currentUserID == accountID,
+                      model.confirmedAccountCredentialRevision == credentialRevision,
                       library.transport.credentialSnapshotValue().revision == credentialRevision
                 else { return }
                 try await library.setPodcastSubscribed(
@@ -721,6 +724,7 @@ struct PodcastDetailView: View {
                 try Task.checkCancellation()
                 guard writeTaskID == taskID,
                       model.currentUserID == accountID,
+                      model.confirmedAccountCredentialRevision == credentialRevision,
                       library.transport.credentialSnapshotValue().revision == credentialRevision
                 else { return }
                 model.commitPodcastSubscription(id: podcast.id, subscribed: subscribed)
@@ -728,6 +732,7 @@ struct PodcastDetailView: View {
             } catch {
                 guard writeTaskID == taskID,
                       model.currentUserID == accountID,
+                      model.confirmedAccountCredentialRevision == credentialRevision,
                       library.transport.credentialSnapshotValue().revision == credentialRevision
                 else { return }
                 model.libraryMessage = error.localizedDescription
@@ -1139,7 +1144,9 @@ struct BroadcastChannelDetailView: View {
             return
         }
         guard !isWriting else { return }
-        let credentialRevision = library.transport.credentialSnapshotValue().revision
+        guard let credentialRevision = model.confirmedAccountCredentialRevision,
+              library.transport.credentialSnapshotValue().revision == credentialRevision
+        else { return }
         let taskID = UUID()
         writeTaskID = taskID
         isWriting = true
@@ -1152,6 +1159,7 @@ struct BroadcastChannelDetailView: View {
                 }
             }
             do {
+                guard broadcastMutationAccountMatches(accountID, credentialRevision) else { return }
                 try await library.setBroadcastCollected(
                     channelID,
                     collected: collected,
@@ -1159,8 +1167,7 @@ struct BroadcastChannelDetailView: View {
                 )
                 try Task.checkCancellation()
                 guard writeTaskID == taskID,
-                      accountID == model.currentUserID,
-                      library.transport.credentialSnapshotValue().revision == credentialRevision
+                      broadcastMutationAccountMatches(accountID, credentialRevision)
                 else { return }
                 model.broadcastCollectionOverrides[channelID] = collected
                 if let current = info {
@@ -1174,8 +1181,7 @@ struct BroadcastChannelDetailView: View {
             } catch is CancellationError {
             } catch {
                 guard writeTaskID == taskID,
-                      accountID == model.currentUserID,
-                      library.transport.credentialSnapshotValue().revision == credentialRevision
+                      broadcastMutationAccountMatches(accountID, credentialRevision)
                 else { return }
                 let mutationError = error
                 do {
@@ -1185,8 +1191,7 @@ struct BroadcastChannelDetailView: View {
                     )
                     try Task.checkCancellation()
                     guard writeTaskID == taskID,
-                          accountID == model.currentUserID,
-                          library.transport.credentialSnapshotValue().revision == credentialRevision
+                          broadcastMutationAccountMatches(accountID, credentialRevision)
                     else { return }
                     if confirmed.channel.isCollected == collected {
                         model.broadcastCollectionOverrides[channelID] = collected
@@ -1224,6 +1229,11 @@ struct BroadcastChannelDetailView: View {
             && credentialRevision.map {
                 library.transport.credentialSnapshotValue().revision == $0
             } != false
+    }
+
+    private func broadcastMutationAccountMatches(_ accountID: Int64, _ credentialRevision: UInt64) -> Bool {
+        model.confirmedAccountCredentialRevision == credentialRevision
+            && broadcastAccountMatches(accountID, credentialRevision)
     }
 }
 

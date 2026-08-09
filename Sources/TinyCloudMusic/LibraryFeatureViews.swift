@@ -257,6 +257,37 @@ struct MusicLibraryLoadState: Sendable {
     }
 }
 
+extension PlaylistMutationAccount {
+    static func confirmed(
+        userID: Int64?,
+        confirmedRevision: UInt64?,
+        liveRevision: UInt64
+    ) -> Self? {
+        guard let userID,
+              let confirmedRevision,
+              confirmedRevision == liveRevision
+        else { return nil }
+        return Self(userID: userID, credentialRevision: confirmedRevision)
+    }
+
+    @discardableResult
+    @MainActor
+    func performIfCurrent(
+        userID: Int64?,
+        confirmedRevision: UInt64?,
+        liveRevision: UInt64,
+        operation: () async throws -> Void
+    ) async rethrows -> Bool {
+        guard matches(
+            userID: userID,
+            confirmedRevision: confirmedRevision,
+            liveRevision: liveRevision
+        ) else { return false }
+        try await operation()
+        return true
+    }
+}
+
 struct MusicLibraryView: View {
     @Bindable var model: AppModel
     let library: LiveMusicLibrary
@@ -269,11 +300,17 @@ struct MusicLibraryView: View {
     @State private var privatePlaylist = false
     @State private var isCreatingPlaylist = false
     @State private var creationError: String?
-    @State private var playlistToDelete: Playlist?
+    @State private var playlistDraftAccount: PlaylistMutationAccount?
+    @State private var playlistCreationTask: Task<Void, Never>?
+    @State private var playlistCreationTaskID: UUID?
+    @State private var playlistDeleteRequest: (playlist: Playlist, account: PlaylistMutationAccount)?
     @State private var showDeleteConfirmation = false
     @State private var deletingPlaylistID: Int64?
+    @State private var playlistDeletionTask: Task<Void, Never>?
+    @State private var playlistDeletionTaskID: UUID?
     @State private var playlistError: String?
     @State private var showingPlaylistOrder = false
+    @State private var playlistOrderAccount: PlaylistMutationAccount?
     @State private var visibleRecommendationCount = 20
     @State private var selectedSection = MusicLibrarySection.recommendations
     @State private var selectedListeningPeriod = MusicListeningPeriod.week
@@ -314,6 +351,14 @@ struct MusicLibraryView: View {
         )
     }
 
+    private var currentMutationAccount: PlaylistMutationAccount? {
+        PlaylistMutationAccount.confirmed(
+            userID: model.currentUserID,
+            confirmedRevision: model.confirmedAccountCredentialRevision,
+            liveRevision: library.transport.credentialSnapshotValue().revision
+        )
+    }
+
     private var content: AnyView {
         let loadTrigger = libraryLoadTrigger
         let playlistRefreshID = "\(model.librarySnapshot?.user.id ?? 0):\(loadTrigger.credentialRevision):\(model.playlistContentRevision)"
@@ -346,7 +391,7 @@ struct MusicLibraryView: View {
                 }
             }
         }
-        .navigationTitle("我的")
+        .navigationTitle("我的音乐")
         .task(id: loadTrigger) {
             let (identity, force) = libraryLoadState.begin(loadTrigger)
             await load(identity: identity, force: force)
@@ -358,6 +403,7 @@ struct MusicLibraryView: View {
         }
         .onDisappear {
             isVisible = false
+            resetPlaylistMutationState()
             listeningTask?.cancel()
             listeningTask = nil
             listeningTaskID = nil
@@ -373,30 +419,38 @@ struct MusicLibraryView: View {
         .alert(
             "删除歌单？",
             isPresented: $showDeleteConfirmation,
-            presenting: playlistToDelete
-        ) { playlist in
-            Button("删除", role: .destructive) { deletePlaylist(playlist) }
-            Button("取消", role: .cancel) {}
-        } message: { playlist in
-            Text("“\(playlist.name)”将从账号中删除，此操作不可撤销。")
+            presenting: playlistDeleteRequest
+        ) { request in
+            Button("删除", role: .destructive) {
+                deletePlaylist(request.playlist, account: request.account)
+            }
+            Button("取消", role: .cancel) {
+                playlistDeleteRequest = nil
+            }
+        } message: { request in
+            Text("“\(request.playlist.name)”将从账号中删除，此操作不可撤销。")
         }
         .sheet(isPresented: $showingPlaylistOrder) {
-            if let snapshot = model.librarySnapshot {
+            if let snapshot = model.librarySnapshot,
+               let playlistOrderAccount {
                 PlaylistOrderEditor(
                     playlists: snapshot.playlists.filter { $0.isUserEditable(by: snapshot.user.id) },
                     library: library,
+                    model: model,
+                    account: playlistOrderAccount,
                     reload: { await loadForced() },
                     onSaved: { model.showToast("歌单顺序已保存") }
                 )
             }
         }
-        .onChange(of: model.currentUserID) { _, _ in
-            showingPlaylistOrder = false
+        .onChange(of: currentMutationAccount) { _, _ in
+            resetPlaylistMutationState()
             progressiveSnapshot = nil
             historyRefreshes.reset()
             listeningTask?.cancel()
             listeningTask = nil
             listeningTaskID = nil
+            listeningCredentialRevision = nil
         })
     }
 
@@ -454,9 +508,10 @@ struct MusicLibraryView: View {
                 case .listening:
                     listening
                 case .playlists:
-                    playlists(snapshot)
+                    let account = mutationAccount(for: snapshot.user.id)
+                    playlists(snapshot, account: account)
                     Divider()
-                    createPlaylistForm
+                    createPlaylistForm(account: account)
                 case .following:
                     following(snapshot)
                 case .recommendedUsers:
@@ -666,19 +721,25 @@ struct MusicLibraryView: View {
         })
     }
 
-    private func playlists(_ snapshot: LibrarySnapshot) -> AnyView {
+    private func playlists(
+        _ snapshot: LibrarySnapshot,
+        account: PlaylistMutationAccount?
+    ) -> AnyView {
         AnyView(VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("我的歌单")
                     .font(.title3.weight(.semibold))
                 Spacer()
                 Button {
+                    guard let account else { return }
+                    playlistOrderAccount = account
                     showingPlaylistOrder = true
                 } label: {
                     Label("排序", systemImage: "arrow.up.arrow.down")
                 }
                 .disabled(
                     progressiveSnapshot != nil
+                        || account == nil
                         || snapshot.playlists.filter { $0.isUserEditable(by: snapshot.user.id) }.count < 2
                 )
             }
@@ -723,7 +784,8 @@ struct MusicLibraryView: View {
                     .accessibilityHint("打开歌单详情")
                     .contextMenu {
                         Button(role: .destructive) {
-                            playlistToDelete = playlist
+                            guard let account else { return }
+                            playlistDeleteRequest = (playlist, account)
                             showDeleteConfirmation = true
                         } label: {
                             Label("删除歌单", systemImage: "trash")
@@ -816,13 +878,14 @@ struct MusicLibraryView: View {
         })
     }
 
-    private var createPlaylistForm: AnyView {
+    private func createPlaylistForm(account: PlaylistMutationAccount?) -> AnyView {
         AnyView(VStack(alignment: .leading, spacing: 12) {
             Text("新建歌单")
                 .font(.title3.weight(.semibold))
             LabeledContent("名称") {
-                TextField("输入歌单名称", text: $playlistName)
+                TextField("输入歌单名称", text: playlistNameBinding(account: account))
                     .textFieldStyle(.roundedBorder)
+                    .disabled(account == nil)
             }
             Toggle("设为私密歌单", isOn: $privatePlaylist)
             HStack {
@@ -840,7 +903,11 @@ struct MusicLibraryView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(isCreatingPlaylist || playlistName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(
+                    account == nil
+                        || isCreatingPlaylist
+                        || playlistName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
                 if let creationError {
                     Label(creationError, systemImage: "exclamationmark.triangle")
                         .font(.callout)
@@ -1177,75 +1244,154 @@ struct MusicLibraryView: View {
         return "\(hours) 小时 \(minutes) 分钟"
     }
 
+    private func mutationAccount(for userID: Int64) -> PlaylistMutationAccount? {
+        guard let account = currentMutationAccount, account.userID == userID else { return nil }
+        return account
+    }
+
+    private func mutationAccountMatches(_ account: PlaylistMutationAccount) -> Bool {
+        account.matches(
+            userID: model.currentUserID,
+            confirmedRevision: model.confirmedAccountCredentialRevision,
+            liveRevision: library.transport.credentialSnapshotValue().revision
+        )
+    }
+
+    private func playlistNameBinding(account: PlaylistMutationAccount?) -> Binding<String> {
+        Binding(
+            get: { playlistName },
+            set: { value in
+                if playlistName.isEmpty, !value.isEmpty {
+                    playlistDraftAccount = account
+                } else if value.isEmpty {
+                    playlistDraftAccount = nil
+                }
+                playlistName = value
+            }
+        )
+    }
+
+    private func resetPlaylistMutationState() {
+        playlistCreationTask?.cancel()
+        playlistCreationTask = nil
+        playlistCreationTaskID = nil
+        playlistDeletionTask?.cancel()
+        playlistDeletionTask = nil
+        playlistDeletionTaskID = nil
+        playlistName = ""
+        privatePlaylist = false
+        playlistDraftAccount = nil
+        isCreatingPlaylist = false
+        creationError = nil
+        playlistDeleteRequest = nil
+        showDeleteConfirmation = false
+        deletingPlaylistID = nil
+        playlistError = nil
+        showingPlaylistOrder = false
+        playlistOrderAccount = nil
+    }
+
     private func createPlaylist() {
+        guard let account = playlistDraftAccount,
+              mutationAccountMatches(account),
+              playlistCreationTask == nil
+        else { return }
         let name = playlistName
-        let credentialRevision = library.transport.credentialSnapshotValue().revision
+        let privacy: MusicPlaylistPrivacy = privatePlaylist ? .privatePlaylist : .publicPlaylist
+        let taskID = UUID()
         creationError = nil
         isCreatingPlaylist = true
-        Task { @MainActor in
+        playlistCreationTaskID = taskID
+        playlistCreationTask = Task { @MainActor in
+            defer { finishPlaylistCreation(taskID) }
             do {
-                _ = try await library.createPlaylist(
-                    name: name,
-                    privacy: privatePlaylist ? .privatePlaylist : .publicPlaylist,
-                    expectedCredentialRevision: credentialRevision
-                )
                 try Task.checkCancellation()
-                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
-                    throw CancellationError()
-                }
+                guard try await account.performIfCurrent(
+                    userID: model.currentUserID,
+                    confirmedRevision: model.confirmedAccountCredentialRevision,
+                    liveRevision: library.transport.credentialSnapshotValue().revision,
+                    operation: {
+                        _ = try await library.createPlaylist(
+                            name: name,
+                            privacy: privacy,
+                            expectedCredentialRevision: account.credentialRevision
+                        )
+                    }
+                ) else { return }
+                try Task.checkCancellation()
+                guard playlistCreationTaskID == taskID, mutationAccountMatches(account) else { return }
                 playlistName = ""
                 privatePlaylist = false
-                isCreatingPlaylist = false
+                playlistDraftAccount = nil
                 model.showToast("歌单已创建")
                 await loadForced()
             } catch is CancellationError {
-                isCreatingPlaylist = false
             } catch {
-                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
-                    isCreatingPlaylist = false
-                    return
-                }
+                guard playlistCreationTaskID == taskID, mutationAccountMatches(account) else { return }
                 creationError = error.localizedDescription
-                isCreatingPlaylist = false
             }
         }
     }
 
-    private func deletePlaylist(_ playlist: Playlist) {
-        let credentialRevision = library.transport.credentialSnapshotValue().revision
+    private func deletePlaylist(_ playlist: Playlist, account: PlaylistMutationAccount) {
+        guard mutationAccountMatches(account),
+              playlistDeletionTask == nil
+        else {
+            playlistDeleteRequest = nil
+            return
+        }
+        let taskID = UUID()
         playlistError = nil
         deletingPlaylistID = playlist.id
-        Task { @MainActor in
+        playlistDeletionTaskID = taskID
+        playlistDeletionTask = Task { @MainActor in
+            defer { finishPlaylistDeletion(taskID) }
             do {
-                try await library.deletePlaylist(
-                    playlist.id,
-                    expectedCredentialRevision: credentialRevision
-                )
                 try Task.checkCancellation()
-                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
-                    throw CancellationError()
-                }
-                playlistToDelete = nil
-                deletingPlaylistID = nil
+                guard try await account.performIfCurrent(
+                    userID: model.currentUserID,
+                    confirmedRevision: model.confirmedAccountCredentialRevision,
+                    liveRevision: library.transport.credentialSnapshotValue().revision,
+                    operation: {
+                        try await library.deletePlaylist(
+                            playlist.id,
+                            expectedCredentialRevision: account.credentialRevision
+                        )
+                    }
+                ) else { return }
+                try Task.checkCancellation()
+                guard playlistDeletionTaskID == taskID, mutationAccountMatches(account) else { return }
+                playlistDeleteRequest = nil
                 model.showToast("歌单已删除")
                 await loadForced()
             } catch is CancellationError {
-                deletingPlaylistID = nil
             } catch {
-                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
-                    deletingPlaylistID = nil
-                    return
-                }
+                guard playlistDeletionTaskID == taskID, mutationAccountMatches(account) else { return }
                 playlistError = error.localizedDescription
-                deletingPlaylistID = nil
             }
         }
+    }
+
+    private func finishPlaylistCreation(_ taskID: UUID) {
+        guard playlistCreationTaskID == taskID else { return }
+        isCreatingPlaylist = false
+        playlistCreationTask = nil
+        playlistCreationTaskID = nil
+    }
+
+    private func finishPlaylistDeletion(_ taskID: UUID) {
+        guard playlistDeletionTaskID == taskID else { return }
+        deletingPlaylistID = nil
+        playlistDeletionTask = nil
+        playlistDeletionTaskID = nil
     }
 }
 
 private struct PlaylistOrderEditor: View {
     let original: [Playlist]
     let library: LiveMusicLibrary
+    @Bindable var model: AppModel
+    let account: PlaylistMutationAccount
     let reload: () async -> Void
     let onSaved: () -> Void
 
@@ -1258,11 +1404,15 @@ private struct PlaylistOrderEditor: View {
     init(
         playlists: [Playlist],
         library: LiveMusicLibrary,
+        model: AppModel,
+        account: PlaylistMutationAccount,
         reload: @escaping () async -> Void,
         onSaved: @escaping () -> Void
     ) {
         original = playlists
         self.library = library
+        self.model = model
+        self.account = account
         self.reload = reload
         self.onSaved = onSaved
         _draft = State(initialValue: playlists)
@@ -1301,7 +1451,11 @@ private struct PlaylistOrderEditor: View {
                             Text("保存")
                         }
                     }
-                    .disabled(isSaving || draft.map(\.id) == original.map(\.id))
+                    .disabled(
+                        isSaving
+                            || currentMutationAccount != account
+                            || draft.map(\.id) == original.map(\.id)
+                    )
                 }
             }
             .safeAreaInset(edge: .bottom) {
@@ -1317,43 +1471,58 @@ private struct PlaylistOrderEditor: View {
         .frame(minWidth: 480, minHeight: 520)
         .interactiveDismissDisabled(isSaving)
         .onDisappear { saveTask?.cancel() }
+        .onChange(of: currentMutationAccount) { _, current in
+            guard current != account else { return }
+            saveTask?.cancel()
+            dismiss()
+        }
     }
 
     private func save() {
-        guard !isSaving, draft.map(\.id) != original.map(\.id) else { return }
-        let credentialRevision = library.transport.credentialSnapshotValue().revision
+        guard !isSaving,
+              draft.map(\.id) != original.map(\.id),
+              account.matches(model: model, library: library)
+        else { return }
         errorMessage = nil
         isSaving = true
         saveTask = Task { @MainActor in
-            do {
-                try await library.updatePlaylistOrder(
-                    draft.map(\.id),
-                    expectedCredentialRevision: credentialRevision
-                )
-                try Task.checkCancellation()
-                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
-                    throw CancellationError()
-                }
-                await reload()
-                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
-                    throw CancellationError()
-                }
-                onSaved()
-                dismiss()
-            } catch is CancellationError {
-                isSaving = false
-                saveTask = nil
-            } catch {
-                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
-                    isSaving = false
-                    saveTask = nil
-                    return
-                }
-                errorMessage = error.localizedDescription
+            defer {
                 isSaving = false
                 saveTask = nil
             }
+            do {
+                try Task.checkCancellation()
+                guard try await account.performIfCurrent(
+                    userID: model.currentUserID,
+                    confirmedRevision: model.confirmedAccountCredentialRevision,
+                    liveRevision: library.transport.credentialSnapshotValue().revision,
+                    operation: {
+                        try await library.updatePlaylistOrder(
+                            draft.map(\.id),
+                            expectedCredentialRevision: account.credentialRevision
+                        )
+                    }
+                ) else { return }
+                try Task.checkCancellation()
+                guard account.matches(model: model, library: library) else { return }
+                await reload()
+                guard account.matches(model: model, library: library) else { return }
+                onSaved()
+                dismiss()
+            } catch is CancellationError {
+            } catch {
+                guard account.matches(model: model, library: library) else { return }
+                errorMessage = error.localizedDescription
+            }
         }
+    }
+
+    private var currentMutationAccount: PlaylistMutationAccount? {
+        PlaylistMutationAccount.confirmed(
+            userID: model.currentUserID,
+            confirmedRevision: model.confirmedAccountCredentialRevision,
+            liveRevision: library.transport.credentialSnapshotValue().revision
+        )
     }
 }
 
@@ -1828,6 +1997,7 @@ struct CommentsView: View {
     let songID: Int64
     let library: LiveMusicLibrary
     let currentUserID: Int64?
+    let confirmedAccountCredentialRevision: UInt64?
     let currentUserNickname: String
     let onOpenUser: (Int64) -> Void
     let onLogin: () -> Void
@@ -1841,12 +2011,15 @@ struct CommentsView: View {
     @State private var errorMessage: String?
     @State private var emojiPictureIDs: [String: String] = [:]
     @State private var commentText = ""
+    @State private var commentDraftAccount: PlaylistMutationAccount?
+    @State private var loadedMutationAccount: PlaylistMutationAccount?
     @State private var isSubmitting = false
     @State private var writeMessage: String?
     @State private var successMessage: String?
     @State private var loadGeneration = 0
     @State private var loadTask: Task<Void, Never>?
     @State private var writeTask: Task<Void, Never>?
+    @State private var writeTaskID: UUID?
     @State private var successTask: Task<Void, Never>?
 
     var body: AnyView { AnyView(content) }
@@ -1860,6 +2033,10 @@ struct CommentsView: View {
         .navigationTitle("评论")
         .task(id: songID) { startLoad(reset: true) }
         .task { emojiPictureIDs = (try? await library.commentEmojiPictureIDs()) ?? [:] }
+        .onChange(of: currentMutationAccount) { _, _ in
+            resetCommentMutationState()
+            startLoad(reset: true)
+        }
         .onDisappear {
             loadTask?.cancel()
             writeTask?.cancel()
@@ -1879,9 +2056,9 @@ struct CommentsView: View {
     private var composer: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                TextField("发表评论", text: $commentText, axis: .vertical)
+                TextField("发表评论", text: commentTextBinding, axis: .vertical)
                     .lineLimit(1...4)
-                    .disabled(currentUserID == nil || isSubmitting)
+                    .disabled(currentMutationAccount == nil || isSubmitting)
                     .onSubmit(submitComment)
                 Button(action: submitComment) {
                     if isSubmitting {
@@ -1891,7 +2068,7 @@ struct CommentsView: View {
                     }
                 }
                 .frame(width: 30, height: 30)
-                .disabled(currentUserID == nil || trimmedComment.isEmpty || isSubmitting)
+                .disabled(currentMutationAccount == nil || trimmedComment.isEmpty || isSubmitting)
                 .help("发表评论")
                 .accessibilityLabel("发表评论")
             }
@@ -1941,6 +2118,8 @@ struct CommentsView: View {
                                 comment: comment,
                                 library: library,
                                 currentUserID: currentUserID,
+                                confirmedAccountCredentialRevision: confirmedAccountCredentialRevision,
+                                mutationAccount: loadedMutationAccount,
                                 currentUserNickname: currentUserNickname,
                                 emojiPictureIDs: emojiPictureIDs,
                                 onOpenUser: onOpenUser,
@@ -1972,6 +2151,28 @@ struct CommentsView: View {
         commentText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var currentMutationAccount: PlaylistMutationAccount? {
+        PlaylistMutationAccount.confirmed(
+            userID: currentUserID,
+            confirmedRevision: confirmedAccountCredentialRevision,
+            liveRevision: library.transport.credentialSnapshotValue().revision
+        )
+    }
+
+    private var commentTextBinding: Binding<String> {
+        Binding(
+            get: { commentText },
+            set: { value in
+                if commentText.isEmpty, !value.isEmpty {
+                    commentDraftAccount = currentMutationAccount
+                } else if value.isEmpty {
+                    commentDraftAccount = nil
+                }
+                commentText = value
+            }
+        )
+    }
+
     private var writeMessagePresented: Binding<Bool> {
         Binding(
             get: { writeMessage != nil },
@@ -1981,29 +2182,49 @@ struct CommentsView: View {
 
     private func submitComment() {
         let content = trimmedComment
-        guard currentUserID != nil, !content.isEmpty, !isSubmitting else { return }
-        let credentialRevision = library.transport.credentialSnapshotValue().revision
+        guard let account = commentDraftAccount,
+              account.matches(
+                  userID: currentUserID,
+                  confirmedRevision: confirmedAccountCredentialRevision,
+                  liveRevision: library.transport.credentialSnapshotValue().revision
+              ),
+              !content.isEmpty,
+              !isSubmitting
+        else { return }
+        let taskID = UUID()
         isSubmitting = true
+        writeTaskID = taskID
         writeTask = Task { @MainActor in
-            defer {
-                isSubmitting = false
-                writeTask = nil
-            }
+            defer { finishCommentWrite(taskID) }
             do {
-                let serverComment = try await library.addComment(
-                    songID: songID,
-                    content: content,
-                    expectedCredentialRevision: credentialRevision
-                )
                 try Task.checkCancellation()
-                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
-                    throw CancellationError()
-                }
+                var serverComment: MusicComment?
+                guard try await account.performIfCurrent(
+                    userID: currentUserID,
+                    confirmedRevision: confirmedAccountCredentialRevision,
+                    liveRevision: library.transport.credentialSnapshotValue().revision,
+                    operation: {
+                        serverComment = try await library.addComment(
+                            songID: songID,
+                            content: content,
+                            expectedCredentialRevision: account.credentialRevision
+                        )
+                    }
+                ) else { return }
+                try Task.checkCancellation()
+                guard writeTaskID == taskID,
+                      account.matches(
+                          userID: currentUserID,
+                          confirmedRevision: confirmedAccountCredentialRevision,
+                          liveRevision: library.transport.credentialSnapshotValue().revision
+                      )
+                else { return }
                 commentText = ""
+                commentDraftAccount = nil
                 let comment = confirmedComment(
                     serverComment,
                     songID: songID,
-                    userID: currentUserID ?? 0,
+                    userID: account.userID,
                     nickname: currentUserNickname,
                     content: content
                 )
@@ -2012,9 +2233,38 @@ struct CommentsView: View {
                 showSuccess("评论成功")
             } catch is CancellationError {
             } catch {
+                guard writeTaskID == taskID,
+                      account.matches(
+                          userID: currentUserID,
+                          confirmedRevision: confirmedAccountCredentialRevision,
+                          liveRevision: library.transport.credentialSnapshotValue().revision
+                      )
+                else { return }
                 writeMessage = error.localizedDescription
             }
         }
+    }
+
+    private func finishCommentWrite(_ taskID: UUID) {
+        guard writeTaskID == taskID else { return }
+        isSubmitting = false
+        writeTask = nil
+        writeTaskID = nil
+    }
+
+    private func resetCommentMutationState() {
+        writeTask?.cancel()
+        writeTask = nil
+        writeTaskID = nil
+        successTask?.cancel()
+        successTask = nil
+        commentText = ""
+        commentDraftAccount = nil
+        loadedMutationAccount = nil
+        isSubmitting = false
+        writeMessage = nil
+        successMessage = nil
+        comments.removeAll()
     }
 
     private func updateComment(_ updated: MusicComment) {
@@ -2044,6 +2294,11 @@ struct CommentsView: View {
         if reset {
             loadGeneration += 1
             loadTask?.cancel()
+            loadedMutationAccount = currentMutationAccount
+            comments.removeAll()
+            cursor = "0"
+            pageNumber = 1
+            hasMore = false
         }
         let generation = loadGeneration
         loadTask = Task { @MainActor in
@@ -2384,6 +2639,8 @@ private struct CommentThreadRow: View {
     let comment: MusicComment
     let library: LiveMusicLibrary
     let currentUserID: Int64?
+    let confirmedAccountCredentialRevision: UInt64?
+    let mutationAccount: PlaylistMutationAccount?
     let currentUserNickname: String
     let emojiPictureIDs: [String: String]
     let onOpenUser: (Int64) -> Void
@@ -2402,10 +2659,12 @@ private struct CommentThreadRow: View {
     @State private var errorMessage: String?
     @State private var writeMessage: String?
     @State private var replyTarget: MusicComment?
-    @State private var deleteTarget: MusicComment?
+    @State private var replyAccount: PlaylistMutationAccount?
+    @State private var deleteRequest: (comment: MusicComment, account: PlaylistMutationAccount)?
     @State private var floorGeneration = 0
     @State private var floorTask: Task<Void, Never>?
     @State private var writeTasks: [Int64: Task<Void, Never>] = [:]
+    @State private var writeTaskIDs: [Int64: UUID] = [:]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -2413,14 +2672,14 @@ private struct CommentThreadRow: View {
                 comment: comment,
                 canOpenReplies: true,
                 repliesExpanded: isExpanded,
-                currentUserID: currentUserID,
+                currentUserID: currentMutationAccount?.userID,
                 isWriting: writeTasks[comment.id] != nil,
                 emojiPictureIDs: emojiPictureIDs,
                 onOpenUser: onOpenUser,
                 showReplies: toggleReplies,
                 reply: { openReply(comment) },
                 toggleLike: { toggleLiked(comment) },
-                delete: { deleteTarget = comment }
+                delete: { openDelete(comment) }
             )
             if isExpanded {
                 repliesContent
@@ -2428,43 +2687,55 @@ private struct CommentThreadRow: View {
             }
         }
         .sheet(item: $replyTarget) { target in
-            CommentReplySheet(
-                comment: target,
-                emojiPictureIDs: emojiPictureIDs,
-                currentCredentialRevision: { library.transport.credentialSnapshotValue().revision }
-            ) { content, credentialRevision in
-                let serverComment = try await library.replyToComment(
-                    songID: comment.songID,
-                    commentID: target.id,
-                    content: content,
-                    expectedCredentialRevision: credentialRevision
-                )
-                try Task.checkCancellation()
-                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
-                    throw CancellationError()
+            if let account = replyAccount {
+                CommentReplySheet(
+                    comment: target,
+                    emojiPictureIDs: emojiPictureIDs,
+                    accountMatches: { mutationAccountMatches(account) }
+                ) { content in
+                    var serverComment: MusicComment?
+                    guard try await account.performIfCurrent(
+                        userID: currentUserID,
+                        confirmedRevision: confirmedAccountCredentialRevision,
+                        liveRevision: library.transport.credentialSnapshotValue().revision,
+                        operation: {
+                            serverComment = try await library.replyToComment(
+                                songID: comment.songID,
+                                commentID: target.id,
+                                content: content,
+                                expectedCredentialRevision: account.credentialRevision
+                            )
+                        }
+                    ) else { throw CancellationError() }
+                    try Task.checkCancellation()
+                    guard mutationAccountMatches(account) else { throw CancellationError() }
+                    let reply = confirmedComment(
+                        serverComment,
+                        songID: comment.songID,
+                        userID: account.userID,
+                        nickname: currentUserNickname,
+                        content: content,
+                        replyToNickname: target.id == comment.id ? nil : target.nickname
+                    )
+                    insert(reply, after: target)
+                    isExpanded = true
+                    onCommentChanged(comment.addingReply())
+                    onWriteSucceeded("回复成功")
                 }
-                let reply = confirmedComment(
-                    serverComment,
-                    songID: comment.songID,
-                    userID: currentUserID ?? 0,
-                    nickname: currentUserNickname,
-                    content: content,
-                    replyToNickname: target.id == comment.id ? nil : target.nickname
-                )
-                insert(reply, after: target)
-                isExpanded = true
-                onCommentChanged(comment.addingReply())
-                onWriteSucceeded("回复成功")
             }
         }
         .confirmationDialog(
             "删除这条评论？",
             isPresented: deletePresented,
             titleVisibility: .visible,
-            presenting: deleteTarget
-        ) { target in
-            Button("删除", role: .destructive) { deleteComment(target) }
-            Button("取消", role: .cancel) { deleteTarget = nil }
+            presenting: deleteRequest
+        ) { request in
+            Button("删除", role: .destructive) {
+                deleteComment(request.comment, account: request.account)
+            }
+            Button("取消", role: .cancel) {
+                deleteRequest = nil
+            }
         }
         .alert("评论操作失败", isPresented: writeMessagePresented) {
             Button("好") { writeMessage = nil }
@@ -2475,6 +2746,8 @@ private struct CommentThreadRow: View {
             floorTask?.cancel()
             writeTasks.values.forEach { $0.cancel() }
         }
+        .onChange(of: currentMutationAccount) { _, _ in resetThreadMutationState() }
+        .onChange(of: mutationAccount) { _, _ in resetThreadMutationState() }
     }
 
     @ViewBuilder
@@ -2494,14 +2767,14 @@ private struct CommentThreadRow: View {
                             comment: reply,
                             canOpenReplies: false,
                             repliesExpanded: false,
-                            currentUserID: currentUserID,
+                            currentUserID: currentMutationAccount?.userID,
                             isWriting: writeTasks[reply.id] != nil,
                             emojiPictureIDs: emojiPictureIDs,
                             onOpenUser: onOpenUser,
                             showReplies: {},
                             reply: { openReply(reply) },
                             toggleLike: { toggleLiked(reply) },
-                            delete: { deleteTarget = reply }
+                            delete: { openDelete(reply) }
                         )
                         Divider()
                     }
@@ -2523,6 +2796,43 @@ private struct CommentThreadRow: View {
         }
     }
 
+    private var currentMutationAccount: PlaylistMutationAccount? {
+        PlaylistMutationAccount.confirmed(
+            userID: currentUserID,
+            confirmedRevision: confirmedAccountCredentialRevision,
+            liveRevision: library.transport.credentialSnapshotValue().revision
+        )
+    }
+
+    private func mutationAccountMatches(_ account: PlaylistMutationAccount) -> Bool {
+        account == mutationAccount
+            && account.matches(
+                userID: currentUserID,
+                confirmedRevision: confirmedAccountCredentialRevision,
+                liveRevision: library.transport.credentialSnapshotValue().revision
+            )
+    }
+
+    private func resetThreadMutationState() {
+        floorGeneration += 1
+        floorTask?.cancel()
+        floorTask = nil
+        writeTasks.values.forEach { $0.cancel() }
+        writeTasks.removeAll()
+        writeTaskIDs.removeAll()
+        isExpanded = false
+        replies.removeAll()
+        cursor = ""
+        time = -1
+        hasMore = false
+        isLoading = false
+        errorMessage = nil
+        writeMessage = nil
+        replyTarget = nil
+        replyAccount = nil
+        deleteRequest = nil
+    }
+
     private func toggleReplies() {
         isExpanded.toggle()
         if isExpanded && replies.isEmpty && !isLoading {
@@ -2537,7 +2847,17 @@ private struct CommentThreadRow: View {
             onLogin()
             return
         }
+        guard let account = mutationAccount, mutationAccountMatches(account) else { return }
+        replyAccount = account
         replyTarget = target
+    }
+
+    private func openDelete(_ target: MusicComment) {
+        guard let account = mutationAccount,
+              account.userID == target.userID,
+              mutationAccountMatches(account)
+        else { return }
+        deleteRequest = (target, account)
     }
 
     private func insert(_ reply: MusicComment, after target: MusicComment) {
@@ -2553,8 +2873,12 @@ private struct CommentThreadRow: View {
 
     private var deletePresented: Binding<Bool> {
         Binding(
-            get: { deleteTarget != nil },
-            set: { if !$0 { deleteTarget = nil } }
+            get: { deleteRequest != nil },
+            set: {
+                if !$0 {
+                    deleteRequest = nil
+                }
+            }
         )
     }
 
@@ -2567,22 +2891,34 @@ private struct CommentThreadRow: View {
 
     @MainActor
     private func toggleLiked(_ target: MusicComment) {
-        guard currentUserID != nil, writeTasks[target.id] == nil else { return }
+        guard let account = mutationAccount,
+              mutationAccountMatches(account),
+              writeTasks[target.id] == nil
+        else { return }
         let liked = !target.isLiked
-        let credentialRevision = library.transport.credentialSnapshotValue().revision
+        let taskID = UUID()
+        writeTaskIDs[target.id] = taskID
         writeTasks[target.id] = Task { @MainActor in
-            defer { writeTasks[target.id] = nil }
+            defer { finishWrite(target.id, taskID: taskID) }
             do {
-                try await library.setCommentLiked(
-                    songID: comment.songID,
-                    commentID: target.id,
-                    liked: liked,
-                    expectedCredentialRevision: credentialRevision
-                )
                 try Task.checkCancellation()
-                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
-                    throw CancellationError()
-                }
+                guard try await account.performIfCurrent(
+                    userID: currentUserID,
+                    confirmedRevision: confirmedAccountCredentialRevision,
+                    liveRevision: library.transport.credentialSnapshotValue().revision,
+                    operation: {
+                        try await library.setCommentLiked(
+                            songID: comment.songID,
+                            commentID: target.id,
+                            liked: liked,
+                            expectedCredentialRevision: account.credentialRevision
+                        )
+                    }
+                ) else { return }
+                try Task.checkCancellation()
+                guard writeTaskIDs[target.id] == taskID,
+                      mutationAccountMatches(account)
+                else { return }
                 let updated = target.settingLiked(liked)
                 if target.id == comment.id {
                     onCommentChanged(updated)
@@ -2592,28 +2928,46 @@ private struct CommentThreadRow: View {
                 onWriteSucceeded(liked ? "评论已点赞" : "已取消评论点赞")
             } catch is CancellationError {
             } catch {
+                guard writeTaskIDs[target.id] == taskID,
+                      mutationAccountMatches(account)
+                else { return }
                 writeMessage = error.localizedDescription
             }
         }
     }
 
     @MainActor
-    private func deleteComment(_ target: MusicComment) {
-        guard currentUserID == target.userID, writeTasks[target.id] == nil else { return }
-        deleteTarget = nil
-        let credentialRevision = library.transport.credentialSnapshotValue().revision
+    private func deleteComment(_ target: MusicComment, account: PlaylistMutationAccount) {
+        guard account.userID == target.userID,
+              mutationAccountMatches(account),
+              writeTasks[target.id] == nil
+        else {
+            deleteRequest = nil
+            return
+        }
+        deleteRequest = nil
+        let taskID = UUID()
+        writeTaskIDs[target.id] = taskID
         writeTasks[target.id] = Task { @MainActor in
-            defer { writeTasks[target.id] = nil }
+            defer { finishWrite(target.id, taskID: taskID) }
             do {
-                try await library.deleteComment(
-                    songID: comment.songID,
-                    commentID: target.id,
-                    expectedCredentialRevision: credentialRevision
-                )
                 try Task.checkCancellation()
-                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
-                    throw CancellationError()
-                }
+                guard try await account.performIfCurrent(
+                    userID: currentUserID,
+                    confirmedRevision: confirmedAccountCredentialRevision,
+                    liveRevision: library.transport.credentialSnapshotValue().revision,
+                    operation: {
+                        try await library.deleteComment(
+                            songID: comment.songID,
+                            commentID: target.id,
+                            expectedCredentialRevision: account.credentialRevision
+                        )
+                    }
+                ) else { return }
+                try Task.checkCancellation()
+                guard writeTaskIDs[target.id] == taskID,
+                      mutationAccountMatches(account)
+                else { return }
                 onWriteSucceeded("评论已删除")
                 if target.id == comment.id {
                     onCommentDeleted(target.id)
@@ -2624,9 +2978,18 @@ private struct CommentThreadRow: View {
                 }
             } catch is CancellationError {
             } catch {
+                guard writeTaskIDs[target.id] == taskID,
+                      mutationAccountMatches(account)
+                else { return }
                 writeMessage = error.localizedDescription
             }
         }
+    }
+
+    private func finishWrite(_ commentID: Int64, taskID: UUID) {
+        guard writeTaskIDs[commentID] == taskID else { return }
+        writeTasks[commentID] = nil
+        writeTaskIDs[commentID] = nil
     }
 
     @MainActor
@@ -2683,8 +3046,8 @@ private struct CommentThreadRow: View {
 private struct CommentReplySheet: View {
     let comment: MusicComment
     let emojiPictureIDs: [String: String]
-    let currentCredentialRevision: () -> UInt64
-    let submit: (String, UInt64) async throws -> Void
+    let accountMatches: () -> Bool
+    let submit: (String) async throws -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var content = ""
@@ -2720,7 +3083,7 @@ private struct CommentReplySheet: View {
                     .disabled(isSubmitting)
                 Button("回复", action: submitReply)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(trimmedContent.isEmpty || isSubmitting)
+                    .disabled(trimmedContent.isEmpty || isSubmitting || !accountMatches())
             }
         }
         .padding(20)
@@ -2735,8 +3098,7 @@ private struct CommentReplySheet: View {
 
     private func submitReply() {
         let value = trimmedContent
-        guard !value.isEmpty, !isSubmitting else { return }
-        let credentialRevision = currentCredentialRevision()
+        guard !value.isEmpty, !isSubmitting, accountMatches() else { return }
         isSubmitting = true
         errorMessage = nil
         task = Task { @MainActor in
@@ -2745,10 +3107,14 @@ private struct CommentReplySheet: View {
                 task = nil
             }
             do {
-                try await submit(value, credentialRevision)
+                guard accountMatches() else { return }
+                try Task.checkCancellation()
+                try await submit(value)
+                guard accountMatches() else { return }
                 dismiss()
             } catch is CancellationError {
             } catch {
+                guard accountMatches() else { return }
                 errorMessage = error.localizedDescription
             }
         }

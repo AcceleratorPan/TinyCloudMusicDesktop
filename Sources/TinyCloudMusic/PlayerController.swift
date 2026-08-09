@@ -197,12 +197,13 @@ final class PlayerController {
         repository: any MusicRepository,
         playbackQuality: AudioQuality = .standard,
         cacheRoot: URL? = nil,
+        cache: TrackCache? = nil,
         crossfadeDuration: TimeInterval = 3
     ) {
         self.repository = repository
         self.playbackQuality = playbackQuality
         self.crossfadeDuration = min(max(crossfadeDuration, 0), Self.maximumCrossfadeDuration)
-        cache = Self.makeCache(root: cacheRoot)
+        self.cache = cache ?? Self.makeCache(root: cacheRoot)
         applyVolume()
         installPlayerObservers()
     }
@@ -338,6 +339,8 @@ final class PlayerController {
     var hasCurrentPlayerItem: Bool { avPlayer.currentItem != nil }
 
     var hasPendingPrefetch: Bool { prefetchTask != nil }
+
+    var pendingPlaybackReportCount: Int { playbackReportTasks.count }
 
     var canGoPrevious: Bool { currentSong != nil }
 
@@ -1553,7 +1556,7 @@ final class PlayerController {
     private static func makeCache(root: URL?) -> TrackCache {
         let root = root ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appending(path: "TinyCloudMusic", directoryHint: .isDirectory)
-        return TrackCache(directory: root.appending(path: "StreamCache", directoryHint: .isDirectory))
+        return TrackCache.shared(directory: root.appending(path: "StreamCache", directoryHint: .isDirectory))
     }
 
     private func registerPinned(_ url: URL, cache: TrackCache) {

@@ -769,6 +769,134 @@ struct DownloadTransferPerformanceTests {
         #expect(cloudIDs.allSatisfy { manager.states[$0] == .cancelled })
         #expect(DownloadFenceProtocol.requestCount == 0)
     }
+
+    @MainActor
+    @Test("Completed-file validation leaves MainActor and rebuilds missing audio and video")
+    func completedFileValidationIsOffMainActor() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cacheRoot = root.appending(path: "cache")
+        let destination = root.appending(path: "downloads")
+        let audio = song(801)
+        let audioCache = TrackCache(
+            directory: cacheRoot.appending(path: "StreamCache", directoryHint: .isDirectory)
+        )
+        let audioSource = root.appending(path: "source.flac")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("fLaC-source".utf8).write(to: audioSource)
+        _ = try await audioCache.storeCopy(
+            of: audioSource,
+            for: audio.id,
+            quality: AudioQuality.standard.cacheComponent,
+            fileExtension: "flac"
+        )
+
+        let video = videoRequest(id: 802, destination: destination)
+        let store = MusicDownloadResumeStore(directory: root.appending(path: "resume"))
+        store.save(MusicDownloadVideoResumeEntry(
+            request: video,
+            resumeData: nil,
+            resolution: 720,
+            sourceURL: URL(string: "https://vod.126.net/validation.mp4")!,
+            sourceExpiresAt: Date().addingTimeInterval(3_600)
+        ))
+        try await store.flush()
+        guard let recoveredVideo = (await store.recoverableDownloadsAsync()).videos.first?.request else {
+            Issue.record("video recovery fixture was not persisted")
+            return
+        }
+
+        let audioProbe = BlockingFileValidator()
+        let videoProbe = BlockingFileValidator()
+        let network = blockedNetwork()
+        defer { network.session.invalidateAndCancel() }
+        let manager = MusicDownloadManager(
+            transport: network.transport,
+            session: network.session,
+            maximumConcurrentDownloads: 2,
+            retryPolicy: MusicDownloadRetryPolicy(maximumAttempts: 1, baseDelay: 0, maximumDelay: 0),
+            resumeStore: store,
+            targetAllocator: MusicDownloadTargetAllocator(),
+            cacheRoot: cacheRoot,
+            audioCache: audioCache,
+            videoTransfer: { request, _, _ in try mp4Result(for: request) },
+            audioFileValidator: audioProbe.validate,
+            videoFileValidator: videoProbe.validate
+        )
+        #expect(manager.enqueue(
+            song: audio,
+            to: destination,
+            quality: .standard,
+            includeLyrics: false
+        ))
+        try await waitForMusic(manager, songID: audio.id)
+        try await waitForVideo(manager, id: recoveredVideo.resource.identity)
+        guard case let .completed(audioURL, _)? = manager.states[audio.id],
+              case let .completed(videoURL, _)? = manager.videoStates[recoveredVideo.resource.identity]
+        else {
+            Issue.record("initial downloads did not complete")
+            return
+        }
+        try FileManager.default.removeItem(at: audioURL)
+        try FileManager.default.removeItem(at: videoURL)
+
+        let audioRelease = Task.detached {
+            let didStart = audioProbe.waitForStart()
+            try? await Task.sleep(for: .milliseconds(100))
+            audioProbe.releaseValidation()
+            return didStart
+        }
+        let videoRelease = Task.detached {
+            let didStart = videoProbe.waitForStart()
+            try? await Task.sleep(for: .milliseconds(100))
+            videoProbe.releaseValidation()
+            return didStart
+        }
+        #expect(!manager.enqueue(
+            song: audio,
+            to: destination,
+            quality: .standard,
+            includeLyrics: false
+        ))
+        #expect(!manager.enqueue(
+            video: recoveredVideo.resource,
+            title: recoveredVideo.title,
+            creator: recoveredVideo.creator,
+            availableResolutions: recoveredVideo.availableResolutions,
+            to: recoveredVideo.destination,
+            quality: recoveredVideo.quality
+        ))
+        #expect(!audioProbe.wasReleased)
+        #expect(!videoProbe.wasReleased)
+        #expect(await audioRelease.value)
+        #expect(await videoRelease.value)
+
+        for _ in 0..<500 {
+            let audioExists = if case let .completed(url, _)? = manager.states[audio.id] {
+                FileManager.default.fileExists(atPath: url.path)
+            } else {
+                false
+            }
+            let videoExists = if case let .completed(url, _)? = manager.videoStates[recoveredVideo.resource.identity] {
+                FileManager.default.fileExists(atPath: url.path)
+            } else {
+                false
+            }
+            if audioExists, videoExists { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        #expect(audioProbe.didRun && !audioProbe.ranOnMainThread)
+        #expect(videoProbe.didRun && !videoProbe.ranOnMainThread)
+        guard case let .completed(rebuiltAudioURL, _)? = manager.states[audio.id],
+              case let .completed(rebuiltVideoURL, _)? = manager.videoStates[recoveredVideo.resource.identity]
+        else {
+            Issue.record("missing completed state after file validation")
+            return
+        }
+        #expect(FileManager.default.fileExists(atPath: rebuiltAudioURL.path))
+        #expect(FileManager.default.fileExists(atPath: rebuiltVideoURL.path))
+    }
 }
 
 private final class LockedCounter: @unchecked Sendable {
@@ -783,6 +911,38 @@ private final class LockedValues<Value: Sendable>: @unchecked Sendable {
     private var storage: [Value] = []
     var values: [Value] { lock.withLock { storage } }
     func append(_ value: Value) { lock.withLock { storage.append(value) } }
+}
+
+private final class BlockingFileValidator: @unchecked Sendable {
+    private let lock = NSLock()
+    private let started = DispatchSemaphore(value: 0)
+    private let release = DispatchSemaphore(value: 0)
+    private var didStart = false
+    private var didRelease = false
+    private var wasOnMainThread = false
+
+    var didRun: Bool { lock.withLock { didStart } }
+    var wasReleased: Bool { lock.withLock { didRelease } }
+    var ranOnMainThread: Bool { lock.withLock { wasOnMainThread } }
+
+    func validate(_ url: URL) -> Bool {
+        lock.withLock {
+            didStart = true
+            wasOnMainThread = Thread.isMainThread
+        }
+        started.signal()
+        release.wait()
+        return FileManager.default.fileExists(atPath: url.path)
+    }
+
+    func waitForStart() -> Bool {
+        started.wait(timeout: .now() + 2) == .success
+    }
+
+    func releaseValidation() {
+        lock.withLock { didRelease = true }
+        release.signal()
+    }
 }
 
 private actor CacheLookupGate {

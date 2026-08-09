@@ -141,7 +141,7 @@ struct PlayerCachePerformanceTests {
             extras: LiveMusicExtras(transport: transport),
             defaults: defaults
         )
-        model.currentUserID = 7
+        model.installConfirmedAccount(userID: 7, credentialRevision: revisionA)
         let clickRenderedButton = {
             let hosting = NSHostingView(rootView: NowPlayingLikeButton(model: model, songID: 42))
             let window = NSWindow(
@@ -499,6 +499,80 @@ struct PlayerCachePerformanceTests {
     }
 
     @MainActor
+    @Test("Startup revision interleaving advances Player and clears the stale account")
+    func startupRevisionInterleaving() async throws {
+        PlayerMutationProtocol.reset()
+        let root = performanceCacheRoot()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "startup-revision.wav")
+        try performanceWAV().write(to: source)
+        let song = performanceSong(1)
+        let snapshot = CredentialSnapshot(.authenticated(try playerCredentials("startup-a")))
+        let revisionA = snapshot.load().revision
+        let requestCount = ObservationChangeCounter()
+        let accountGate = PlayerReportGate(blocking: [.start])
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlayerMutationProtocol.self]
+        let transport = EAPITransport(
+            session: URLSession(configuration: configuration),
+            credentialSnapshot: snapshot,
+            beforeSendingRequest: {
+                let call = requestCount.increment()
+                guard call == 3 || call == 4 else { return }
+                try? await accountGate.run(.start, revision: UInt64(call))
+            }
+        )
+        let model = AppModel(
+            repository: FixtureMusicRepository(),
+            library: LiveMusicLibrary(transport: transport),
+            extras: LiveMusicExtras(transport: transport)
+        )
+        let playerRepository = PlayerPerformanceRepository(
+            songs: [song],
+            sourceURL: source,
+            blocksStartReport: true
+        )
+        let player = PlayerController(
+            repository: playerRepository,
+            cacheRoot: root.appending(path: "cache"),
+            crossfadeDuration: 0
+        )
+        player.setAccountCredentialRevision(revisionA)
+        player.play(song, in: [song])
+        await waitUntil { await playerRepository.startReportRevisions() == [revisionA] }
+
+        let staleRefresh = Task { @MainActor in await model.refreshAccountState() }
+        await waitUntil { await accountGate.invocationCount(.start, revision: 3) == 1 }
+        #expect(model.currentUserID == 8)
+        #expect(model.confirmedAccountCredentialRevision == revisionA)
+
+        model.toggleSongLiked(42)
+        await waitUntil {
+            await accountGate.invocationCount(.start, revision: 4) == 1
+                && model.pendingMutations == [.songLike(42)]
+        }
+
+        let revisionB = snapshot.store(.authenticated(try playerCredentials("startup-b"))).revision
+        player.setAccountCredentialRevision(revisionB)
+        model.invalidateAccountDomainIfNeeded(forCredentialRevision: revisionB)
+        await waitUntil { await playerRepository.startReportCancellationCount() == 1 }
+
+        #expect(model.currentUserID == nil)
+        #expect(model.confirmedAccountCredentialRevision == nil)
+        #expect(model.pendingMutations.isEmpty)
+        #expect(await playerRepository.startReportCancellationCount() == 1)
+
+        await accountGate.release(revision: 3)
+        await accountGate.release(revision: 4)
+        await staleRefresh.value
+        await model.refreshAccountState()
+
+        #expect(model.currentUserID == 8)
+        #expect(model.confirmedAccountCredentialRevision == revisionB)
+    }
+
+    @MainActor
     @Test("Settlement keeps a blocked start report owned across account reset")
     func settlementKeepsStartOwned() async throws {
         let root = performanceCacheRoot()
@@ -535,7 +609,7 @@ struct PlayerCachePerformanceTests {
     }
 
     @MainActor
-    @Test("Periodic and final podcast reports remain cancellable owners")
+    @Test("New account reports progress while cancelled old calls stay blocked")
     func podcastReportOwnership() async throws {
         let root = performanceCacheRoot()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -544,9 +618,11 @@ struct PlayerCachePerformanceTests {
         try performanceWAV().write(to: source)
         let first = performanceSong(1, podcastEpisodeID: 201)
         let second = performanceSong(2, podcastEpisodeID: 202)
+        let third = performanceSong(3, podcastEpisodeID: 203)
+        let songs = [first, second, third]
         let reports = PlayerReportGate(blocking: [.podcast])
         let repository = PlayerPerformanceRepository(
-            songs: [first, second],
+            songs: songs,
             sourceURL: source,
             reportGate: reports
         )
@@ -556,17 +632,60 @@ struct PlayerCachePerformanceTests {
             crossfadeDuration: 0
         )
         player.setAccountCredentialRevision(80)
-        player.play(first, in: [first, second])
+        player.play(first, in: songs)
         await waitUntil { await reports.invocationCount(.podcast, revision: 80) == 1 }
-        player.play(second, in: [first, second])
+        player.play(second, in: songs)
         await waitUntil { await reports.invocationCount(.podcast, revision: 80) == 2 }
 
         player.setAccountCredentialRevision(81)
+        player.play(third, in: songs)
+        await waitUntil { await reports.invocationCount(.podcast, revision: 81) == 1 }
+
+        #expect(player.pendingPlaybackReportCount == 1)
+        #expect(await reports.waiterCount(revision: 80) == 2)
+        #expect(await reports.cancellationCount(.podcast, revision: 80) == 0)
+        await reports.release(revision: 81)
+        await waitUntil { player.playbackHistoryEvent?.credentialRevision == 81 }
+
+        #expect(player.playbackHistoryEvent?.kind == .podcast)
+        #expect(player.playbackReportErrorMessage == nil)
+
         await reports.release(revision: 80)
         await waitUntil { await reports.cancellationCount(.podcast, revision: 80) == 2 }
+        #expect(await reports.cancellationCount(.podcast, revision: 80) == 2)
+    }
 
-        #expect(player.playbackHistoryEvent == nil)
-        #expect(player.playbackReportErrorMessage == nil)
+    @MainActor
+    @Test("Settlement success preserves a failed start report error")
+    func settlementPreservesStartFailure() async throws {
+        let root = performanceCacheRoot()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "failed-start.wav")
+        try performanceWAV().write(to: source)
+        let first = performanceSong(1)
+        let second = performanceSong(2, podcastEpisodeID: 202)
+        let reports = PlayerReportGate(blocking: [], failing: [.start])
+        let player = PlayerController(
+            repository: PlayerPerformanceRepository(
+                songs: [first, second],
+                sourceURL: source,
+                reportGate: reports
+            ),
+            cacheRoot: root.appending(path: "cache"),
+            crossfadeDuration: 0
+        )
+        player.setAccountCredentialRevision(85)
+        player.play(first, in: [first, second])
+        await waitUntil { player.playbackReportErrorMessage != nil }
+        try await Task.sleep(for: .milliseconds(1_100))
+
+        player.play(second, in: [first, second])
+        await waitUntil { player.playbackHistoryEvent?.sequence == 1 }
+
+        #expect(await reports.invocationCount(.start, revision: 85) == 1)
+        #expect(await reports.invocationCount(.settlement, revision: 85) == 1)
+        #expect(player.playbackReportErrorMessage != nil)
     }
 
     @MainActor
@@ -597,11 +716,16 @@ struct PlayerCachePerformanceTests {
             await waitUntil {
                 await reports.invocationCount(.podcast, revision: 90) == index + 1
             }
+            #expect(player.pendingPlaybackReportCount == min(index + 1, 8))
         }
 
         await reports.release(revision: 90)
-        await waitUntil { await reports.cancellationCount(.podcast, revision: 90) == 2 }
+        await waitUntil {
+            await reports.cancellationCount(.podcast, revision: 90) == 2
+                && player.pendingPlaybackReportCount == 0
+        }
         #expect(await reports.cancellationCount(.podcast, revision: 90) == 2)
+        #expect(player.pendingPlaybackReportCount == 0)
     }
 
     @MainActor
@@ -669,7 +793,13 @@ private final class ObservationChangeCounter: @unchecked Sendable {
 
     var value: Int { lock.withLock { count } }
 
-    func increment() { lock.withLock { count += 1 } }
+    @discardableResult
+    func increment() -> Int {
+        lock.withLock {
+            count += 1
+            return count
+        }
+    }
 }
 
 private final class PlayerMutationProtocol: URLProtocol, @unchecked Sendable {
@@ -723,12 +853,14 @@ private actor PlayerReportGate {
     }
 
     private let blocking: Set<Kind>
+    private let failing: Set<Kind>
     private var invocations: [(Kind, UInt64)] = []
     private var cancellations: [(Kind, UInt64)] = []
     private var waiters: [UUID: Waiter] = [:]
 
-    init(blocking: Set<Kind>) {
+    init(blocking: Set<Kind>, failing: Set<Kind> = []) {
         self.blocking = blocking
+        self.failing = failing
     }
 
     func run(_ kind: Kind, revision: UInt64) async throws {
@@ -743,6 +875,7 @@ private actor PlayerReportGate {
             cancellations.append((kind, revision))
             throw CancellationError()
         }
+        if failing.contains(kind) { throw URLError(.badServerResponse) }
     }
 
     func release(revision: UInt64) {
@@ -759,6 +892,10 @@ private actor PlayerReportGate {
 
     func cancellationCount(_ kind: Kind, revision: UInt64) -> Int {
         cancellations.count { $0.0 == kind && $0.1 == revision }
+    }
+
+    func waiterCount(revision: UInt64) -> Int {
+        waiters.values.count { $0.revision == revision }
     }
 }
 

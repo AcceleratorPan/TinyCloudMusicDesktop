@@ -6,7 +6,7 @@
 
 审计基线：`decfd7d`（`main` / `origin/main`）
 
-对照基线：`docs/SWIFT_APP_FINAL_AUDIT_AND_PARALLEL_REMEDIATION_PLAN_2026-07-25.md`
+历史对照：2026-07-25 前置审计的有效结论已并入本报告，旧文件已删除
 
 审计性质：只读代码审计；2026-07-31 仅修订审计与执行文档，未修改产品、测试或配置代码
 

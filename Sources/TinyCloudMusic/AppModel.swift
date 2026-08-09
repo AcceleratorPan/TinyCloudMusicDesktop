@@ -138,10 +138,10 @@ final class AppModel {
     var broadcastCollectionOverrides: [String: Bool] = [:]
     var currentUserID: Int64? {
         didSet {
-            guard currentUserID != oldValue else { return }
             listenTogether?.updateAccount(currentUserID)
         }
     }
+    var confirmedAccountCredentialRevision: UInt64? { accountCredentialRevision }
     var playlistPickerSong: Song?
     var isListenTogetherPresented = false
     var librarySnapshot: LibrarySnapshot?
@@ -442,15 +442,22 @@ final class AppModel {
     }
 
     func refreshAccountState() async {
-        guard let library, let extras else { return }
+        guard let library else { return }
+        defer {
+            invalidateAccountDomainIfNeeded(
+                forCredentialRevision: library.transport.credentialSnapshotValue().revision
+            )
+        }
         let credentialRevision = library.transport.credentialSnapshotValue().revision
+        invalidateAccountDomainIfNeeded(forCredentialRevision: credentialRevision)
+        guard let extras else { return }
         accountRefreshGeneration += 1
         var generation = accountRefreshGeneration
         if let session, session.state != .authenticated {
             if currentUserID != nil {
                 await library.invalidateAllCachedResponses()
                 guard accountRefreshGeneration == generation else { return }
-                _ = resetAccountScopedState(userID: nil)
+                _ = resetAccountScopedState(userID: nil, credentialRevision: nil)
             }
             return
         }
@@ -466,7 +473,7 @@ final class AppModel {
                 if currentUserID != nil {
                     await library.invalidateAllCachedResponses()
                     guard accountRefreshGeneration == generation else { return }
-                    _ = resetAccountScopedState(userID: nil)
+                    _ = resetAccountScopedState(userID: nil, credentialRevision: nil)
                 } else {
                     likedSongIDs = []
                 }
@@ -477,7 +484,10 @@ final class AppModel {
                 guard accountRefreshGeneration == generation,
                       library.transport.credentialSnapshotValue().revision == credentialRevision
                 else { return }
-                generation = resetAccountScopedState(userID: user.id)
+                generation = installConfirmedAccount(
+                    userID: user.id,
+                    credentialRevision: credentialRevision
+                )
             }
             let playlists = try await accountPlaylists(
                 userID: user.id,
@@ -1215,7 +1225,11 @@ final class AppModel {
             _ = try await favoriteTask.value
             return try await favoriteSongs(songIDs)
         }
-        guard let library, let userID = currentUserID else { return 0 }
+        guard let library,
+              let userID = currentUserID,
+              let revision = accountCredentialRevision,
+              library.transport.credentialSnapshotValue().revision == revision
+        else { return 0 }
         var seen = Set<Int64>()
         let ids = songIDs.filter {
             $0 > 0 && seen.insert($0).inserted && !likedSongIDs.contains($0)
@@ -1223,7 +1237,6 @@ final class AppModel {
         guard !ids.isEmpty else { return 0 }
 
         let generation = accountRefreshGeneration
-        let revision = library.transport.credentialSnapshotValue().revision
         let keys = Set(ids.map(LibraryMutationKey.songLike))
         guard pendingMutations.isDisjoint(with: keys) else { return 0 }
         let taskID = UUID()
@@ -1368,7 +1381,12 @@ final class AppModel {
         }
     }
 
-    func addSongToPlaylist(_ songID: Int64, playlistID: Int64, isFavoritePlaylist: Bool) {
+    func addSongToPlaylist(
+        _ songID: Int64,
+        playlistID: Int64,
+        isFavoritePlaylist: Bool,
+        onFailure: (@MainActor (String) -> Void)? = nil
+    ) {
         guard let library else { return }
         startMutation(
             .playlistSong(playlistID: playlistID, songID: songID),
@@ -1379,7 +1397,8 @@ final class AppModel {
                     to: playlistID,
                     expectedCredentialRevision: revision
                 )
-            }
+            },
+            failure: onFailure
         ) { model in
             model.songPlaylistMembershipDidChange(
                 songID,
@@ -1455,11 +1474,15 @@ final class AppModel {
         _ key: LibraryMutationKey,
         transport: EAPITransport,
         operation: @escaping @Sendable (UInt64) async throws -> Void,
+        failure: (@MainActor (String) -> Void)? = nil,
         commit: @escaping @MainActor (AppModel) -> Void
     ) {
-        guard let userID = currentUserID, !pendingMutations.contains(key) else { return }
-        let generation = accountRefreshGeneration
         let revision = transport.credentialSnapshotValue().revision
+        guard let userID = currentUserID,
+              accountCredentialRevision == revision,
+              !pendingMutations.contains(key)
+        else { return }
+        let generation = accountRefreshGeneration
         let taskID = UUID()
         pendingMutations.insert(key)
         let task = Task { @MainActor [weak self] in
@@ -1490,7 +1513,11 @@ final class AppModel {
                     credentialRevision: revision,
                     transport: transport
                 ) else { return }
-                self.libraryMessage = error.localizedDescription
+                if let failure {
+                    failure(error.localizedDescription)
+                } else {
+                    self.libraryMessage = error.localizedDescription
+                }
             }
         }
         mutationTasks[key] = MutationTaskEntry(id: taskID, task: task)
@@ -1517,6 +1544,7 @@ final class AppModel {
     ) -> Bool {
         accountRefreshGeneration == generation
             && currentUserID == userID
+            && accountCredentialRevision == credentialRevision
             && transport.credentialSnapshotValue().revision == credentialRevision
     }
 
@@ -1599,8 +1627,21 @@ final class AppModel {
         }.first
     }
 
+    func invalidateAccountDomainIfNeeded(forCredentialRevision credentialRevision: UInt64) {
+        let isUnauthenticated = session.map { $0.state != .authenticated } ?? false
+        guard currentUserID != nil || accountCredentialRevision != nil,
+              isUnauthenticated || accountCredentialRevision != credentialRevision
+        else { return }
+        _ = resetAccountScopedState(userID: nil, credentialRevision: nil)
+    }
+
     @discardableResult
-    private func resetAccountScopedState(userID: Int64?) -> Int {
+    func installConfirmedAccount(userID: Int64, credentialRevision: UInt64) -> Int {
+        resetAccountScopedState(userID: userID, credentialRevision: credentialRevision)
+    }
+
+    @discardableResult
+    private func resetAccountScopedState(userID: Int64?, credentialRevision: UInt64?) -> Int {
         accountRefreshGeneration += 1
         let generation = accountRefreshGeneration
         mutationTasks.values.forEach { $0.task.cancel() }
@@ -1668,15 +1709,13 @@ final class AppModel {
         cachedPlaylistRevision = -1
         cachedPlaylistsLoadedAt = nil
         playlistPickerSong = nil
-        accountCredentialRevision = userID == nil
-            ? nil
-            : library?.transport.credentialSnapshotValue().revision
+        accountCredentialRevision = userID == nil ? nil : credentialRevision
         downloads?.setCloudDownloadAccount(
             userID: userID,
             credentialRevision: accountCredentialRevision
         )
         personalFM?.setAccount(userID)
-        uploads?.setAccount(userID)
+        uploads?.setAccount(userID, credentialRevision: accountCredentialRevision)
         currentUserID = userID
         return generation
     }

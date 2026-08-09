@@ -152,14 +152,20 @@ struct MediaLifecyclePerformanceTests {
 
         MediaFixtureProtocol.reset(blockingPaths: [mutationPath])
         let firstSnapshot = CredentialSnapshot(.authenticated(try credentials("podcast-disappear")))
-        let firstLibrary = LiveAudioContentLibrary(transport: fixtureTransport(snapshot: firstSnapshot))
+        let firstTransport = fixtureTransport(snapshot: firstSnapshot)
+        let firstLibrary = LiveAudioContentLibrary(transport: firstTransport)
         let firstSuite = "TinyCloudMusicTests.\(UUID())"
         let firstDefaults = UserDefaults(suiteName: firstSuite)!
         defer { firstDefaults.removePersistentDomain(forName: firstSuite) }
         let firstCacheRoot = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: firstCacheRoot) }
-        let firstModel = AppModel(repository: FixtureMusicRepository(), defaults: firstDefaults)
-        firstModel.currentUserID = 7
+        let firstModel = AppModel(
+            repository: FixtureMusicRepository(),
+            library: LiveMusicLibrary(transport: firstTransport),
+            extras: LiveMusicExtras(transport: firstTransport),
+            defaults: firstDefaults
+        )
+        await firstModel.refreshAccountState()
         let firstPlayer = PlayerController(
             repository: MediaBlockingRepository(),
             cacheRoot: firstCacheRoot,
@@ -182,14 +188,20 @@ struct MediaLifecyclePerformanceTests {
 
         MediaFixtureProtocol.reset(blockingPaths: [mutationPath])
         let secondSnapshot = CredentialSnapshot(.authenticated(try credentials("podcast-account")))
-        let secondLibrary = LiveAudioContentLibrary(transport: fixtureTransport(snapshot: secondSnapshot))
+        let secondTransport = fixtureTransport(snapshot: secondSnapshot)
+        let secondLibrary = LiveAudioContentLibrary(transport: secondTransport)
         let secondSuite = "TinyCloudMusicTests.\(UUID())"
         let secondDefaults = UserDefaults(suiteName: secondSuite)!
         defer { secondDefaults.removePersistentDomain(forName: secondSuite) }
         let secondCacheRoot = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: secondCacheRoot) }
-        let secondModel = AppModel(repository: FixtureMusicRepository(), defaults: secondDefaults)
-        secondModel.currentUserID = 7
+        let secondModel = AppModel(
+            repository: FixtureMusicRepository(),
+            library: LiveMusicLibrary(transport: secondTransport),
+            extras: LiveMusicExtras(transport: secondTransport),
+            defaults: secondDefaults
+        )
+        await secondModel.refreshAccountState()
         let secondPlayer = PlayerController(
             repository: MediaBlockingRepository(),
             cacheRoot: secondCacheRoot,
@@ -210,6 +222,48 @@ struct MediaLifecyclePerformanceTests {
         secondHost.layoutSubtreeIfNeeded()
         #expect(await eventually { MediaFixtureProtocol.cancellationCount(path: mutationPath) == 1 })
         secondWindow.close()
+    }
+
+    @MainActor
+    @Test("Podcast subscription rejects an unconfirmed credential revision before request")
+    func podcastSubscriptionRequiresConfirmedRevision() async throws {
+        let mutationPath = "/weapi/djradio/sub"
+        MediaFixtureProtocol.reset()
+        let snapshot = CredentialSnapshot(.authenticated(try credentials("podcast-confirmed")))
+        let transport = fixtureTransport(snapshot: snapshot)
+        let library = LiveAudioContentLibrary(transport: transport)
+        let suite = "TinyCloudMusicTests.\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let cacheRoot = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+        let model = AppModel(
+            repository: FixtureMusicRepository(),
+            library: LiveMusicLibrary(transport: transport),
+            extras: LiveMusicExtras(transport: transport),
+            defaults: defaults
+        )
+        await model.refreshAccountState()
+        let player = PlayerController(
+            repository: MediaBlockingRepository(),
+            cacheRoot: cacheRoot,
+            crossfadeDuration: 0
+        )
+        let host = NSHostingView(rootView: PodcastDetailView(
+            podcastID: 101,
+            library: library,
+            model: model,
+            player: player
+        ))
+        let window = mediaWindow(hosting: host)
+        defer { window.close() }
+        #expect(await eventually { mediaSubviews(NSButton.self, in: host).count == 1 })
+
+        snapshot.store(.authenticated(try credentials("podcast-unconfirmed")))
+        try #require(mediaSubviews(NSButton.self, in: host).first).performClick(nil)
+        await Task.yield()
+
+        #expect(MediaFixtureProtocol.requestCount(path: mutationPath) == 0)
     }
 
     @Test("Podcast fallback accepts only compatibility failures")
@@ -915,6 +969,12 @@ private final class MediaFixtureProtocol: URLProtocol, @unchecked Sendable {
             Data(#"{"code":200,"data":{"id":101,"name":"Podcast","dj":{"nickname":"Host"},"category":"Category","subed":false}}"#.utf8)
         } else if path == "/weapi/dj/program/byradio" {
             Data(#"{"code":200,"programs":[],"more":false}"#.utf8)
+        } else if path == "/eapi/v1/user/info" {
+            Data(#"{"code":200,"userPoint":{"userId":7}}"#.utf8)
+        } else if path == "/eapi/v1/user/detail" {
+            Data(#"{"code":200,"profile":{"userId":7,"nickname":"Fixture"}}"#.utf8)
+        } else if path == "/eapi/user/playlist" {
+            Data(#"{"code":200,"playlist":[],"more":false}"#.utf8)
         } else {
             Data(#"{"code":200}"#.utf8)
         }

@@ -62,6 +62,29 @@ private actor TrackCacheDownloadLimiter {
     }
 }
 
+private final class TrackCacheRegistry: @unchecked Sendable {
+    private final class WeakCache {
+        weak var value: TrackCache?
+
+        init(_ value: TrackCache) {
+            self.value = value
+        }
+    }
+
+    private let lock = NSLock()
+    private var caches: [String: WeakCache] = [:]
+
+    func cache(for directory: URL) -> TrackCache {
+        let directory = directory.standardizedFileURL
+        return lock.withLock {
+            if let cache = caches[directory.path]?.value { return cache }
+            let cache = TrackCache(directory: directory)
+            caches[directory.path] = WeakCache(cache)
+            return cache
+        }
+    }
+}
+
 final actor TrackCache {
     typealias Download = @Sendable (URLRequest) async throws -> (URL, URLResponse)
 
@@ -79,6 +102,7 @@ final actor TrackCache {
     private struct InFlight {
         let id: UUID
         let task: Task<URL, Error>
+        let generation: UInt64
         var waiters: [UUID: CheckedContinuation<URL, Error>] = [:]
     }
 
@@ -99,6 +123,7 @@ final actor TrackCache {
     }
 
     private static let supportedExtensions = ["mp3", "flac", "ogg", "wav", "m4a"]
+    private nonisolated static let registry = TrackCacheRegistry()
 
     nonisolated let directory: URL
     private let download: Download
@@ -109,9 +134,12 @@ final actor TrackCache {
     private var inFlight: [Key: InFlight] = [:]
     private var pins: [String: Int] = [:]
     private var pendingDeletePaths: Set<String> = []
+    private var cacheGeneration: UInt64 = 0
+    private var clearDepth = 0
     private var lastTrimAt: Date?
     private(set) var trimRunCount = 0
     private(set) var migrationCount = 0
+    var isClearing: Bool { clearDepth > 0 }
 
     init(
         directory: URL? = nil,
@@ -130,6 +158,10 @@ final actor TrackCache {
         self.beforeReadyLookup = beforeReadyLookup
         limiter = TrackCacheDownloadLimiter(limit: maximumConcurrentDownloads)
         self.download = download
+    }
+
+    nonisolated static func shared(directory: URL) -> TrackCache {
+        registry.cache(for: directory)
     }
 
     deinit {
@@ -156,7 +188,8 @@ final actor TrackCache {
 
     func readyPinnedFile(for songID: Int64, quality: String = "standard") async -> URL? {
         if let beforeReadyLookup { await beforeReadyLookup() }
-        guard !Task.isCancelled,
+        guard clearDepth == 0,
+              !Task.isCancelled,
               let url = readyCachedFileNow(for: songID, quality: quality)?.url,
               pin(url)
         else { return nil }
@@ -165,7 +198,7 @@ final actor TrackCache {
 
     func readyCachedFile(for songID: Int64, quality: String = "standard") async -> CachedFile? {
         if let beforeReadyLookup { await beforeReadyLookup() }
-        guard !Task.isCancelled else { return nil }
+        guard clearDepth == 0, !Task.isCancelled else { return nil }
         return readyCachedFileNow(for: songID, quality: quality)
     }
 
@@ -201,9 +234,11 @@ final actor TrackCache {
 
     func cache(songID: Int64, quality: String = "standard", from source: URL) async throws -> URL {
         try Task.checkCancellation()
+        let generation = cacheGeneration
         if let ready = await readyFile(for: songID, quality: quality) {
             return ready
         }
+        guard clearDepth == 0, generation == cacheGeneration else { throw CancellationError() }
         let key = Key(songID: songID, quality: Self.cacheComponent(quality))
 
         let requestID: UUID
@@ -216,19 +251,21 @@ final actor TrackCache {
             let limiter = limiter
             let task = Task {
                 try await Self.download(
-                    songID: songID,
-                    quality: key.quality,
                     source: source,
                     directory: directory,
                     limiter: limiter,
                     download: download
                 )
             }
-            inFlight[key] = InFlight(id: id, task: task)
+            inFlight[key] = InFlight(id: id, task: task, generation: generation)
             requestID = id
             Task { [weak self, task] in
                 let result = await task.result
-                await self?.complete(result, for: key, requestID: id)
+                if let self {
+                    await self.complete(result, for: key, requestID: id)
+                } else if case let .success(temporaryURL) = result {
+                    try? FileManager.default.removeItem(at: temporaryURL)
+                }
             }
         }
 
@@ -263,6 +300,7 @@ final actor TrackCache {
         quality: String = "standard",
         storedExtension: String? = nil
     ) throws -> URL {
+        guard clearDepth == 0 else { throw CancellationError() }
         let url = try Self.finalize(
             downloadedFile,
             for: songID,
@@ -280,7 +318,9 @@ final actor TrackCache {
         quality: String,
         fileExtension: String
     ) async throws -> CachedFile {
+        let generation = cacheGeneration
         if let cached = await readyCachedFile(for: songID, quality: quality) { return cached }
+        guard clearDepth == 0, generation == cacheGeneration else { throw CancellationError() }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let staged = directory.appending(path: "\(UUID().uuidString).cache-part")
         defer { try? FileManager.default.removeItem(at: staged) }
@@ -324,6 +364,9 @@ final actor TrackCache {
     }
 
     func clear() async throws {
+        cacheGeneration &+= 1
+        clearDepth += 1
+        defer { clearDepth -= 1 }
         let tasks = inFlight.values.map(\.task)
         tasks.forEach { $0.cancel() }
         for task in tasks { _ = await task.result }
@@ -361,8 +404,6 @@ final actor TrackCache {
     }
 
     private static func download(
-        songID: Int64,
-        quality: String,
         source: URL,
         directory: URL,
         limiter: TrackCacheDownloadLimiter,
@@ -375,28 +416,24 @@ final actor TrackCache {
             var request = URLRequest(url: source)
             request.timeoutInterval = 60
             let (temporaryURL, response) = try await download(request)
-            defer { try? FileManager.default.removeItem(at: temporaryURL) }
-            guard let response = response as? HTTPURLResponse,
-                  (200..<300).contains(response.statusCode),
-                  !isRejectedContentType(response.mimeType)
-            else { throw TrackCacheError.invalidResponse }
-            if response.expectedContentLength > 0 {
-                let size = try temporaryURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-                guard Int64(size) == response.expectedContentLength else {
-                    throw TrackCacheError.invalidResponse
+            do {
+                guard let response = response as? HTTPURLResponse,
+                      (200..<300).contains(response.statusCode),
+                      !isRejectedContentType(response.mimeType)
+                else { throw TrackCacheError.invalidResponse }
+                if response.expectedContentLength > 0 {
+                    let size = try temporaryURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+                    guard Int64(size) == response.expectedContentLength else {
+                        throw TrackCacheError.invalidResponse
+                    }
                 }
+                try Task.checkCancellation()
+            } catch {
+                try? FileManager.default.removeItem(at: temporaryURL)
+                throw error
             }
-            try Task.checkCancellation()
-            let result = try finalize(
-                temporaryURL,
-                for: songID,
-                quality: quality,
-                storedExtension: nil,
-                directory: directory
-            )
-            try Task.checkCancellation()
             await limiter.release()
-            return result
+            return temporaryURL
         } catch {
             await limiter.release()
             throw error
@@ -447,12 +484,38 @@ final actor TrackCache {
     }
 
     private func complete(_ result: Result<URL, Error>, for key: Key, requestID: UUID) {
-        guard let request = inFlight[key], request.id == requestID else { return }
-        inFlight[key] = nil
-        if case let .success(url) = result {
-            finalizeInstall(url)
+        guard let request = inFlight[key], request.id == requestID else {
+            if case let .success(temporaryURL) = result {
+                try? FileManager.default.removeItem(at: temporaryURL)
+            }
+            return
         }
-        request.waiters.values.forEach { $0.resume(with: result) }
+        inFlight[key] = nil
+        let settled: Result<URL, Error>
+        switch result {
+        case let .success(temporaryURL):
+            defer { try? FileManager.default.removeItem(at: temporaryURL) }
+            guard clearDepth == 0, request.generation == cacheGeneration else {
+                request.waiters.values.forEach { $0.resume(throwing: CancellationError()) }
+                return
+            }
+            do {
+                let url = try Self.finalize(
+                    temporaryURL,
+                    for: key.songID,
+                    quality: key.quality,
+                    storedExtension: nil,
+                    directory: directory
+                )
+                finalizeInstall(url)
+                settled = .success(url)
+            } catch {
+                settled = .failure(error)
+            }
+        case let .failure(error):
+            settled = .failure(error)
+        }
+        request.waiters.values.forEach { $0.resume(with: settled) }
     }
 
     private func cancelWaiter(_ waiterID: UUID, for key: Key, requestID: UUID) {

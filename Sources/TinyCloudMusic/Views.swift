@@ -224,17 +224,22 @@ struct RootView: View {
         .task {
             let canLoad = await start()
             guard !Task.isCancelled else { return }
+            isStarting = false
             if canLoad, model.session != nil {
                 await model.refreshAccountState()
             }
             if canLoad, model.homeSlots.allSatisfy({ $0.load == .idle }) {
                 model.loadHome()
             }
-            isStarting = false
         }
         .onChange(of: sessionChangeIdentity) { _, identity in
             guard !isStarting else { return }
-            if let identity { player.setAccountCredentialRevision(identity.credentialRevision) }
+            if let identity {
+                player.setAccountCredentialRevision(identity.credentialRevision)
+                model.invalidateAccountDomainIfNeeded(
+                    forCredentialRevision: identity.credentialRevision
+                )
+            }
             Task {
                 await model.refreshAccountState()
                 guard sessionChangeIdentity == identity else { return }
@@ -443,6 +448,7 @@ private struct RouteDestinationView: View {
                     songID: songID,
                     library: library,
                     currentUserID: model.currentUserID,
+                    confirmedAccountCredentialRevision: model.confirmedAccountCredentialRevision,
                     currentUserNickname: model.librarySnapshot?.user.nickname ?? "我",
                     onOpenUser: { model.open(.user($0)) },
                     onLogin: { model.selectSidebar(.session) }
@@ -486,6 +492,7 @@ private struct RouteDestinationView: View {
                     knowledgeLibrary: model.knowledgeLibrary,
                     songPlayer: player,
                     currentUserID: model.currentUserID,
+                    confirmedAccountCredentialRevision: model.confirmedAccountCredentialRevision,
                     downloadManager: downloads,
                     downloadDirectory: model.videoDownloadFolderURL,
                     playbackQuality: model.settings.videoPlaybackQuality,
@@ -508,6 +515,7 @@ private struct RouteDestinationView: View {
                     knowledgeLibrary: model.knowledgeLibrary,
                     songPlayer: player,
                     currentUserID: model.currentUserID,
+                    confirmedAccountCredentialRevision: model.confirmedAccountCredentialRevision,
                     downloadManager: downloads,
                     downloadDirectory: model.videoDownloadFolderURL,
                     playbackQuality: model.settings.videoPlaybackQuality,
@@ -612,7 +620,7 @@ private struct SidebarView: View {
                 Label("私人 FM", systemImage: "radio")
                     .tag(SidebarItem.personalFM)
                 Section("资料库") {
-                    Label("我的", systemImage: "music.note.list")
+                    Label("我的音乐", systemImage: "music.note.list")
                         .tag(SidebarItem.library)
                     Label("最近播放", systemImage: "clock.arrow.circlepath")
                         .tag(SidebarItem.history)
@@ -1494,6 +1502,30 @@ private enum AlbumDetailSection: String, CaseIterable {
     }
 }
 
+struct PlaylistMutationAccount: Equatable, Sendable {
+    let userID: Int64
+    let credentialRevision: UInt64
+
+    func matches(
+        userID: Int64?,
+        confirmedRevision: UInt64?,
+        liveRevision: UInt64
+    ) -> Bool {
+        self.userID == userID
+            && credentialRevision == confirmedRevision
+            && credentialRevision == liveRevision
+    }
+
+    @MainActor
+    func matches(model: AppModel, library: LiveMusicLibrary) -> Bool {
+        matches(
+            userID: model.currentUserID,
+            confirmedRevision: model.confirmedAccountCredentialRevision,
+            liveRevision: library.transport.credentialSnapshotValue().revision
+        )
+    }
+}
+
 private struct PlaylistDetailContent: View {
     let playlist: Playlist
     let songs: [Song]
@@ -1515,6 +1547,7 @@ private struct PlaylistDetailContent: View {
     @State private var showingPrivacyConfirmation = false
     @State private var isPublishing = false
     @State private var publishTask: Task<Void, Never>?
+    @State private var playlistMutationAccount: PlaylistMutationAccount?
     @State private var managementError: String?
     @State private var showingDownloadConfirmation = false
     @State private var downloadQuality = AudioQuality.standard
@@ -1586,18 +1619,23 @@ private struct PlaylistDetailContent: View {
             await loadSimilarPlaylists()
         }
         .sheet(isPresented: $showingMetadataEditor) {
-            if let library = model.library {
+            if let library = model.library, let account = playlistMutationAccount {
                 PlaylistMetadataEditor(
                     playlist: playlist,
                     library: library,
+                    model: model,
+                    account: account,
                     reloadPlaylist: { try await model.reloadPlaylist(playlist.id) },
                     onSaved: {
                         showingMetadataEditor = false
                         model.showToast("歌单信息已保存")
                     },
                     onCancelDuringSave: {
-                        guard playlist.isUserEditable(by: model.currentUserID) else { return }
-                        Task { _ = try? await model.reloadPlaylist(playlist.id) }
+                        guard account.matches(model: model, library: library) else { return }
+                        Task {
+                            guard account.matches(model: model, library: library) else { return }
+                            _ = try? await model.reloadPlaylist(playlist.id)
+                        }
                     }
                 )
             }
@@ -1627,24 +1665,28 @@ private struct PlaylistDetailContent: View {
             .onAppear { downloadQuality = model.settings.quality }
         }
         .sheet(isPresented: $showingSongOrder) {
-            if let library = model.library {
+            if let library = model.library, let account = playlistMutationAccount {
                 PlaylistSongOrderEditor(
                     playlistID: playlist.id,
                     trackIDs: trackIDs,
                     loadedSongs: songs,
                     repository: model.repository,
                     library: library,
+                    model: model,
+                    account: account,
                     reload: { _ = try await model.reloadPlaylist(playlist.id) },
                     onSaved: { model.showToast("歌曲顺序已保存") }
                 )
             }
         }
         .sheet(isPresented: $showingCoverPreview, onDismiss: { coverDraft = nil }) {
-            if let coverDraft, let library = model.library {
+            if let coverDraft, let library = model.library, let account = playlistMutationAccount {
                 PlaylistCoverConfirmation(
                     playlistID: playlist.id,
                     cover: coverDraft,
                     library: library,
+                    model: model,
+                    account: account,
                     reload: { _ = try await model.reloadPlaylist(playlist.id) },
                     onSaved: { model.showToast("歌单封面已更新") }
                 )
@@ -1673,16 +1715,8 @@ private struct PlaylistDetailContent: View {
         } message: {
             Text(managementError ?? "")
         }
-        .onChange(of: model.currentUserID) { _, userID in
-            guard !playlist.isUserEditable(by: userID) else { return }
-            coverPreparationTask?.cancel()
-            coverProcessingWorker?.cancel()
-            publishTask?.cancel()
-            showingMetadataEditor = false
-            showingSongOrder = false
-            showingCoverPreview = false
-            coverDraft = nil
-        }
+        .onChange(of: model.currentUserID) { _, _ in resetStalePlaylistMutation() }
+        .onChange(of: model.confirmedAccountCredentialRevision) { _, _ in resetStalePlaylistMutation() }
         .onDisappear {
             coverPreparationTask?.cancel()
             coverProcessingWorker?.cancel()
@@ -1763,7 +1797,10 @@ private struct PlaylistDetailContent: View {
                 .accessibilityLabel(isAddingDownloads ? "正在加入下载队列" : "全部下载")
             }
             if playlist.specialType != 5, model.library != nil, unlikedSongCount > 0 {
-                Button { showingFavoriteConfirmation = true } label: {
+                Button {
+                    guard capturePlaylistMutationAccount(requiresPlaylistOwnership: false) else { return }
+                    showingFavoriteConfirmation = true
+                } label: {
                     if isFavoritingAll {
                         ProgressView().controlSize(.small)
                     } else {
@@ -1793,19 +1830,31 @@ private struct PlaylistDetailContent: View {
             }
             if playlist.isUserEditable(by: model.currentUserID), model.library != nil {
                 Menu {
-                    Button { showingMetadataEditor = true } label: {
+                    Button {
+                        guard capturePlaylistMutationAccount() else { return }
+                        showingMetadataEditor = true
+                    } label: {
                         Label("编辑歌单", systemImage: "pencil")
                     }
-                    Button { choosingCover = true } label: {
+                    Button {
+                        guard capturePlaylistMutationAccount() else { return }
+                        choosingCover = true
+                    } label: {
                         Label("更新封面", systemImage: "photo")
                     }
-                    Button { showingSongOrder = true } label: {
+                    Button {
+                        guard capturePlaylistMutationAccount() else { return }
+                        showingSongOrder = true
+                    } label: {
                         Label("歌曲排序", systemImage: "arrow.up.arrow.down")
                     }
                     .disabled(trackIDs.count < 2)
                     if playlist.isPrivate {
                         Divider()
-                        Button(role: .destructive) { showingPrivacyConfirmation = true } label: {
+                        Button(role: .destructive) {
+                            guard capturePlaylistMutationAccount() else { return }
+                            showingPrivacyConfirmation = true
+                        } label: {
                             Label("设为公开", systemImage: "lock.open")
                         }
                     }
@@ -1856,20 +1905,31 @@ private struct PlaylistDetailContent: View {
     }
 
     private func favoriteAll() {
+        guard let library = model.library,
+              let account = playlistMutationAccount,
+              account.matches(model: model, library: library)
+        else { return }
         isFavoritingAll = true
         Task { @MainActor in
+            defer { isFavoritingAll = false }
             do {
+                guard account.matches(model: model, library: library) else { return }
                 let count = try await model.favoriteSongs(trackIDs)
+                guard account.matches(model: model, library: library) else { return }
                 model.showToast("已收藏 \(count) 首歌曲")
             } catch is CancellationError {
             } catch {
+                guard account.matches(model: model, library: library) else { return }
                 managementError = "部分歌曲收藏失败：\(error.localizedDescription)"
             }
-            isFavoritingAll = false
         }
     }
 
     private func prepareCover(_ result: Result<[URL], Error>) {
+        guard let library = model.library,
+              let account = playlistMutationAccount,
+              account.matches(model: model, library: library)
+        else { return }
         guard case let .success(urls) = result, let url = urls.first else {
             if case let .failure(error) = result { managementError = error.localizedDescription }
             return
@@ -1879,6 +1939,11 @@ private struct PlaylistDetailContent: View {
         isPreparingCover = true
         managementError = nil
         coverPreparationTask = Task { @MainActor in
+            defer {
+                isPreparingCover = false
+                coverProcessingWorker = nil
+                coverPreparationTask = nil
+            }
             do {
                 let worker = Task.detached(priority: .userInitiated) {
                     try PlaylistCoverProcessor.process(url: url)
@@ -1886,51 +1951,97 @@ private struct PlaylistDetailContent: View {
                 coverProcessingWorker = worker
                 let cover = try await worker.value
                 try Task.checkCancellation()
+                guard account.matches(model: model, library: library) else {
+                    throw CancellationError()
+                }
                 coverDraft = cover
                 showingCoverPreview = true
             } catch is CancellationError {
             } catch {
-                managementError = error.localizedDescription
+                if account.matches(model: model, library: library) {
+                    managementError = error.localizedDescription
+                }
             }
-            isPreparingCover = false
-            coverProcessingWorker = nil
-            coverPreparationTask = nil
         }
     }
 
     private func makePublic() {
-        guard let library = model.library, !isPublishing, playlist.isPrivate else { return }
-        let credentialRevision = library.transport.credentialSnapshotValue().revision
+        guard let library = model.library,
+              let account = playlistMutationAccount,
+              account.matches(model: model, library: library),
+              !isPublishing,
+              playlist.isPrivate
+        else { return }
         isPublishing = true
         managementError = nil
         publishTask = Task { @MainActor in
+            defer {
+                isPublishing = false
+                publishTask = nil
+            }
             do {
+                guard account.matches(model: model, library: library) else { return }
                 try await library.makePlaylistPublic(
                     playlist.id,
-                    expectedCredentialRevision: credentialRevision
+                    expectedCredentialRevision: account.credentialRevision
                 )
                 try Task.checkCancellation()
-                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                guard account.matches(model: model, library: library) else {
                     throw CancellationError()
                 }
                 model.showToast("歌单已设为公开")
                 do {
+                    guard account.matches(model: model, library: library) else {
+                        throw CancellationError()
+                    }
                     _ = try await model.reloadPlaylist(playlist.id)
-                    guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    guard account.matches(model: model, library: library) else {
                         throw CancellationError()
                     }
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
+                    guard account.matches(model: model, library: library) else {
+                        throw CancellationError()
+                    }
                     managementError = "歌单已设为公开，但重新读取失败：\(error.localizedDescription)"
                 }
             } catch is CancellationError {
             } catch {
+                guard account.matches(model: model, library: library) else { return }
                 managementError = error.localizedDescription
             }
-            isPublishing = false
-            publishTask = nil
         }
+    }
+
+    @discardableResult
+    private func capturePlaylistMutationAccount(requiresPlaylistOwnership: Bool = true) -> Bool {
+        guard let library = model.library,
+              let userID = model.currentUserID,
+              let credentialRevision = model.confirmedAccountCredentialRevision,
+              !requiresPlaylistOwnership || playlist.isUserEditable(by: userID)
+        else { return false }
+        let account = PlaylistMutationAccount(userID: userID, credentialRevision: credentialRevision)
+        guard account.matches(model: model, library: library) else { return false }
+        playlistMutationAccount = account
+        return true
+    }
+
+    private func resetStalePlaylistMutation() {
+        guard let account = playlistMutationAccount else { return }
+        if let library = model.library, account.matches(model: model, library: library) { return }
+        coverPreparationTask?.cancel()
+        coverProcessingWorker?.cancel()
+        publishTask?.cancel()
+        showingMetadataEditor = false
+        showingSongOrder = false
+        choosingCover = false
+        showingCoverPreview = false
+        showingPrivacyConfirmation = false
+        showingFavoriteConfirmation = false
+        coverDraft = nil
+        managementError = nil
+        playlistMutationAccount = nil
     }
 }
 
@@ -1953,6 +2064,8 @@ enum PlaylistDetailSection: String, CaseIterable {
 private struct PlaylistMetadataEditor: View {
     let playlist: Playlist
     let library: LiveMusicLibrary
+    let model: AppModel
+    let account: PlaylistMutationAccount
     let reloadPlaylist: () async throws -> Playlist
     let onSaved: () -> Void
     let onCancelDuringSave: () -> Void
@@ -1967,12 +2080,16 @@ private struct PlaylistMetadataEditor: View {
     init(
         playlist: Playlist,
         library: LiveMusicLibrary,
+        model: AppModel,
+        account: PlaylistMutationAccount,
         reloadPlaylist: @escaping () async throws -> Playlist,
         onSaved: @escaping () -> Void,
         onCancelDuringSave: @escaping () -> Void
     ) {
         self.playlist = playlist
         self.library = library
+        self.model = model
+        self.account = account
         self.reloadPlaylist = reloadPlaylist
         self.onSaved = onSaved
         self.onCancelDuringSave = onCancelDuringSave
@@ -2049,8 +2166,11 @@ private struct PlaylistMetadataEditor: View {
 
     private func save() {
         let changes = draft.changes(from: playlist)
-        guard !changes.isEmpty, !draft.normalizedName.isEmpty, !isSaving else { return }
-        let credentialRevision = library.transport.credentialSnapshotValue().revision
+        guard !changes.isEmpty,
+              !draft.normalizedName.isEmpty,
+              !isSaving,
+              account.matches(model: model, library: library)
+        else { return }
         errorMessage = nil
         isSaving = true
         saveTask = Task { @MainActor in
@@ -2058,27 +2178,30 @@ private struct PlaylistMetadataEditor: View {
             do {
                 for change in changes {
                     try Task.checkCancellation()
+                    guard account.matches(model: model, library: library) else {
+                        throw CancellationError()
+                    }
                     switch change {
                     case let .name(name):
                         try await library.updatePlaylistName(
                             playlist.id,
                             name: name,
-                            expectedCredentialRevision: credentialRevision
+                            expectedCredentialRevision: account.credentialRevision
                         )
                     case let .description(description):
                         try await library.updatePlaylistDescription(
                             playlist.id,
                             description: description,
-                            expectedCredentialRevision: credentialRevision
+                            expectedCredentialRevision: account.credentialRevision
                         )
                     case let .tags(tags):
                         try await library.updatePlaylistTags(
                             playlist.id,
                             tags: tags,
-                            expectedCredentialRevision: credentialRevision
+                            expectedCredentialRevision: account.credentialRevision
                         )
                     }
-                    guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    guard account.matches(model: model, library: library) else {
                         throw CancellationError()
                     }
                     completed += 1
@@ -2088,22 +2211,24 @@ private struct PlaylistMetadataEditor: View {
                 saveTask = nil
                 return
             } catch {
-                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                guard account.matches(model: model, library: library) else {
                     isSaving = false
                     saveTask = nil
                     return
                 }
                 await recover(
                     from: error,
-                    completed: completed,
-                    credentialRevision: credentialRevision
+                    completed: completed
                 )
                 return
             }
 
             do {
+                guard account.matches(model: model, library: library) else {
+                    throw CancellationError()
+                }
                 let refreshed = try await reloadPlaylist()
-                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                guard account.matches(model: model, library: library) else {
                     throw CancellationError()
                 }
                 let rejected = changes.filter { !$0.isReflected(in: refreshed) }
@@ -2126,7 +2251,7 @@ private struct PlaylistMetadataEditor: View {
                 isSaving = false
                 saveTask = nil
             } catch {
-                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                guard account.matches(model: model, library: library) else {
                     isSaving = false
                     saveTask = nil
                     return
@@ -2141,14 +2266,17 @@ private struct PlaylistMetadataEditor: View {
     @MainActor
     private func recover(
         from saveError: Error,
-        completed: Int,
-        credentialRevision: UInt64
+        completed: Int
     ) async {
         do {
-            draft = PlaylistMetadataDraft(playlist: try await reloadPlaylist())
-            guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+            guard account.matches(model: model, library: library) else {
                 throw CancellationError()
             }
+            let refreshed = try await reloadPlaylist()
+            guard account.matches(model: model, library: library) else {
+                throw CancellationError()
+            }
+            draft = PlaylistMetadataDraft(playlist: refreshed)
             errorMessage = completed > 0
                 ? "部分内容可能已保存，已重新读取当前歌单。\n\(saveError.localizedDescription)"
                 : saveError.localizedDescription
@@ -2157,7 +2285,7 @@ private struct PlaylistMetadataEditor: View {
             saveTask = nil
             return
         } catch {
-            guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+            guard account.matches(model: model, library: library) else {
                 isSaving = false
                 saveTask = nil
                 return
@@ -2184,6 +2312,8 @@ private struct PlaylistCoverConfirmation: View {
     let playlistID: Int64
     let cover: ProcessedPlaylistCover
     let library: LiveMusicLibrary
+    let model: AppModel
+    let account: PlaylistMutationAccount
     let reload: () async throws -> Void
     let onSaved: () -> Void
 
@@ -2235,25 +2365,30 @@ private struct PlaylistCoverConfirmation: View {
     }
 
     private func save() {
-        guard !isSaving else { return }
-        let credentialRevision = library.transport.credentialSnapshotValue().revision
+        guard !isSaving, account.matches(model: model, library: library) else { return }
         isSaving = true
         errorMessage = nil
         saveTask = Task { @MainActor in
             do {
+                guard account.matches(model: model, library: library) else {
+                    throw CancellationError()
+                }
                 if !uploadCompleted {
                     try await library.updatePlaylistCover(
                         playlistID,
                         cover: cover,
-                        expectedCredentialRevision: credentialRevision
+                        expectedCredentialRevision: account.credentialRevision
                     )
-                    guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    guard account.matches(model: model, library: library) else {
                         throw CancellationError()
                     }
                     uploadCompleted = true
                 }
+                guard account.matches(model: model, library: library) else {
+                    throw CancellationError()
+                }
                 try await reload()
-                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                guard account.matches(model: model, library: library) else {
                     throw CancellationError()
                 }
                 onSaved()
@@ -2262,7 +2397,7 @@ private struct PlaylistCoverConfirmation: View {
                 isSaving = false
                 saveTask = nil
             } catch {
-                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                guard account.matches(model: model, library: library) else {
                     isSaving = false
                     saveTask = nil
                     return
@@ -2282,6 +2417,8 @@ private struct PlaylistSongOrderEditor: View {
     let original: [Int64]
     let repository: any MusicRepository
     let library: LiveMusicLibrary
+    let model: AppModel
+    let account: PlaylistMutationAccount
     let reload: () async throws -> Void
     let onSaved: () -> Void
 
@@ -2302,6 +2439,8 @@ private struct PlaylistSongOrderEditor: View {
         loadedSongs: [Song],
         repository: any MusicRepository,
         library: LiveMusicLibrary,
+        model: AppModel,
+        account: PlaylistMutationAccount,
         reload: @escaping () async throws -> Void,
         onSaved: @escaping () -> Void
     ) {
@@ -2309,6 +2448,8 @@ private struct PlaylistSongOrderEditor: View {
         original = trackIDs
         self.repository = repository
         self.library = library
+        self.model = model
+        self.account = account
         self.reload = reload
         self.onSaved = onSaved
         _draft = State(initialValue: trackIDs)
@@ -2409,25 +2550,33 @@ private struct PlaylistSongOrderEditor: View {
     }
 
     private func save() {
-        guard !isSaving, writeCompleted || draft != original else { return }
-        let credentialRevision = library.transport.credentialSnapshotValue().revision
+        guard !isSaving,
+              writeCompleted || draft != original,
+              account.matches(model: model, library: library)
+        else { return }
         isSaving = true
         saveError = nil
         saveTask = Task { @MainActor in
             do {
+                guard account.matches(model: model, library: library) else {
+                    throw CancellationError()
+                }
                 if !writeCompleted {
                     try await library.updatePlaylistSongOrder(
                         playlistID,
                         trackIDs: draft,
-                        expectedCredentialRevision: credentialRevision
+                        expectedCredentialRevision: account.credentialRevision
                     )
-                    guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                    guard account.matches(model: model, library: library) else {
                         throw CancellationError()
                     }
                     writeCompleted = true
                 }
+                guard account.matches(model: model, library: library) else {
+                    throw CancellationError()
+                }
                 try await reload()
-                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                guard account.matches(model: model, library: library) else {
                     throw CancellationError()
                 }
                 onSaved()
@@ -2436,7 +2585,7 @@ private struct PlaylistSongOrderEditor: View {
                 isSaving = false
                 saveTask = nil
             } catch {
-                guard library.transport.credentialSnapshotValue().revision == credentialRevision else {
+                guard account.matches(model: model, library: library) else {
                     isSaving = false
                     saveTask = nil
                     return

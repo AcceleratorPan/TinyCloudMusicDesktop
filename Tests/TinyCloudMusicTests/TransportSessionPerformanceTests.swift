@@ -597,7 +597,7 @@ struct TransportSessionPerformanceTests {
         #expect(TransportFixtureProtocol.requestCount == 0)
     }
 
-    @Test("Read business 503 retries, mutation business 503 does not")
+    @Test("Revision-fenced reads retry transient failures while mutations send once")
     func businessRetryPolicy() async throws {
         let cache = EAPIResponseCache()
         let staleKey = EAPIResponseCache.Key(account: "account", request: "stale", group: .search)
@@ -608,14 +608,52 @@ struct TransportSessionPerformanceTests {
         #expect(stale == Data("A".utf8))
 
         let snapshot = CredentialSnapshot(.authenticated(try fakeCredentials("retry")))
+        let revision = snapshot.load().revision
+        let transport = fixtureTransport(snapshot: snapshot)
+
         TransportFixtureProtocol.reset { _, index in
             .init(body: index == 1 ? #"{"code":503,"message":"temporary"}"# : #"{"code":200}"#)
         }
-        let transport = fixtureTransport(snapshot: snapshot)
         _ = try await transport.request(
-            endpoint("/retry"),
+            endpoint("/eapi-revision-business-retry"),
             json: compactJSON(["id": 1]),
-            cache: .search
+            cache: .search,
+            expectedCredentialRevision: revision
+        )
+        #expect(TransportFixtureProtocol.requestCount == 2)
+
+        TransportFixtureProtocol.reset { _, index in
+            .init(status: index == 1 ? 503 : 200, body: #"{"code":200}"#)
+        }
+        _ = try await transport.request(
+            endpoint("/eapi-revision-http-retry"),
+            json: compactJSON(["id": 1]),
+            cache: .detail,
+            expectedCredentialRevision: revision
+        )
+        #expect(TransportFixtureProtocol.requestCount == 2)
+
+        TransportFixtureProtocol.reset { _, index in
+            .init(body: index == 1 ? #"{"code":503,"message":"temporary"}"# : #"{"code":200}"#)
+        }
+        _ = try await transport.requestWEAPI(
+            path: "/weapi/revision-business-retry",
+            payload: ["id": 1],
+            cache: .searchHints,
+            expectedCredentialRevision: revision,
+            invalidatesAccountCache: false
+        )
+        #expect(TransportFixtureProtocol.requestCount == 2)
+
+        TransportFixtureProtocol.reset { _, index in
+            .init(status: index == 1 ? 503 : 200, body: #"{"code":200}"#)
+        }
+        _ = try await transport.requestWEAPI(
+            path: "/weapi/revision-http-retry",
+            payload: ["id": 1],
+            cache: .library,
+            expectedCredentialRevision: revision,
+            invalidatesAccountCache: false
         )
         #expect(TransportFixtureProtocol.requestCount == 2)
 
@@ -623,16 +661,301 @@ struct TransportSessionPerformanceTests {
             .init(body: #"{"code":503,"message":"temporary"}"#)
         }
         do {
-            _ = try await transport.request(
-                endpoint("/mutation-503"),
-                json: compactJSON(["id": 1]),
-                expectedCredentialRevision: snapshot.load().revision
+            try await LiveMusicLibrary(transport: transport).setSongLiked(
+                1,
+                liked: true,
+                expectedCredentialRevision: revision
             )
-            Issue.record("Mutation business 503 was accepted")
+            Issue.record("EAPI mutation business 503 was accepted")
         } catch let error as EAPIError {
             #expect(error == .service(code: 503, message: "temporary"))
         }
         #expect(TransportFixtureProtocol.requestCount == 1)
+
+        TransportFixtureProtocol.reset { _, _ in
+            .init(body: #"{"code":503,"message":"temporary"}"#)
+        }
+        do {
+            try await LiveVideoLibrary(transport: transport).setMVSubscribed(
+                1,
+                subscribed: true,
+                expectedCredentialRevision: revision
+            )
+            Issue.record("WEAPI mutation business 503 was accepted")
+        } catch let error as EAPIError {
+            #expect(error == .service(code: 503, message: "temporary"))
+        }
+        #expect(TransportFixtureProtocol.requestCount == 1)
+    }
+
+    @Test("Listen-together retries only proven reads")
+    func listenTogetherReadRetryPolicy() async throws {
+        let snapshot = CredentialSnapshot(.authenticated(try fakeCredentials("listen-retry")))
+        let revision = snapshot.load().revision
+        let service = LiveListenTogetherService(transport: fixtureTransport(snapshot: snapshot))
+        let transientFailures: [TransportFixtureProtocol.Stub] = [
+            .init(status: 503, body: #"{"code":200}"#),
+            .init(body: #"{"code":503,"message":"temporary"}"#)
+        ]
+
+        for failure in transientFailures {
+            TransportFixtureProtocol.reset { _, index in
+                index == 1 ? failure : .init(body: #"{"code":200}"#)
+            }
+            _ = try await service.checkRoom(
+                roomID: "room-1",
+                expectedCredentialRevision: revision
+            )
+            #expect(TransportFixtureProtocol.requestCount(
+                path: "/eapi/listen/together/room/check"
+            ) == 2)
+        }
+
+        for failure in transientFailures {
+            TransportFixtureProtocol.reset { _, index in
+                index == 1 ? failure : .init(body: #"{"code":200}"#)
+            }
+            _ = try await service.playlist(
+                roomID: "room-1",
+                displaySongIDs: [1],
+                randomSongIDs: [1],
+                anchorSongID: 1,
+                expectedCredentialRevision: revision
+            )
+            #expect(TransportFixtureProtocol.requestCount(
+                path: "/eapi/listen/together/sync/playlist/get"
+            ) == 2)
+        }
+
+        for failure in transientFailures {
+            TransportFixtureProtocol.reset { _, index in
+                index == 1 ? failure : .init(body: #"{"code":200}"#)
+            }
+            _ = try await service.status(expectedCredentialRevision: revision)
+            #expect(TransportFixtureProtocol.requestCount(
+                path: "/weapi/listen/together/status/get"
+            ) == 2)
+        }
+
+        TransportFixtureProtocol.reset { _, _ in
+            .init(status: 503, body: #"{"code":200}"#)
+        }
+        do {
+            _ = try await service.createRoom(expectedCredentialRevision: revision)
+            Issue.record("The listen-together mutation retried a transient failure")
+        } catch let error as EAPIError {
+            #expect(error == .http(503))
+        } catch {
+            Issue.record("The listen-together mutation failed with \(error)")
+        }
+        #expect(TransportFixtureProtocol.requestCount(
+            path: "/eapi/listen/together/room/create"
+        ) == 1)
+    }
+
+    @Test("Listen-together read retry rejects a revision change before attempt two")
+    func listenTogetherRetryRevisionFence() async throws {
+        let snapshot = CredentialSnapshot(.authenticated(try fakeCredentials("listen-retry-a")))
+        let revision = snapshot.load().revision
+        let replacement = try fakeCredentials("listen-retry-b")
+        let attempts = CallCounter()
+        let service = LiveListenTogetherService(transport: fixtureTransport(
+            snapshot: snapshot,
+            beforeSendingRequest: {
+                if await attempts.next() == 2 {
+                    _ = snapshot.store(.authenticated(replacement))
+                }
+            }
+        ))
+        TransportFixtureProtocol.reset { _, index in
+            .init(status: index == 1 ? 503 : 200, body: #"{"code":200}"#)
+        }
+
+        do {
+            _ = try await service.checkRoom(
+                roomID: "room-1",
+                expectedCredentialRevision: revision
+            )
+            Issue.record("The stale read sent retry attempt two")
+        } catch let error as CredentialRevisionMismatch {
+            #expect(error.expected == revision)
+            #expect(error.actual == snapshot.load().revision)
+        } catch {
+            Issue.record("The stale read failed with \(error)")
+        }
+        #expect(await attempts.value() == 2)
+        #expect(TransportFixtureProtocol.requestCount(
+            path: "/eapi/listen/together/room/check"
+        ) == 1)
+
+        let playlistSnapshot = CredentialSnapshot(.authenticated(try fakeCredentials("listen-playlist-a")))
+        let playlistRevision = playlistSnapshot.load().revision
+        let playlistReplacement = try fakeCredentials("listen-playlist-b")
+        let playlistAttempts = CallCounter()
+        let playlistService = LiveListenTogetherService(transport: fixtureTransport(
+            snapshot: playlistSnapshot,
+            beforeSendingRequest: {
+                if await playlistAttempts.next() == 2 {
+                    _ = playlistSnapshot.store(.authenticated(playlistReplacement))
+                }
+            }
+        ))
+        TransportFixtureProtocol.reset { _, index in
+            .init(status: index == 1 ? 503 : 200, body: #"{"code":200}"#)
+        }
+
+        do {
+            _ = try await playlistService.playlist(
+                roomID: "room-1",
+                displaySongIDs: [1],
+                randomSongIDs: [1],
+                anchorSongID: 1,
+                expectedCredentialRevision: playlistRevision
+            )
+            Issue.record("The stale playlist read sent retry attempt two")
+        } catch let error as CredentialRevisionMismatch {
+            #expect(error.expected == playlistRevision)
+            #expect(error.actual == playlistSnapshot.load().revision)
+        } catch {
+            Issue.record("The stale playlist read failed with \(error)")
+        }
+        #expect(await playlistAttempts.value() == 2)
+        #expect(TransportFixtureProtocol.requestCount(
+            path: "/eapi/listen/together/sync/playlist/get"
+        ) == 1)
+
+        let statusSnapshot = CredentialSnapshot(.authenticated(try fakeCredentials("listen-status-a")))
+        let statusRevision = statusSnapshot.load().revision
+        let statusReplacement = try fakeCredentials("listen-status-b")
+        let statusAttempts = CallCounter()
+        let statusService = LiveListenTogetherService(transport: fixtureTransport(
+            snapshot: statusSnapshot,
+            beforeSendingRequest: {
+                if await statusAttempts.next() == 2 {
+                    _ = statusSnapshot.store(.authenticated(statusReplacement))
+                }
+            }
+        ))
+        TransportFixtureProtocol.reset { _, index in
+            .init(status: index == 1 ? 503 : 200, body: #"{"code":200}"#)
+        }
+
+        do {
+            _ = try await statusService.status(expectedCredentialRevision: statusRevision)
+            Issue.record("The stale status read sent retry attempt two")
+        } catch let error as CredentialRevisionMismatch {
+            #expect(error.expected == statusRevision)
+            #expect(error.actual == statusSnapshot.load().revision)
+        } catch {
+            Issue.record("The stale status read failed with \(error)")
+        }
+        #expect(await statusAttempts.value() == 2)
+        #expect(TransportFixtureProtocol.requestCount(
+            path: "/weapi/listen/together/status/get"
+        ) == 1)
+    }
+
+    @Test("Listen-together token GET sends once on HTTP and business 503")
+    func listenTogetherTokenIsOneShot() async throws {
+        let snapshot = CredentialSnapshot(.authenticated(try fakeCredentials("listen-token")))
+        let revision = snapshot.load().revision
+        let service = LiveListenTogetherService(transport: fixtureTransport(snapshot: snapshot))
+        let failures: [(TransportFixtureProtocol.Stub, EAPIError)] = [
+            (.init(status: 503, body: #"{"code":200}"#), .http(503)),
+            (.init(body: #"{"code":503,"message":"temporary"}"#), .service(code: 503, message: "temporary"))
+        ]
+
+        for (stub, expectedError) in failures {
+            TransportFixtureProtocol.reset { _, _ in stub }
+            do {
+                _ = try await service.realtimeCredentials(expectedCredentialRevision: revision)
+                Issue.record("The token GET accepted \(expectedError)")
+            } catch let error as EAPIError {
+                #expect(error == expectedError)
+            } catch {
+                Issue.record("The token GET failed with \(error)")
+            }
+            let requests = TransportFixtureProtocol.requests(path: "/api/middle/im/token/get")
+            #expect(requests.count == 1)
+            #expect(requests.first?.httpMethod == "GET")
+        }
+    }
+
+    @Test("Remaining listen-together mutations send once on business 503")
+    func listenTogetherMutationsAreOneShot() async throws {
+        let snapshot = CredentialSnapshot(.authenticated(try fakeCredentials("listen-mutation")))
+        let revision = snapshot.load().revision
+        let service = LiveListenTogetherService(transport: fixtureTransport(snapshot: snapshot))
+        let playCommand = try ListenTogetherPlayCommand(
+            commandType: .play,
+            progress: 0,
+            playStatus: .playing,
+            formerSongID: 1,
+            targetSongID: 1,
+            clientSequence: 1
+        )
+        let playlistCommand = try ListenTogetherPlaylistCommand(
+            commandType: .replace,
+            userID: 42,
+            version: 1,
+            anchorSongID: 1,
+            anchorPosition: 0,
+            randomList: [1],
+            displayList: [1]
+        )
+        let mutations: [(path: String, send: @Sendable () async throws -> Void)] = [
+            ("/eapi/listen/together/play/invitation/accept", {
+                _ = try await service.acceptInvitation(
+                    roomID: "room-1",
+                    inviterID: 42,
+                    expectedCredentialRevision: revision
+                )
+            }),
+            ("/eapi/listen/together/heartbeat", {
+                _ = try await service.heartbeat(
+                    roomID: "room-1",
+                    songID: 1,
+                    playStatus: .playing,
+                    progress: 0,
+                    expectedCredentialRevision: revision
+                )
+            }),
+            ("/eapi/listen/together/play/command/report", {
+                _ = try await service.reportPlayCommand(
+                    roomID: "room-1",
+                    command: playCommand,
+                    expectedCredentialRevision: revision
+                )
+            }),
+            ("/eapi/listen/together/sync/list/command/report", {
+                _ = try await service.reportPlaylistCommand(
+                    roomID: "room-1",
+                    command: playlistCommand,
+                    expectedCredentialRevision: revision
+                )
+            }),
+            ("/eapi/listen/together/end/v2", {
+                _ = try await service.endRoom(
+                    roomID: "room-1",
+                    expectedCredentialRevision: revision
+                )
+            })
+        ]
+
+        for mutation in mutations {
+            TransportFixtureProtocol.reset { _, _ in
+                .init(body: #"{"code":503,"message":"temporary"}"#)
+            }
+            do {
+                try await mutation.send()
+                Issue.record("\(mutation.path) accepted business 503")
+            } catch let error as EAPIError {
+                #expect(error == .service(code: 503, message: "temporary"))
+            } catch {
+                Issue.record("\(mutation.path) failed with \(error)")
+            }
+            #expect(TransportFixtureProtocol.requestCount(path: mutation.path) == 1)
+        }
     }
 
     @Test("Domain business codes stay visible without failed cache side effects")

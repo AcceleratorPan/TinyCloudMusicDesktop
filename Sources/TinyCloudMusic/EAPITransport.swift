@@ -1452,7 +1452,6 @@ struct EAPITransport: Sendable {
                 iPhoneClient: iPhoneClient,
                 cookieHeaderOverride: clientCookie,
                 retryable: retryable
-                    && expectedCredentialRevision == nil
                     && invalidatesGroups.isEmpty
                     && !invalidatesAccountCache,
                 additionalHeaders: additionalHeaders
@@ -1533,7 +1532,8 @@ struct EAPITransport: Sendable {
             payload: ["threadId": threadID, "commentId": String(commentID)],
             expectedCredentialRevision: expectedCredentialRevision,
             invalidatesGroups: [.comments],
-            invalidatesAccountCache: false
+            invalidatesAccountCache: false,
+            retryable: false
         )
     }
 
@@ -1562,7 +1562,8 @@ struct EAPITransport: Sendable {
             ],
             expectedCredentialRevision: expectedCredentialRevision,
             invalidatesGroups: [.listeningHistory],
-            invalidatesAccountCache: false
+            invalidatesAccountCache: false,
+            retryable: false
         )
     }
 
@@ -1649,6 +1650,7 @@ struct EAPITransport: Sendable {
         invalidatesAccountCache: Bool = true,
         vip: Bool = false,
         useStoredCookieForVIP: Bool = false,
+        retryable: Bool = true,
         additionalHeaders: [String: String] = [:],
         restrictsRedirects: Bool = false
     ) async throws -> Data {
@@ -1662,6 +1664,7 @@ struct EAPITransport: Sendable {
             invalidatesAccountCache: invalidatesAccountCache,
             vip: vip,
             useStoredCookieForVIP: useStoredCookieForVIP,
+            retryable: retryable,
             additionalHeaders: additionalHeaders,
             restrictsRedirects: restrictsRedirects
         ).data
@@ -1677,6 +1680,7 @@ struct EAPITransport: Sendable {
         invalidatesAccountCache: Bool = true,
         vip: Bool = false,
         useStoredCookieForVIP: Bool = false,
+        retryable: Bool = true,
         additionalHeaders: [String: String] = [:],
         restrictsRedirects: Bool = false,
         allowsDomainBusinessCodes: Bool = false
@@ -1691,6 +1695,7 @@ struct EAPITransport: Sendable {
             invalidatesAccountCache: invalidatesAccountCache,
             vip: vip,
             useStoredCookieForVIP: useStoredCookieForVIP,
+            retryable: retryable,
             additionalHeaders: additionalHeaders,
             restrictsRedirects: restrictsRedirects,
             allowsDomainBusinessCodes: allowsDomainBusinessCodes
@@ -1709,6 +1714,7 @@ struct EAPITransport: Sendable {
         invalidatesAccountCache: Bool = true,
         vip: Bool = false,
         useStoredCookieForVIP: Bool = false,
+        retryable: Bool = true,
         additionalHeaders: [String: String] = [:],
         restrictsRedirects: Bool = false,
         allowsDomainBusinessCodes: Bool = false
@@ -1768,8 +1774,8 @@ struct EAPITransport: Sendable {
                 credentialRevision: snapshot.value.revision,
                 expectedCredentialRevision: expectedCredentialRevision ?? snapshot.value.revision,
                 vip: vip,
-                retryable: (cache != nil || (!invalidatesAccountCache && invalidatesGroups.isEmpty))
-                    && expectedCredentialRevision == nil,
+                retryable: retryable
+                    && (cache != nil || (!invalidatesAccountCache && invalidatesGroups.isEmpty)),
                 restrictsRedirects: restrictsRedirects || !requestCookie.isEmpty || !additionalHeaders.isEmpty
             )
         }

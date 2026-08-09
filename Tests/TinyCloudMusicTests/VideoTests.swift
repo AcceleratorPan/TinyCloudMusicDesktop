@@ -416,23 +416,40 @@ private func verifyVideoCredentialFallback() async throws {
           VideoPlaybackCredentialProtocol.cookieFallbacksUseIPhoneProfile()
     else { throw VideoCheckError.failed }
 
-    for response in [VideoPlaybackStubResponse.http(500), .invalidJSON] {
-        VideoPlaybackCredentialProtocol.reset(
-            vip: [response],
-            cookie: [.success(720, "must-not-be-requested.mp4")]
+    VideoPlaybackCredentialProtocol.reset(
+        vip: Array(repeating: .http(500), count: 3),
+        cookie: [.success(720, "must-not-be-requested.mp4")]
+    )
+    do {
+        _ = try await library().mvPlaybackSource(
+            id: 42,
+            preferredResolution: 720,
+            availableResolutions: [720]
         )
-        do {
-            _ = try await library().mvPlaybackSource(
-                id: 42,
-                preferredResolution: 720,
-                availableResolutions: [720]
-            )
-            throw VideoCheckError.failed
-        } catch {
-            guard VideoPlaybackCredentialProtocol.attempts() == [
-                "vip:/weapi/song/enhance/play/mv/url"
-            ] else { throw VideoCheckError.failed }
-        }
+        throw VideoCheckError.failed
+    } catch {
+        guard VideoPlaybackCredentialProtocol.attempts() == Array(
+            repeating: "vip:/weapi/song/enhance/play/mv/url",
+            count: 3
+        ) else { throw VideoCheckError.failed }
+    }
+
+    VideoPlaybackCredentialProtocol.reset(
+        vip: Array(repeating: .invalidJSON, count: 3),
+        cookie: [.success(720, "must-not-be-requested.mp4")]
+    )
+    do {
+        _ = try await library().mvPlaybackSource(
+            id: 42,
+            preferredResolution: 720,
+            availableResolutions: [720]
+        )
+        throw VideoCheckError.failed
+    } catch {
+        guard VideoPlaybackCredentialProtocol.attempts() == Array(
+            repeating: "vip:/weapi/song/enhance/play/mv/url",
+            count: 3
+        ) else { throw VideoCheckError.failed }
     }
 
     for cookie in ["", "MUSIC_A=guest-token"] {

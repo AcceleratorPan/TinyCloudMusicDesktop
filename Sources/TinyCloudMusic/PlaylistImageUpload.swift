@@ -147,7 +147,8 @@ struct PlaylistImageUpload: Sendable {
                     "type": "other"
                 ],
                 expectedCredentialRevision: expectedCredentialRevision,
-                invalidatesAccountCache: false
+                invalidatesAccountCache: false,
+                retryable: false
         )
         try validate(expectedCredentialRevision)
         try requireUploadSuccess(allocationRoot)
@@ -185,7 +186,8 @@ struct PlaylistImageUpload: Sendable {
                 path: "/weapi/playlist/cover/update",
                 payload: ["id": playlistID, "coverImgId": coverImageID],
                 expectedCredentialRevision: expectedCredentialRevision,
-                invalidatesAccountCache: false
+                invalidatesAccountCache: false,
+                retryable: false
         )
         try validate(expectedCredentialRevision)
         try requireUploadSuccess(updateRoot)

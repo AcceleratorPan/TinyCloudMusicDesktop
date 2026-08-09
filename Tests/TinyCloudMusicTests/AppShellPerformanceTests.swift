@@ -171,6 +171,66 @@ struct AppShellPerformanceTests {
         #expect(artworkConfigurations.count == 1)
     }
 
+    @Test("Playlist feature writes consume the captured confirmed account tuple")
+    func playlistMutationAccountFence() throws {
+        let account = PlaylistMutationAccount(userID: 42, credentialRevision: 7)
+        #expect(account.matches(userID: 42, confirmedRevision: 7, liveRevision: 7))
+        #expect(!account.matches(userID: 43, confirmedRevision: 7, liveRevision: 7))
+        #expect(!account.matches(userID: 42, confirmedRevision: 8, liveRevision: 7))
+        #expect(!account.matches(userID: 42, confirmedRevision: 7, liveRevision: 8))
+
+        let sourceRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appending(path: "Sources/TinyCloudMusic")
+        let views = try source("Views.swift", in: sourceRoot)
+        let libraryViews = try source("LibraryFeatureViews.swift", in: sourceRoot)
+        let detail = try slice(
+            views,
+            from: "private struct PlaylistDetailContent",
+            to: "enum PlaylistDetailSection"
+        )
+        let metadata = try slice(
+            views,
+            from: "private struct PlaylistMetadataEditor",
+            to: "private struct PlaylistCoverConfirmation"
+        )
+        let cover = try slice(
+            views,
+            from: "private struct PlaylistCoverConfirmation",
+            to: "private struct PlaylistSongOrderEditor"
+        )
+        let order = try slice(
+            views,
+            from: "private struct PlaylistSongOrderEditor",
+            to: "private struct UserDetailContent"
+        )
+
+        #expect(detail.contains("@State private var playlistMutationAccount: PlaylistMutationAccount?"))
+        #expect(detail.contains(".onChange(of: model.confirmedAccountCredentialRevision)"))
+        #expect(detail.contains("showingPrivacyConfirmation = false"))
+        #expect(detail.components(separatedBy: "capturePlaylistMutationAccount(").count == 7)
+        #expect(detail.components(separatedBy: "expectedCredentialRevision: account.credentialRevision").count == 2)
+        #expect(metadata.components(separatedBy: "expectedCredentialRevision: account.credentialRevision").count == 4)
+        #expect(cover.components(separatedBy: "expectedCredentialRevision: account.credentialRevision").count == 2)
+        #expect(order.components(separatedBy: "expectedCredentialRevision: account.credentialRevision").count == 2)
+        for editor in [metadata, cover, order] {
+            #expect(editor.contains("account.matches(model: model, library: library)"))
+            #expect(!editor.contains("let credentialRevision = library.transport.credentialSnapshotValue().revision"))
+        }
+        #expect(libraryViews.contains(
+            "@State private var playlistDeleteRequest: (playlist: Playlist, account: PlaylistMutationAccount)?"
+        ))
+        #expect(libraryViews.contains("playlistDeleteRequest = (playlist, account)"))
+        #expect(libraryViews.contains("deletePlaylist(request.playlist, account: request.account)"))
+        #expect(libraryViews.contains(
+            "@State private var deleteRequest: (comment: MusicComment, account: PlaylistMutationAccount)?"
+        ))
+        #expect(libraryViews.contains("deleteRequest = (target, account)"))
+        #expect(libraryViews.contains("deleteComment(request.comment, account: request.account)"))
+    }
+
     @MainActor
     @Test("Closing Now Playing releases its hosting controller and owner slot")
     func nowPlayingWindowRelease() async {
@@ -307,6 +367,7 @@ struct AppShellPerformanceTests {
         let model = try source("AppModel.swift", in: sourceRoot)
         let musicLibraryModels = try source("MusicLibraryModels.swift", in: sourceRoot)
         let library = try source("LibraryFeatureViews.swift", in: sourceRoot)
+        let songPlaylists = try source("SongPlaylistViews.swift", in: sourceRoot)
         let home = try slice(views, from: "private struct HomeView", to: "private struct HomeSectionView")
         let comment = try slice(comments, from: "struct CommentEmojiText", to: "#else")
         let recent = try slice(library, from: "struct ListeningHistoryView", to: "private struct RecentMediaRow")
@@ -326,6 +387,16 @@ struct AppShellPerformanceTests {
             to: "private func refreshControls()"
         )
         let rootView = try slice(views, from: "struct RootView", to: "private struct PrimaryContentView")
+        let rootTask = try slice(
+            rootView,
+            from: ".task {",
+            to: ".onChange(of: sessionChangeIdentity)"
+        )
+        let sessionChange = try slice(
+            rootView,
+            from: ".onChange(of: sessionChangeIdentity)",
+            to: ".onChange(of: listenTogetherPhase)"
+        )
         let cacheCommit = try slice(
             model,
             from: "private func commitCacheFolder",
@@ -371,6 +442,14 @@ struct AppShellPerformanceTests {
         #expect(rootView.contains("cacheConfigurationRevision"))
         #expect(rootView.contains("onChange(of: cacheConfiguration, initial: true)"))
         #expect(!rootView.contains("model.settings.cacheBookmark"))
+        #expect(rootTask.range(of: "guard !Task.isCancelled")!.lowerBound
+            < rootTask.range(of: "isStarting = false")!.lowerBound)
+        #expect(rootTask.range(of: "isStarting = false")!.lowerBound
+            < rootTask.range(of: "await model.refreshAccountState()")!.lowerBound)
+        #expect(sessionChange.range(of: "player.setAccountCredentialRevision")!.lowerBound
+            < sessionChange.range(of: "model.invalidateAccountDomainIfNeeded")!.lowerBound)
+        #expect(sessionChange.range(of: "model.invalidateAccountDomainIfNeeded")!.lowerBound
+            < sessionChange.range(of: "Task {")!.lowerBound)
         #expect(cacheCommit.components(separatedBy: "downloadCacheConfigurator(root)").count == 2)
         #expect(cacheCommit.range(of: "downloadCacheConfigurator(root)")!.lowerBound
             < cacheCommit.range(of: "cacheConfigurationRevision &+= 1")!.lowerBound)
@@ -396,6 +475,8 @@ struct AppShellPerformanceTests {
         #expect(!recent.contains("invalidateCachedResponses"))
         #expect(recent.components(separatedBy: "forceRefresh: forceRefresh").count == 7)
         #expect(!library.contains("lastPlaybackReportWasPodcast"))
+        #expect(songPlaylists.contains("Button(\"重试\") { add(to: failedPlaylist) }"))
+        #expect(songPlaylists.contains(".accessibilityLabel(\"关闭错误提示\")"))
     }
 
     private func source(_ name: String, in root: URL) throws -> String {

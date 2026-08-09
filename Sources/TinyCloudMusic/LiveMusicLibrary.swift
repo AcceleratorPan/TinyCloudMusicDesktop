@@ -777,7 +777,8 @@ struct LiveMusicLibrary: Sendable {
             payload: ["ids": try jsonString(playlistIDs.map(String.init))],
             expectedCredentialRevision: expectedCredentialRevision,
             invalidatesGroups: [.playlistSummaries],
-            invalidatesAccountCache: false
+            invalidatesAccountCache: false,
+            retryable: false
         )
         try requireSuccess(root)
     }
@@ -1287,7 +1288,7 @@ struct LiveMusicLibrary: Sendable {
               !credentials.cookie.isEmpty,
               !NeteaseCookieHeader.isGuest(credentials.cookie)
         else {
-            throw EAPIError.service(code: 403, message: "只能读取当前账号的云盘内容")
+            throw EAPIError.service(code: 403, message: "只能读取当前账号的云盘歌词")
         }
         return expected
     }
@@ -1487,7 +1488,8 @@ struct LiveMusicLibrary: Sendable {
             endpoint,
             json: compactJSON(payload),
             expectedCredentialRevision: expectedCredentialRevision,
-            invalidatesGroups: invalidatesGroups
+            invalidatesGroups: invalidatesGroups,
+            retryable: false
         )
     }
 

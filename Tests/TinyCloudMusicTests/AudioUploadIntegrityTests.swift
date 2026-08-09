@@ -20,10 +20,12 @@ private final class IntegrityCounter: @unchecked Sendable {
 
 private actor UploadGate {
     private var entered = false
+    private var entryCount = 0
     private var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
     func wait() async {
         entered = true
+        entryCount += 1
         let id = UUID()
         await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
@@ -38,7 +40,7 @@ private actor UploadGate {
         }
     }
 
-    func hasEntered() -> Bool { entered }
+    func hasEntered(_ count: Int = 1) -> Bool { entered && entryCount >= count }
 
     func releaseAll() {
         let continuations = Array(waiters.values)
@@ -315,7 +317,7 @@ struct AudioUploadIntegrityTests {
         #expect(try await writer.load().manifests.isEmpty)
     }
 
-    @Test("Account generation and credential revision fence a blocked mutation")
+    @Test("Same-user credential revision migrates and pauses a blocked upload")
     func accountAndCredentialFence() async throws {
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -329,20 +331,73 @@ struct AudioUploadIntegrityTests {
         let transport = transport(snapshot: snapshot, gate: gate)
         let manager = await makeManager(store: store, transport: transport)
         await manager.waitUntilLoaded()
-        await manager.setAccount(manifest.accountID)
+        await manager.setAccount(
+            manifest.accountID,
+            credentialRevision: snapshot.load().revision
+        )
         UploadIntegrityProtocol.reset(.countOnly)
         await manager.start(manifest.id)
         #expect(await eventually { await gate.hasEntered() })
 
         _ = snapshot.store(.authenticated(try credentials("account-b")))
+        await manager.setAccount(
+            manifest.accountID,
+            credentialRevision: snapshot.load().revision
+        )
         await gate.releaseAll()
         #expect(await eventually { await manager.isActive == false })
-        await manager.setAccount(manifest.accountID + 1)
         await manager.pauseAll()
 
         #expect(UploadIntegrityProtocol.count() == 0)
-        #expect(await manager.items[manifest.id] == nil)
+        #expect(await manager.items[manifest.id]?.phase == .paused)
+        #expect(try await store.load().manifests.first { $0.id == manifest.id }?.phase == .paused)
         #expect(await manager.completionRevision == 0)
+
+        await manager.start(manifest.id)
+        #expect(await eventually { await gate.hasEntered(2) })
+        await gate.releaseAll()
+        #expect(await eventually { UploadIntegrityProtocol.count() == 1 })
+        #expect(await manager.completionRevision == 0)
+    }
+
+    @Test("AppModel revision invalidation durably pauses an active upload")
+    func appModelRevisionInvalidationPausesUpload() async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appending(path: "source.mp3")
+        try Data("abc".utf8).write(to: file)
+        let manifest = try makeManifest(file: file)
+        let store = AudioUploadStore(directory: root.appending(path: "store"))
+        try await store.save(manifest)
+        let snapshot = CredentialSnapshot(.authenticated(try credentials("app-model-a")))
+        let gate = UploadGate()
+        let transport = transport(snapshot: snapshot, gate: gate)
+        let manager = await makeManager(store: store, transport: transport)
+        await manager.waitUntilLoaded()
+        let model = await AppModel(
+            repository: FixtureMusicRepository(),
+            library: LiveMusicLibrary(transport: transport),
+            extras: LiveMusicExtras(transport: transport),
+            uploads: manager,
+            defaults: UserDefaults(suiteName: UUID().uuidString)!
+        )
+        await model.installConfirmedAccount(
+            userID: manifest.accountID,
+            credentialRevision: snapshot.load().revision
+        )
+        UploadIntegrityProtocol.reset(.countOnly)
+        await manager.start(manifest.id)
+        #expect(await eventually { await gate.hasEntered() })
+
+        let revision = snapshot.store(.authenticated(try credentials("app-model-b"))).revision
+        await model.invalidateAccountDomainIfNeeded(forCredentialRevision: revision)
+
+        #expect(await model.currentUserID == nil)
+        #expect(await manager.items.isEmpty)
+        await gate.releaseAll()
+        #expect(await eventually { await manager.isActive == false })
+        #expect(try await store.load().manifests.first { $0.id == manifest.id }?.phase == .paused)
+        #expect(UploadIntegrityProtocol.count() == 0)
     }
 
     @Test("A slow save cannot publish after switching accounts")

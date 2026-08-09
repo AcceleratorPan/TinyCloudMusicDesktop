@@ -113,7 +113,8 @@ struct LiveAudioContentLibrary: Sendable {
             path: subscribed ? "/weapi/djradio/sub" : "/weapi/djradio/unsub",
             payload: ["id": id],
             expectedCredentialRevision: expectedCredentialRevision,
-            invalidatesAccountCache: false
+            invalidatesAccountCache: false,
+            retryable: false
         )
     }
 

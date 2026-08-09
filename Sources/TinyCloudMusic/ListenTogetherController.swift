@@ -789,7 +789,11 @@ final class ListenTogetherController {
     private func receive(_ event: NIMChatroomEvent) {
         switch event {
         case let .message(raw, eventGeneration):
-            guard eventGeneration == generation, room != nil, !isSleeping else { return }
+            guard eventGeneration == generation,
+                  credentialRevision == service.credentialRevision,
+                  room != nil,
+                  !isSleeping
+            else { return }
             switch phase {
             case .creating, .joining, .connected, .reconnecting:
                 break
@@ -799,7 +803,11 @@ final class ListenTogetherController {
             guard let remoteEvent = try? ListenTogetherResponseDecoder.remoteEvent(from: raw) else { return }
             receive(remoteEvent)
         case let .status(status, eventGeneration):
-            guard eventGeneration == generation, room != nil, !isSleeping else { return }
+            guard eventGeneration == generation,
+                  credentialRevision == service.credentialRevision,
+                  room != nil,
+                  !isSleeping
+            else { return }
             guard status == 0 || status == 6 else { return }
             switch phase {
             case .creating, .joining, .connected, .reconnecting:

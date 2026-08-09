@@ -31,7 +31,8 @@ struct LiveListenTogetherService: Sendable {
         try await call(
             "/api/listen/together/room/check",
             payload: ["roomId": try validatedRoomID(roomID)],
-            expectedCredentialRevision: expectedCredentialRevision ?? credentialRevision
+            expectedCredentialRevision: expectedCredentialRevision ?? credentialRevision,
+            retryable: true
         )
     }
 
@@ -232,7 +233,8 @@ struct LiveListenTogetherService: Sendable {
                 "roomId": try validatedRoomID(roomID),
                 "playlistParam": try jsonString(playlistParam)
             ],
-            expectedCredentialRevision: expectedCredentialRevision ?? credentialRevision
+            expectedCredentialRevision: expectedCredentialRevision ?? credentialRevision,
+            retryable: true
         )
     }
 
@@ -306,7 +308,8 @@ struct LiveListenTogetherService: Sendable {
     private func call(
         _ logicalPath: String,
         payload: [String: Any],
-        expectedCredentialRevision: UInt64
+        expectedCredentialRevision: UInt64,
+        retryable: Bool = false
     ) async throws -> [String: Any] {
         let physicalPath = logicalPath.replacingOccurrences(of: "/api/", with: "/eapi/")
         return try await transport.requestJSONObject(
@@ -314,7 +317,7 @@ struct LiveListenTogetherService: Sendable {
             json: compactJSON(payload),
             expectedCredentialRevision: expectedCredentialRevision,
             invalidatesAccountCache: false,
-            retryable: false
+            retryable: retryable
         )
     }
 

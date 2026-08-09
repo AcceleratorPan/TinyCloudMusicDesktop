@@ -164,7 +164,8 @@ extension LiveMusicLibrary {
             path: "/weapi/nos/token/alloc",
             payload: payload,
             expectedCredentialRevision: expectedCredentialRevision,
-            invalidatesAccountCache: false
+            invalidatesAccountCache: false,
+            retryable: false
         )
         try requireUploadSuccess(root)
         let result = root.object("result")
@@ -233,7 +234,8 @@ extension LiveAudioContentLibrary {
                 "type": "other"
             ],
             expectedCredentialRevision: expectedCredentialRevision,
-            invalidatesAccountCache: false
+            invalidatesAccountCache: false,
+            retryable: false
         )
         try requireUploadSuccess(root)
         let result = root.object("result")
@@ -344,6 +346,7 @@ extension LiveAudioContentLibrary {
             expectedCredentialRevision: expectedCredentialRevision,
             invalidatesGroups: invalidatesGroups,
             invalidatesAccountCache: false,
+            retryable: false,
             additionalHeaders: ["x-nos-token": token]
         )
         try requireUploadSuccess(root)

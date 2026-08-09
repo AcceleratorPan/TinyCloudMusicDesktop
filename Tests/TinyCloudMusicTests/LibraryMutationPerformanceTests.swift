@@ -29,6 +29,7 @@ private actor LibraryMutationGate {
     }
 
     func hasEntered(_ count: Int = 1) -> Bool { enteredCallCount >= count }
+    func waiterCount() -> Int { continuations.count }
 }
 
 private final class LibraryMutationProtocol: URLProtocol, @unchecked Sendable {
@@ -312,7 +313,7 @@ struct LibraryMutationPerformanceTests {
         let snapshot = CredentialSnapshot(.authenticated(try credentials("account-a")))
         let library = LiveMusicLibrary(transport: transport(snapshot: snapshot) { await gate.wait() })
         let model = AppModel(repository: FixtureMusicRepository(), library: library)
-        model.currentUserID = 7
+        model.installConfirmedAccount(userID: 7, credentialRevision: snapshot.load().revision)
 
         model.toggleSongLiked(42)
         model.toggleSongLiked(42)
@@ -337,7 +338,7 @@ struct LibraryMutationPerformanceTests {
         let snapshot = CredentialSnapshot(.authenticated(try credentials("ownership")))
         let library = LiveMusicLibrary(transport: transport(snapshot: snapshot) { await gate.wait() })
         let model = AppModel(repository: FixtureMusicRepository(), library: library)
-        model.currentUserID = 7
+        model.installConfirmedAccount(userID: 7, credentialRevision: snapshot.load().revision)
         model.playlistPickerSong = song(42)
 
         model.addSongToPlaylist(42, playlistID: 9, isFavoritePlaylist: false)
@@ -359,6 +360,40 @@ struct LibraryMutationPerformanceTests {
         #expect(model.playlistPickerSong == nil)
     }
 
+    @Test("Failed playlist add remains retryable through its dedicated handler")
+    func playlistAddRetry() async throws {
+        LibraryMutationProtocol.reset()
+        LibraryMutationProtocol.fail("/eapi/v1/playlist/manipulate/tracks", onCall: 1)
+        let snapshot = CredentialSnapshot(.authenticated(try credentials("playlist-retry")))
+        let model = AppModel(
+            repository: FixtureMusicRepository(),
+            library: LiveMusicLibrary(transport: transport(snapshot: snapshot))
+        )
+        model.installConfirmedAccount(userID: 7, credentialRevision: snapshot.load().revision)
+        model.playlistPickerSong = song(42)
+        var failures: [String] = []
+
+        model.addSongToPlaylist(
+            42,
+            playlistID: 9,
+            isFavoritePlaylist: false,
+            onFailure: { failures.append($0) }
+        )
+        #expect(await eventually { model.pendingMutations.isEmpty && failures.count == 1 })
+        #expect(model.libraryMessage == nil)
+        #expect(model.playlistPickerSong?.id == 42)
+
+        model.addSongToPlaylist(
+            42,
+            playlistID: 9,
+            isFavoritePlaylist: false,
+            onFailure: { failures.append($0) }
+        )
+        #expect(await eventually { model.pendingMutations.isEmpty && model.playlistPickerSong == nil })
+        #expect(failures.count == 1)
+        #expect(LibraryMutationProtocol.count("/eapi/v1/playlist/manipulate/tracks") == 2)
+    }
+
     @Test("Favorite batch excludes the same single key but not a different key")
     func batchAndSingleKeyExclusion() async throws {
         LibraryMutationProtocol.reset()
@@ -366,7 +401,7 @@ struct LibraryMutationPerformanceTests {
         let snapshot = CredentialSnapshot(.authenticated(try credentials("batch")))
         let library = LiveMusicLibrary(transport: transport(snapshot: snapshot) { await gate.wait() })
         let model = AppModel(repository: FixtureMusicRepository(), library: library)
-        model.currentUserID = 7
+        model.installConfirmedAccount(userID: 7, credentialRevision: snapshot.load().revision)
 
         let batch = Task { try await model.favoriteSongs([42]) }
         #expect(await eventually { model.pendingMutations.contains(.songLike(42)) })
@@ -394,7 +429,7 @@ struct LibraryMutationPerformanceTests {
             library: LiveMusicLibrary(transport: transport),
             extras: LiveMusicExtras(transport: transport)
         )
-        model.currentUserID = 7
+        model.installConfirmedAccount(userID: 7, credentialRevision: snapshot.load().revision)
 
         let batch = Task { try await model.favoriteSongs([42, 43]) }
         #expect(await eventually {
@@ -429,7 +464,7 @@ struct LibraryMutationPerformanceTests {
             repository: FixtureMusicRepository(),
             library: LiveMusicLibrary(transport: transport(snapshot: snapshot))
         )
-        model.currentUserID = 7
+        model.installConfirmedAccount(userID: 7, credentialRevision: snapshot.load().revision)
 
         do {
             _ = try await model.favoriteSongs([1, 2, 3])
@@ -469,6 +504,160 @@ struct LibraryMutationPerformanceTests {
         #expect(playlists.map(\.id) == [900])
         #expect(LibraryMutationProtocol.count("/eapi/user/playlist") == 1)
         #expect(LibraryMutationProtocol.count("/eapi/v6/playlist/detail") == 1)
+    }
+
+    @Test("Post-install revision change clears the stale account and its mutation owner")
+    func postInstallRevisionChangeClearsStaleAccount() async throws {
+        LibraryMutationProtocol.reset()
+        let gate = LibraryMutationGate(blockedCalls: [3, 4])
+        let snapshot = CredentialSnapshot(.authenticated(try credentials("post-install-a")))
+        let transport = transport(snapshot: snapshot) { await gate.wait() }
+        let model = AppModel(
+            repository: FixtureMusicRepository(),
+            library: LiveMusicLibrary(transport: transport),
+            extras: LiveMusicExtras(transport: transport)
+        )
+        let revisionA = snapshot.load().revision
+
+        let staleRefresh = Task { await model.refreshAccountState() }
+        #expect(await eventually { await gate.hasEntered(3) })
+        #expect(model.currentUserID == 8)
+        #expect(model.confirmedAccountCredentialRevision == revisionA)
+
+        model.toggleSongLiked(42)
+        #expect(await eventually {
+            let entered = await gate.hasEntered(4)
+            return entered && model.pendingMutations == [.songLike(42)]
+        })
+
+        let revisionB = snapshot.store(.authenticated(try credentials("post-install-b"))).revision
+        await gate.release()
+        await staleRefresh.value
+
+        #expect(model.currentUserID == nil)
+        #expect(model.confirmedAccountCredentialRevision == nil)
+        #expect(model.pendingMutations.isEmpty)
+        #expect(LibraryMutationProtocol.count("/eapi/song/like") == 0)
+
+        await model.refreshAccountState()
+        #expect(model.currentUserID == 7)
+        #expect(model.confirmedAccountCredentialRevision == revisionB)
+    }
+
+    @Test("Stale refresh exit preserves a concurrently installed current account")
+    func staleRefreshExitPreservesConcurrentAccount() async throws {
+        LibraryMutationProtocol.reset()
+        let gate = LibraryMutationGate(blockedCalls: [3])
+        let snapshot = CredentialSnapshot(.authenticated(try credentials("concurrent-a")))
+        let transport = transport(snapshot: snapshot) { await gate.wait() }
+        let model = AppModel(
+            repository: FixtureMusicRepository(),
+            library: LiveMusicLibrary(transport: transport),
+            extras: LiveMusicExtras(transport: transport)
+        )
+        let revisionA = snapshot.load().revision
+
+        let staleRefresh = Task { await model.refreshAccountState() }
+        #expect(await eventually { await gate.hasEntered(3) })
+        #expect(model.currentUserID == 8)
+        #expect(model.confirmedAccountCredentialRevision == revisionA)
+
+        let revisionB = snapshot.store(.authenticated(try credentials("concurrent-b"))).revision
+        await model.refreshAccountState()
+        #expect(await gate.waiterCount() == 1)
+        #expect(model.currentUserID == 7)
+        #expect(model.confirmedAccountCredentialRevision == revisionB)
+
+        await gate.release()
+        await staleRefresh.value
+        #expect(model.currentUserID == 7)
+        #expect(model.confirmedAccountCredentialRevision == revisionB)
+    }
+
+    @Test("Revision change invalidates mutations until account confirmation")
+    func revisionChangeInvalidatesBeforeConfirmation() async throws {
+        LibraryMutationProtocol.reset()
+        let gate = LibraryMutationGate()
+        let snapshot = CredentialSnapshot(.authenticated(try credentials("confirmed-a")))
+        let transport = transport(snapshot: snapshot) { await gate.wait() }
+        let model = AppModel(
+            repository: FixtureMusicRepository(),
+            library: LiveMusicLibrary(transport: transport),
+            extras: LiveMusicExtras(transport: transport)
+        )
+        model.currentUserID = 7
+        model.toggleSongLiked(41)
+        #expect(model.pendingMutations.isEmpty)
+        #expect(LibraryMutationProtocol.count("/eapi/song/like") == 0)
+        model.installConfirmedAccount(userID: 7, credentialRevision: snapshot.load().revision)
+
+        let revision = snapshot.store(.authenticated(try credentials("confirming-b"))).revision
+        let refresh = Task { await model.refreshAccountState() }
+        #expect(await eventually { await gate.hasEntered() })
+        #expect(model.currentUserID == nil)
+        #expect(model.confirmedAccountCredentialRevision == nil)
+
+        model.toggleSongLiked(42)
+        #expect(model.pendingMutations.isEmpty)
+        #expect(LibraryMutationProtocol.count("/eapi/song/like") == 0)
+
+        await gate.release()
+        await refresh.value
+        #expect(model.currentUserID == 8)
+        #expect(model.confirmedAccountCredentialRevision == revision)
+
+        model.toggleSongLiked(42)
+        #expect(await eventually { LibraryMutationProtocol.count("/eapi/song/like") == 1 })
+    }
+
+    @Test("Failed account confirmation keeps mutations invalidated")
+    func failedAccountConfirmationStaysInvalidated() async throws {
+        LibraryMutationProtocol.reset()
+        LibraryMutationProtocol.fail("/eapi/v1/user/detail")
+        let snapshot = CredentialSnapshot(.authenticated(try credentials("failure-a")))
+        let transport = transport(snapshot: snapshot)
+        let model = AppModel(
+            repository: FixtureMusicRepository(),
+            library: LiveMusicLibrary(transport: transport),
+            extras: LiveMusicExtras(transport: transport)
+        )
+        model.installConfirmedAccount(userID: 7, credentialRevision: snapshot.load().revision)
+
+        _ = snapshot.store(.authenticated(try credentials("failure-b")))
+        await model.refreshAccountState()
+        #expect(model.currentUserID == nil)
+        #expect(model.confirmedAccountCredentialRevision == nil)
+
+        model.toggleSongLiked(42)
+        #expect(model.pendingMutations.isEmpty)
+        #expect(LibraryMutationProtocol.count("/eapi/song/like") == 0)
+    }
+
+    @Test("Canceled account confirmation keeps mutations invalidated")
+    func canceledAccountConfirmationStaysInvalidated() async throws {
+        LibraryMutationProtocol.reset()
+        let gate = LibraryMutationGate()
+        let snapshot = CredentialSnapshot(.authenticated(try credentials("cancel-a")))
+        let transport = transport(snapshot: snapshot) { await gate.wait() }
+        let model = AppModel(
+            repository: FixtureMusicRepository(),
+            library: LiveMusicLibrary(transport: transport),
+            extras: LiveMusicExtras(transport: transport)
+        )
+        model.installConfirmedAccount(userID: 7, credentialRevision: snapshot.load().revision)
+
+        _ = snapshot.store(.authenticated(try credentials("cancel-b")))
+        let refresh = Task { await model.refreshAccountState() }
+        #expect(await eventually { await gate.hasEntered() })
+        refresh.cancel()
+        await gate.release()
+        await refresh.value
+        #expect(model.currentUserID == nil)
+        #expect(model.confirmedAccountCredentialRevision == nil)
+
+        model.toggleSongLiked(42)
+        #expect(model.pendingMutations.isEmpty)
+        #expect(LibraryMutationProtocol.count("/eapi/song/like") == 0)
     }
 
     @Test("Podcast subscription commit is idempotent")
@@ -743,6 +932,41 @@ struct LibraryMutationPerformanceTests {
         #expect(state.accepts(reload, accountID: 7, credentialRevision: 13))
         let (_, repeatedForce) = state.begin(reloadTrigger)
         #expect(!repeatedForce)
+    }
+
+    @Test("Feature mutations do not execute after their confirmed account tuple becomes stale")
+    func featureMutationAccountFence() async {
+        let accountA = PlaylistMutationAccount(userID: 7, credentialRevision: 10)
+        var operationCount = 0
+
+        let sameUserNewRevision = await accountA.performIfCurrent(
+            userID: 7,
+            confirmedRevision: 11,
+            liveRevision: 11
+        ) { operationCount += 1 }
+        let differentUser = await accountA.performIfCurrent(
+            userID: 8,
+            confirmedRevision: 12,
+            liveRevision: 12
+        ) { operationCount += 1 }
+        let unconfirmed = await accountA.performIfCurrent(
+            userID: nil,
+            confirmedRevision: nil,
+            liveRevision: 13
+        ) { operationCount += 1 }
+
+        #expect(!sameUserNewRevision)
+        #expect(!differentUser)
+        #expect(!unconfirmed)
+        #expect(operationCount == 0)
+
+        let current = await accountA.performIfCurrent(
+            userID: 7,
+            confirmedRevision: 10,
+            liveRevision: 10
+        ) { operationCount += 1 }
+        #expect(current)
+        #expect(operationCount == 1)
     }
 
     @Test("Late home and user-detail responses cannot commit after an account switch")

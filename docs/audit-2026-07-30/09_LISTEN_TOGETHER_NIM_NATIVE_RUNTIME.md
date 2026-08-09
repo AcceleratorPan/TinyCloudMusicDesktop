@@ -2,7 +2,7 @@
 
 审计日期：2026-07-30
 审计基线：`decfd7d`（`main` / `origin/main`）
-对照基线：`docs/SWIFT_APP_FINAL_AUDIT_AND_PARALLEL_REMEDIATION_PLAN_2026-07-25.md`
+历史对照：2026-07-25 前置审计的有效结论已并入 00 总报告，旧文件已删除
 后续所有者：一起听 / NIM 原生运行时专家 agent
 
 范围裁决：本项目仅用于本地个人研究开发，不推广、不开放源代码，也不面向生产、分发或第三方使用。NIM 10.9.40 运行时只按 `docs/evidence-2026-07-31/NIM_RUNTIME_CONTRACT_10.9.40.md` 实施；未获公开资料证明的 buffer、线程与 quiescence 合同保持 `UNVERIFIED / RISK_ACCEPTED (LOCAL PERSONAL RESEARCH ONLY)`，不要求提交网易云信官方工单。

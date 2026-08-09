@@ -43,6 +43,7 @@ final class AudioUploadManager {
     @ObservationIgnored private var sourceIdentities: [UUID: AudioUploadInspector.SourceIdentity] = [:]
     @ObservationIgnored private var pauseRequested: Set<UUID> = []
     @ObservationIgnored private var accountID: Int64?
+    @ObservationIgnored private var accountCredentialRevision: UInt64?
     @ObservationIgnored private var accountGeneration: UInt64 = 0
     @ObservationIgnored private var operationIdentities: [UUID: UUID] = [:]
     @ObservationIgnored private var loadTask: Task<Void, Never>?
@@ -90,8 +91,9 @@ final class AudioUploadManager {
         await loadTask?.value
     }
 
-    func setAccount(_ accountID: Int64?) {
-        guard self.accountID != accountID else { return }
+    func setAccount(_ accountID: Int64?, credentialRevision: UInt64? = nil) {
+        let revision = accountID == nil ? nil : (credentialRevision ?? self.credentialRevision())
+        guard self.accountID != accountID || accountCredentialRevision != revision else { return }
         accountGeneration &+= 1
         let generation = accountGeneration
         let oldActive = activeTask
@@ -119,6 +121,7 @@ final class AudioUploadManager {
         items.removeAll()
         itemOrder.removeAll()
         self.accountID = accountID
+        accountCredentialRevision = revision
         showCurrentAccount()
 
         accountTransitionTask = Task { [weak self, store] in
@@ -197,7 +200,7 @@ final class AudioUploadManager {
         let fence = (
             accountID: accountID,
             generation: accountGeneration,
-            credentialRevision: credentialRevision()
+            credentialRevision: accountCredentialRevision
         )
         for context in contexts {
             draftSaveTasks.removeValue(forKey: context.id)?.cancel()
@@ -404,7 +407,7 @@ final class AudioUploadManager {
         let fence = (
             accountID: accountID,
             generation: accountGeneration,
-            credentialRevision: credentialRevision()
+            credentialRevision: accountCredentialRevision
         )
         let task = activeTask
 
@@ -868,6 +871,8 @@ final class AudioUploadManager {
 
     private func beginContext(id: UUID, accountID expectedAccountID: Int64? = nil) -> UploadContext? {
         guard let accountID,
+              let accountCredentialRevision,
+              credentialRevision() == accountCredentialRevision,
               expectedAccountID.map({ $0 == accountID }) ?? true
         else { return nil }
         let identity = UUID()
@@ -875,7 +880,7 @@ final class AudioUploadManager {
         return UploadContext(
             accountID: accountID,
             generation: accountGeneration,
-            credentialRevision: credentialRevision(),
+            credentialRevision: accountCredentialRevision,
             id: id,
             identity: identity
         )
@@ -894,6 +899,7 @@ final class AudioUploadManager {
     private func isCurrent(_ context: UploadContext, id: UUID? = nil) -> Bool {
         accountID == context.accountID
             && accountGeneration == context.generation
+            && accountCredentialRevision == context.credentialRevision
             && credentialRevision() == context.credentialRevision
             && operationIdentities[context.id] == context.identity
             && (id.map { $0 == context.id } ?? true)
@@ -1097,11 +1103,12 @@ final class AudioUploadManager {
 
     private func publishPersistenceError(
         _ message: String,
-        fence: (accountID: Int64?, generation: UInt64, credentialRevision: UInt64)
+        fence: (accountID: Int64?, generation: UInt64, credentialRevision: UInt64?)
     ) {
         guard accountID == fence.accountID,
               accountGeneration == fence.generation,
-              credentialRevision() == fence.credentialRevision
+              accountCredentialRevision == fence.credentialRevision,
+              fence.credentialRevision.map({ credentialRevision() == $0 }) ?? true
         else { return }
         persistenceError = message
     }

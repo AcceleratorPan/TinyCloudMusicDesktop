@@ -669,11 +669,13 @@ private struct PlaybackQueueView: View {
                     .id(item.id)
                     .accessibilityLabel(item.song.map { "\($0.name)，\($0.artistsDisplay)" } ?? "正在加载歌曲")
                     .accessibilityValue(player.currentSongID == item.id ? "当前歌曲" : item.song?.durationText ?? "")
-                    .onAppear { player.resolveQueueSongs(visibleAround: item.id) }
+                    .task(id: item.id) { player.resolveQueueSongs(visibleAround: item.id) }
                 }
                 .listStyle(.inset)
-                .onAppear { scrollToCurrent(using: proxy) }
-                .onChange(of: player.currentSongID) { _, _ in scrollToCurrent(using: proxy) }
+                .task(id: player.currentSongID) {
+                    await Task.yield()
+                    scrollToCurrent(using: proxy)
+                }
             }
         }
         .frame(width: 360, height: 420)

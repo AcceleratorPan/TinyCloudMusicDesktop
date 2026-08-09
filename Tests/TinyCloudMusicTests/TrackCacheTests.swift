@@ -49,11 +49,19 @@ private actor TrackCacheDownloadCounter {
 }
 
 private actor TrackCacheLookupGate {
+    private let blockingInvocation: Int
+    private var invocations = 0
     private var entered = false
     private var released = false
     private var continuation: CheckedContinuation<Void, Never>?
 
+    init(blockingInvocation: Int = 1) {
+        self.blockingInvocation = blockingInvocation
+    }
+
     func wait() async {
+        invocations += 1
+        guard invocations == blockingInvocation else { return }
         entered = true
         guard !released else { return }
         await withCheckedContinuation { continuation = $0 }
@@ -67,6 +75,44 @@ private actor TrackCacheLookupGate {
         released = true
         continuation?.resume()
         continuation = nil
+    }
+}
+
+private actor TrackCacheDownloadGate {
+    private var started = false
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    let root: URL
+
+    init(root: URL) {
+        self.root = root
+    }
+
+    func download(_ request: URLRequest) async throws -> (URL, URLResponse) {
+        started = true
+        if !released {
+            await withCheckedContinuation { waiters.append($0) }
+        }
+        let url = root.appending(path: UUID().uuidString)
+        try Data("ID3".utf8).write(to: url)
+        return (
+            url,
+            HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "audio/mpeg"]
+            )!
+        )
+    }
+
+    func hasStarted() -> Bool { started }
+
+    func release() {
+        released = true
+        let pending = waiters
+        waiters = []
+        pending.forEach { $0.resume() }
     }
 }
 
@@ -427,6 +473,87 @@ private func verifyTrackCache() async throws {
     guard await lookup.value == nil,
           !FileManager.default.fileExists(atPath: racedURL.path)
     else { throw TrackCacheCheckError.failed }
+
+    let sharedRoot = root.appending(path: "shared-owner", directoryHint: .isDirectory)
+    guard TrackCache.shared(directory: sharedRoot)
+        === TrackCache.shared(directory: sharedRoot.appending(path: "..", directoryHint: .isDirectory)
+            .appending(path: "shared-owner", directoryHint: .isDirectory))
+    else { throw TrackCacheCheckError.failed }
+
+    let clearRoot = root.appending(path: "write-clear-race", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: clearRoot, withIntermediateDirectories: true)
+    let downloadGate = TrackCacheDownloadGate(root: clearRoot)
+    let clearCache = TrackCache(directory: clearRoot, download: { request in
+        try await downloadGate.download(request)
+    })
+    let oldWrite = Task {
+        try await clearCache.cache(songID: 122, from: URL(string: "https://example.com/122.mp3")!)
+    }
+    try await waitUntil { await downloadGate.hasStarted() }
+    let clearing = Task { try await clearCache.clear() }
+    try await waitUntil { await clearCache.isClearing }
+    do {
+        _ = try await clearCache.cache(songID: 123, from: URL(string: "https://example.com/123.mp3")!)
+        throw TrackCacheCheckError.failed
+    } catch is CancellationError {
+    }
+    await downloadGate.release()
+    do {
+        _ = try await oldWrite.value
+        throw TrackCacheCheckError.failed
+    } catch is CancellationError {
+    }
+    try await clearing.value
+    guard await clearCache.readyFile(for: 122) == nil,
+          await clearCache.readyFile(for: 123) == nil
+    else { throw TrackCacheCheckError.failed }
+
+    let pendingRoot = root.appending(path: "pre-clear-lookup", directoryHint: .isDirectory)
+    let pendingLookup = TrackCacheLookupGate()
+    let pendingDownloads = TrackCacheDownloadCounter(root: pendingRoot)
+    let pendingCache = TrackCache(
+        directory: pendingRoot,
+        beforeReadyLookup: { await pendingLookup.wait() },
+        download: { try await pendingDownloads.download($0) }
+    )
+    let pendingWrite = Task {
+        try await pendingCache.cache(songID: 124, from: URL(string: "https://example.com/124.mp3")!)
+    }
+    await pendingLookup.waitUntilEntered()
+    try await pendingCache.clear()
+    await pendingLookup.release()
+    do {
+        _ = try await pendingWrite.value
+        throw TrackCacheCheckError.failed
+    } catch is CancellationError {
+    }
+    guard await pendingDownloads.count == 0 else { throw TrackCacheCheckError.failed }
+
+    let pendingCopyRoot = root.appending(path: "pre-clear-copy", directoryHint: .isDirectory)
+    let copyLookup = TrackCacheLookupGate()
+    let pendingCopyCache = TrackCache(
+        directory: pendingCopyRoot,
+        beforeReadyLookup: { await copyLookup.wait() }
+    )
+    let copySource = root.appending(path: "pre-clear-copy.tmp")
+    try Data("ID3".utf8).write(to: copySource)
+    let pendingCopy = Task {
+        try await pendingCopyCache.storeCopy(
+            of: copySource,
+            for: 125,
+            quality: "standard",
+            fileExtension: "mp3"
+        )
+    }
+    await copyLookup.waitUntilEntered()
+    try await pendingCopyCache.clear()
+    await copyLookup.release()
+    do {
+        _ = try await pendingCopy.value
+        throw TrackCacheCheckError.failed
+    } catch is CancellationError {
+    }
+    guard await pendingCopyCache.readyFile(for: 125) == nil else { throw TrackCacheCheckError.failed }
 }
 
 #if TRACK_CACHE_CHECK
@@ -438,6 +565,45 @@ private enum TrackCacheCheck {
     }
 }
 #elseif canImport(Testing)
+private final class TrackCacheOwnerDownloadProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let path = request.url?.path
+        let status: Int
+        let contentType: String
+        let body: Data
+        switch path {
+        case "/eapi/song/enhance/player/url/v1":
+            status = 200
+            contentType = "application/json"
+            body = Data(
+                #"{"code":200,"data":[{"id":901,"code":200,"url":"https://m1.music.126.net/owner-cache-audio","type":"mp3","level":"standard"}]}"#.utf8
+            )
+        case "/owner-cache-audio":
+            status = 200
+            contentType = "audio/mpeg"
+            body = Data("ID3-owner-cache".utf8)
+        default:
+            status = 404
+            contentType = "application/json"
+            body = Data(#"{"code":404}"#.utf8)
+        }
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: status,
+            httpVersion: nil,
+            headerFields: ["Content-Type": contentType]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 @Suite("Track cache")
 struct TrackCacheTests {
     @Test("Only a non-empty finalized file is a cache hit")
@@ -470,6 +636,74 @@ struct TrackCacheTests {
         #expect(lookup.contains("await audioCache.readyCachedFile"))
         #expect(!lookup.contains("Data(contentsOf:"))
         #expect(!lookup.contains("resourceValues"))
+    }
+
+    @MainActor
+    @Test("Player clear fences an in-flight Download owner cache write")
+    func sharedProductionOwnersCoordinateClearAndWrite() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let gate = TrackCacheLookupGate(blockingInvocation: 3)
+        let cache = TrackCache(
+            directory: root.appending(path: "StreamCache", directoryHint: .isDirectory),
+            beforeReadyLookup: { await gate.wait() }
+        )
+        let player = PlayerController(
+            repository: FixtureMusicRepository(),
+            cacheRoot: root,
+            cache: cache,
+            crossfadeDuration: 0
+        )
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TrackCacheOwnerDownloadProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let downloads = MusicDownloadManager(
+            transport: EAPITransport(session: session, cookie: "", musicU: ""),
+            session: session,
+            maximumConcurrentDownloads: 1,
+            retryPolicy: MusicDownloadRetryPolicy(maximumAttempts: 1, baseDelay: 0, maximumDelay: 0),
+            resumeStore: MusicDownloadResumeStore(directory: root.appending(path: "Resume")),
+            targetAllocator: MusicDownloadTargetAllocator(),
+            cacheRoot: root,
+            audioCache: cache
+        )
+        let song = Song(
+            id: 901,
+            name: "Owner cache fence",
+            artists: [ArtistSummary(id: 1, name: "Fixture")],
+            album: AlbumSummary(
+                id: 1,
+                name: "Fixture",
+                artwork: Artwork(symbol: "music.note", accent: .blue)
+            ),
+            duration: .seconds(1)
+        )
+
+        #expect(downloads.enqueue(
+            song: song,
+            to: root.appending(path: "Downloads"),
+            quality: .standard,
+            includeLyrics: false
+        ))
+        await gate.waitUntilEntered()
+        try await player.clearCache()
+        await gate.release()
+        for _ in 0..<100 {
+            switch downloads.states[song.id] {
+            case .completed, .failed, .cancelled: break
+            default:
+                try await Task.sleep(for: .milliseconds(10))
+                continue
+            }
+            break
+        }
+
+        guard case .completed = downloads.states[song.id] else {
+            throw TrackCacheCheckError.failed
+        }
+        #expect(await cache.readyFile(for: song.id) == nil)
     }
 }
 #endif

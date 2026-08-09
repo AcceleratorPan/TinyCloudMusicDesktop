@@ -54,6 +54,62 @@ struct NIMRuntimeBoundaryTests {
         #expect(runtime.deactivations(generation: 2) == 1)
     }
 
+    @Test("Late callbacks and timeout from G1 cannot mutate connected G2")
+    func staleCallbacksAndTimeoutAreGenerationFenced() async throws {
+        let runtime = FakeNIMRuntime()
+        let transport = NIMChatroomTransport(
+            runtime: runtime,
+            connectionTimeout: .milliseconds(10)
+        )
+        let firstTimeoutGate = NIMTestGate()
+        let secondTimeoutGate = NIMTestGate()
+        let timeoutsProcessed = NIMTestSignal(count: 2)
+        let staleEventsProcessed = NIMTestSignal(count: 3)
+        transport.beforeConnectTimeout = { generation in
+            if generation == 1 { await firstTimeoutGate.wait() }
+            if generation == 2 { await secondTimeoutGate.wait() }
+        }
+        transport.afterConnectTimeout = { _ in timeoutsProcessed.signal() }
+        transport.afterNativeEvent = { generation in
+            if generation == 1 { staleEventsProcessed.signal() }
+        }
+        var events: [NIMChatroomEvent] = []
+        transport.onEvent = { events.append($0) }
+
+        let first = connect(transport, roomID: "1", generation: 1)
+        await runtime.waitUntilActivated(generation: 1)
+        await firstTimeoutGate.waitUntilEntered()
+
+        let second = connect(transport, roomID: "2", generation: 2)
+        await runtime.waitUntilActivated(generation: 2)
+        await expectCancellation(first)
+        await secondTimeoutGate.waitUntilEntered()
+        await completeConnect(runtime, generation: 2)
+        try await second.value
+
+        runtime.emit(.login(#"{"err_code":200,"login_step":3}"#), generation: 1)
+        runtime.emit(.message("stale"), generation: 1)
+        runtime.emit(.disconnected, generation: 1)
+        await staleEventsProcessed.wait()
+        #expect(runtime.enterRequests(generation: 1) == 0)
+        #expect(events == [.status(5, generation: 2)])
+        #expect(runtime.isCurrent(generation: 2))
+        #expect(runtime.disconnects(generation: 2) == 0)
+        #expect(runtime.deactivations(generation: 2) == 0)
+
+        await firstTimeoutGate.open()
+        await secondTimeoutGate.open()
+        await timeoutsProcessed.wait()
+        #expect(events == [.status(5, generation: 2)])
+        #expect(runtime.isCurrent(generation: 2))
+        #expect(runtime.disconnects(generation: 2) == 0)
+        #expect(runtime.deactivations(generation: 2) == 0)
+
+        await transport.disconnect(generation: 2)
+        #expect(runtime.disconnects(generation: 2) == 1)
+        #expect(runtime.deactivations(generation: 2) == 1)
+    }
+
     @Test("Login request and enter failures each have one teardown owner")
     func failedConnectOwnsOneTeardown() async throws {
         let failures: [(NIMNativeEvent, String)] = [

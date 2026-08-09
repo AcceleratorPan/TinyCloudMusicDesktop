@@ -665,6 +665,7 @@ struct VideoDetailView: View {
     let knowledgeLibrary: LiveMusicKnowledgeLibrary?
     @Bindable var songPlayer: PlayerController
     let currentUserID: Int64?
+    let confirmedAccountCredentialRevision: UInt64?
     @Bindable var downloadManager: MusicDownloadManager
     let downloadDirectory: URL
     let playbackQuality: VideoQuality
@@ -1194,7 +1195,9 @@ struct VideoDetailView: View {
             return
         }
         let requestGeneration = generation
-        let credentialRevision = library.transport.credentialSnapshotValue().revision
+        guard let credentialRevision = confirmedAccountCredentialRevision,
+              library.transport.credentialSnapshotValue().revision == credentialRevision
+        else { return }
         let desired = !detail.isSubscribed
         let taskID = UUID()
         isUpdatingSubscription = true
@@ -1209,6 +1212,7 @@ struct VideoDetailView: View {
                 }
             }
             do {
+                guard videoMutationAccountMatches(accountID, credentialRevision) else { return }
                 switch resource {
                 case let .mv(id):
                     try await library.setMVSubscribed(
@@ -1226,8 +1230,7 @@ struct VideoDetailView: View {
                 try Task.checkCancellation()
                 guard subscriptionTaskID == taskID,
                       generation == requestGeneration,
-                      currentUserID == accountID,
-                      library.transport.credentialSnapshotValue().revision == credentialRevision
+                      videoMutationAccountMatches(accountID, credentialRevision)
                 else { return }
                 self.detail = detail.settingSubscribed(desired)
                 onSubscriptionChanged(resource, desired)
@@ -1235,8 +1238,7 @@ struct VideoDetailView: View {
             } catch {
                 guard subscriptionTaskID == taskID,
                       generation == requestGeneration,
-                      currentUserID == accountID,
-                      library.transport.credentialSnapshotValue().revision == credentialRevision
+                      videoMutationAccountMatches(accountID, credentialRevision)
                 else { return }
                 subscriptionError = error.localizedDescription
                 await confirmDetailAfterUnknownResult(
@@ -1267,8 +1269,7 @@ struct VideoDetailView: View {
             try Task.checkCancellation()
             guard subscriptionTaskID == taskID,
                   generation == requestGeneration,
-                  currentUserID == accountID,
-                  library.transport.credentialSnapshotValue().revision == credentialRevision
+                  videoMutationAccountMatches(accountID, credentialRevision)
             else { return }
             detail = refreshed
             if refreshed.isSubscribed == desired {
@@ -1313,6 +1314,11 @@ struct VideoDetailView: View {
             && credentialRevision.map {
                 library.transport.credentialSnapshotValue().revision == $0
             } != false
+    }
+
+    private func videoMutationAccountMatches(_ accountID: Int64, _ credentialRevision: UInt64) -> Bool {
+        confirmedAccountCredentialRevision == credentialRevision
+            && videoAccountMatches(accountID, credentialRevision)
     }
 
     @MainActor

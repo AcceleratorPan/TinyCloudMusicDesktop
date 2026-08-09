@@ -64,6 +64,8 @@ final class NIMChatroomTransport {
     private var shutdownTask: Task<Void, Never>?
     var beforeConnectCancellation: ((UInt64) async -> Void)?
     var afterConnectCancellation: ((UInt64) -> Void)?
+    var beforeConnectTimeout: ((UInt64) async -> Void)?
+    var afterConnectTimeout: ((UInt64) -> Void)?
     var afterNativeEvent: ((UInt64) -> Void)?
 
     init() {
@@ -126,9 +128,12 @@ final class NIMChatroomTransport {
                             } catch {
                                 return
                             }
-                            await self?.finishConnect(.failure(
+                            guard let self else { return }
+                            await self.beforeConnectTimeout?(operationGeneration)
+                            await self.finishConnect(.failure(
                                 NIMChatroomError.connectionFailed(stage: "timeout")
                             ), operationGeneration: operationGeneration)
+                            self.afterConnectTimeout?(operationGeneration)
                         }
                     } catch {
                         Task { @MainActor [weak self] in

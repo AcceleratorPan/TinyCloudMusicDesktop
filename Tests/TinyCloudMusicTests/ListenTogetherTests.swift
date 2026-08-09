@@ -493,6 +493,124 @@ struct ListenTogetherControllerLifecycleTests {
         await controller.shutdown()
     }
 
+    @Test("Same-user credential revision fences realtime and migrates the session")
+    func sameUserCredentialRevisionMigratesSession() async {
+        ListenTogetherControllerProtocol.reset([
+            "/weapi/listen/together/status/get": .init(Self.inRoom),
+            "/api/middle/im/token/get": .init(Self.credentials),
+            "/eapi/listen/together/sync/playlist/get": .init(Self.authoritativePaused),
+            "/eapi/listen/together/heartbeat": .init(Self.heartbeat)
+        ])
+        let snapshot = CredentialSnapshot(.guest)
+        let realtime = ListenTogetherRealtimeStub()
+        let player = PlayerController(repository: FixtureMusicRepository(), crossfadeDuration: 0)
+        let controller = makeController(
+            player: player,
+            realtime: realtime,
+            credentialSnapshot: snapshot
+        )
+        controller.updateAccount(42)
+        await wait {
+            if case .recoveryAvailable = controller.phase { return true }
+            return false
+        }
+        controller.recover()
+        await wait { controller.isConnected }
+        #expect(player.currentSongID == 1)
+        let statusCount = ListenTogetherControllerProtocol.requestCount(
+            for: "/weapi/listen/together/status/get"
+        )
+
+        _ = snapshot.store(.guest)
+        realtime.send(Self.remotePlay)
+        #expect(player.currentSongID == 1)
+
+        controller.updateAccount(42)
+        await wait {
+            guard realtime.disconnectCount == 1 else { return false }
+            if case .recoveryAvailable = controller.phase { return true }
+            return false
+        }
+        #expect(ListenTogetherControllerProtocol.requestCount(
+            for: "/weapi/listen/together/status/get"
+        ) == statusCount + 1)
+        controller.recover()
+        await wait { controller.isConnected && realtime.connectCount == 2 }
+        #expect(player.currentSongID == 1)
+        await controller.shutdown()
+    }
+
+    @Test("AppModel invalidates an active room before same-user confirmation")
+    func appModelInvalidatesActiveRoomBeforeConfirmation() async {
+        ListenTogetherControllerProtocol.reset([
+            "/eapi/v1/user/info": .init(#"{"code":200,"userPoint":{"userId":42}}"#, delay: 0.25),
+            "/eapi/v1/user/detail": .init(#"{"code":200,"profile":{"userId":42,"nickname":"Fixture"}}"#),
+            "/eapi/user/playlist": .init(#"{"code":200,"playlist":[],"more":false}"#),
+            "/weapi/listen/together/status/get": .init(Self.inRoom),
+            "/api/middle/im/token/get": .init(Self.credentials),
+            "/eapi/listen/together/sync/playlist/get": .init(Self.authoritativePaused),
+            "/eapi/listen/together/heartbeat": .init(Self.heartbeat)
+        ])
+        let snapshot = CredentialSnapshot(.guest)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ListenTogetherControllerProtocol.self]
+        let transport = EAPITransport(
+            session: URLSession(configuration: configuration),
+            credentialSnapshot: snapshot
+        )
+        let player = PlayerController(repository: FixtureMusicRepository(), crossfadeDuration: 0)
+        let realtime = ListenTogetherRealtimeStub()
+        let controller = ListenTogetherController(
+            service: LiveListenTogetherService(transport: transport),
+            player: player,
+            realtime: realtime
+        )
+        let model = AppModel(
+            repository: FixtureMusicRepository(),
+            library: LiveMusicLibrary(transport: transport),
+            extras: LiveMusicExtras(transport: transport),
+            defaults: UserDefaults(suiteName: UUID().uuidString)!
+        )
+        model.listenTogether = controller
+        model.installConfirmedAccount(userID: 42, credentialRevision: snapshot.load().revision)
+
+        await wait {
+            if case .recoveryAvailable = controller.phase { return true }
+            return false
+        }
+        controller.recover()
+        await wait { controller.isConnected && player.currentSongID == 1 }
+
+        let revision = snapshot.store(.guest).revision
+        model.invalidateAccountDomainIfNeeded(forCredentialRevision: revision)
+        let refresh = Task { @MainActor in await model.refreshAccountState() }
+
+        #expect(model.currentUserID == nil)
+        realtime.send(Self.remotePlay)
+        #expect(player.currentSongID == 1)
+        await wait {
+            controller.currentUserID == nil
+                && controller.room == nil
+                && realtime.disconnectCount == 1
+        }
+        #expect(player.controlInterceptor == nil)
+        #expect(!player.isControlInteractionLocked)
+        #expect(ListenTogetherControllerProtocol.requestCount(
+            for: "/eapi/listen/together/end/v2"
+        ) == 0)
+
+        await refresh.value
+        #expect(model.currentUserID == 42)
+        #expect(model.confirmedAccountCredentialRevision == revision)
+        await wait {
+            controller.currentUserID == 42
+                && ListenTogetherControllerProtocol.requestCount(
+                    for: "/weapi/listen/together/status/get"
+                ) == 2
+        }
+        await controller.shutdown()
+    }
+
     @Test("Sleep cancels a non-cooperative room operation before returning")
     func sleepDoesNotWaitForRoomOperation() async {
         ListenTogetherControllerProtocol.reset(Self.operationStubs)

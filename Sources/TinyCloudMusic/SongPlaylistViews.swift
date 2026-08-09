@@ -10,6 +10,8 @@ struct AddSongToPlaylistView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var phase: AvailablePlaylistPhase = .idle
     @State private var retryRevision = 0
+    @State private var failedPlaylist: MusicAvailablePlaylist?
+    @State private var operationError: String?
 
     init(
         song: Song,
@@ -30,6 +32,31 @@ struct AddSongToPlaylistView: View {
     private var bodyContent: AnyView {
         AnyView(NavigationStack {
             VStack(spacing: 0) {
+                if let operationError {
+                    HStack(spacing: 10) {
+                        Label(operationError, systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.red)
+                            .lineLimit(2)
+                        Spacer()
+                        if let failedPlaylist {
+                            Button("重试") { add(to: failedPlaylist) }
+                                .disabled(isAddingSong)
+                        }
+                        Button {
+                            self.operationError = nil
+                            failedPlaylist = nil
+                        } label: {
+                            Image(systemName: "xmark")
+                        }
+                        .buttonStyle(.plain)
+                        .help("关闭错误提示")
+                        .accessibilityLabel("关闭错误提示")
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    Divider()
+                }
+
                 content
             }
             .navigationTitle("添加到歌单")
@@ -167,10 +194,16 @@ struct AddSongToPlaylistView: View {
     }
 
     private func add(to item: MusicAvailablePlaylist) {
+        failedPlaylist = nil
+        operationError = nil
         model.addSongToPlaylist(
             song.id,
             playlistID: item.id,
-            isFavoritePlaylist: item.playlist.specialType == 5
+            isFavoritePlaylist: item.playlist.specialType == 5,
+            onFailure: { message in
+                failedPlaylist = item
+                operationError = message
+            }
         )
     }
 

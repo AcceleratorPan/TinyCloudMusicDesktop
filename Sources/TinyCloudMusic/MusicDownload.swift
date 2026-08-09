@@ -9,7 +9,7 @@ final class MusicDownloadManager {
         let credentialRevision: UInt64
     }
 
-    private enum DownloadKey: Hashable {
+    private enum DownloadKey: Hashable, Sendable {
         case music(Int64)
         case video(String)
     }
@@ -21,6 +21,11 @@ final class MusicDownloadManager {
         var songID: Int64? {
             if case let .music(id) = key { id } else { nil }
         }
+    }
+
+    private struct CompletedFileValidation {
+        let id: UUID
+        let task: Task<Void, Never>
     }
 
     private enum PendingDownload {
@@ -75,6 +80,8 @@ final class MusicDownloadManager {
     @ObservationIgnored private let resumeStore: MusicDownloadResumeStore
     @ObservationIgnored private let targetAllocator: MusicDownloadTargetAllocator
     @ObservationIgnored private let videoTransfer: VideoFileDownload.Transfer?
+    @ObservationIgnored private let audioFileValidator: @Sendable (URL) -> Bool
+    @ObservationIgnored private let videoFileValidator: @Sendable (URL) -> Bool
     @ObservationIgnored private let cacheGeneration: MusicDownloadCacheGeneration
     @ObservationIgnored private let cacheActivity = MusicDownloadCacheActivity()
     @ObservationIgnored private var cacheRoot: URL?
@@ -84,6 +91,7 @@ final class MusicDownloadManager {
     @ObservationIgnored private var pendingOrder: [PendingDownload] = []
     @ObservationIgnored private var pendingHead = 0
     @ObservationIgnored private var activeTasks: [UUID: ActiveDownloadTask] = [:]
+    @ObservationIgnored private var completedFileValidations: [DownloadKey: CompletedFileValidation] = [:]
     @ObservationIgnored private var requestsBySongID: [Int64: MusicDownloadRequest] = [:]
     @ObservationIgnored private var resumeDataBySongID: [Int64: Data] = [:]
     @ObservationIgnored private var jobIDs: [Int64: UUID] = [:]
@@ -114,7 +122,13 @@ final class MusicDownloadManager {
         targetAllocator: MusicDownloadTargetAllocator = .shared,
         cacheRoot: URL? = nil,
         audioCache: TrackCache? = nil,
-        videoTransfer: VideoFileDownload.Transfer? = nil
+        videoTransfer: VideoFileDownload.Transfer? = nil,
+        audioFileValidator: @escaping @Sendable (URL) -> Bool = {
+            (try? MusicDownloadFiles.validatedAudioFileSize(at: $0)) != nil
+        },
+        videoFileValidator: @escaping @Sendable (URL) -> Bool = {
+            FileManager.default.fileExists(atPath: $0.path)
+        }
     ) {
         self.transport = transport
         self.session = session
@@ -123,6 +137,8 @@ final class MusicDownloadManager {
         self.resumeStore = resumeStore
         self.targetAllocator = targetAllocator
         self.videoTransfer = videoTransfer
+        self.audioFileValidator = audioFileValidator
+        self.videoFileValidator = videoFileValidator
         cacheGeneration = MusicDownloadCacheGeneration(root: cacheRoot)
         self.cacheRoot = cacheRoot
         self.audioCache = audioCache ?? cacheRoot.map(Self.makeAudioCache)
@@ -135,6 +151,7 @@ final class MusicDownloadManager {
 
     isolated deinit {
         activeTasks.values.forEach { $0.task.cancel() }
+        completedFileValidations.values.forEach { $0.task.cancel() }
         progressFlushTask?.cancel()
         recoveryTask?.cancel()
     }
@@ -347,19 +364,26 @@ final class MusicDownloadManager {
     }
 
     @discardableResult
-    private func enqueue(_ request: VideoDownloadRequest, persist: Bool = true) -> Bool {
+    private func enqueue(
+        _ request: VideoDownloadRequest,
+        persist: Bool = true,
+        validatesCompletedFile: Bool = true
+    ) -> Bool {
         let id = request.resource.identity
+        let key = DownloadKey.video(id)
         let wasKnown = videoItems[id] != nil
         if videoRequests[id] == request {
             switch videoStates[id] {
             case .queued, .running:
                 return false
-            case let .completed(fileURL, _) where FileManager.default.fileExists(atPath: fileURL.path):
+            case let .completed(fileURL, _) where validatesCompletedFile:
+                validateCompletedVideo(request, fileURL: fileURL)
                 return false
             default:
                 break
             }
         }
+        cancelCompletedFileValidation(for: key)
         if isVideoActive(id: id) {
             pausingVideoIDs.remove(id)
             resumeAfterPauseVideoIDs.remove(id)
@@ -404,7 +428,11 @@ final class MusicDownloadManager {
     }
 
     @discardableResult
-    private func enqueue(_ requests: [MusicDownloadRequest], persist: Bool = true) -> Int {
+    private func enqueue(
+        _ requests: [MusicDownloadRequest],
+        persist: Bool = true,
+        validatesCompletedFiles: Bool = true
+    ) -> Int {
         guard !requests.isEmpty else { return 0 }
         var nextStates = states
         var nextItems = items
@@ -416,17 +444,19 @@ final class MusicDownloadManager {
 
         for request in requests where processed.insert(request.songID).inserted {
             let songID = request.songID
+            let key = DownloadKey.music(songID)
             if requestsBySongID[songID] == request {
                 switch nextStates[songID] {
                 case .queued, .running:
                     continue
-                case let .completed(audioURL, _)
-                    where (try? MusicDownloadFiles.validatedAudioFileSize(at: audioURL)) != nil:
+                case let .completed(audioURL, lyricURL) where validatesCompletedFiles:
+                    validateCompletedAudio(request, audioURL: audioURL, lyricURL: lyricURL)
                     continue
                 default:
                     break
                 }
             }
+            cancelCompletedFileValidation(for: key)
             if isActive(songID: songID) {
                 pausingSongIDs.remove(songID)
                 resumeAfterPauseSongIDs.remove(songID)
@@ -479,6 +509,84 @@ final class MusicDownloadManager {
         if persist { resumeStore.save(accepted, onFailure: persistenceFailureHandler) }
         schedulePendingDownloads()
         return accepted.count
+    }
+
+    private func validateCompletedAudio(
+        _ request: MusicDownloadRequest,
+        audioURL: URL,
+        lyricURL: URL?
+    ) {
+        let key = DownloadKey.music(request.songID)
+        guard completedFileValidations[key] == nil else { return }
+        let id = UUID()
+        let validator = audioFileValidator
+        let task = Task.detached(priority: .utility) { [weak self] in
+            let isValid = validator(audioURL)
+            guard !Task.isCancelled else { return }
+            await self?.finishCompletedAudioValidation(
+                isValid: isValid,
+                id: id,
+                request: request,
+                audioURL: audioURL,
+                lyricURL: lyricURL
+            )
+        }
+        completedFileValidations[key] = CompletedFileValidation(id: id, task: task)
+    }
+
+    private func validateCompletedVideo(_ request: VideoDownloadRequest, fileURL: URL) {
+        let key = DownloadKey.video(request.resource.identity)
+        guard completedFileValidations[key] == nil else { return }
+        let id = UUID()
+        let validator = videoFileValidator
+        let task = Task.detached(priority: .utility) { [weak self] in
+            let isValid = validator(fileURL)
+            guard !Task.isCancelled else { return }
+            await self?.finishCompletedVideoValidation(
+                isValid: isValid,
+                id: id,
+                request: request,
+                fileURL: fileURL
+            )
+        }
+        completedFileValidations[key] = CompletedFileValidation(id: id, task: task)
+    }
+
+    private func finishCompletedAudioValidation(
+        isValid: Bool,
+        id: UUID,
+        request: MusicDownloadRequest,
+        audioURL: URL,
+        lyricURL: URL?
+    ) {
+        let key = DownloadKey.music(request.songID)
+        guard completedFileValidations[key]?.id == id else { return }
+        completedFileValidations.removeValue(forKey: key)
+        guard !isValid,
+              requestsBySongID[request.songID] == request,
+              states[request.songID] == .completed(audioURL: audioURL, lyricURL: lyricURL)
+        else { return }
+        _ = enqueue([request], validatesCompletedFiles: false)
+    }
+
+    private func finishCompletedVideoValidation(
+        isValid: Bool,
+        id: UUID,
+        request: VideoDownloadRequest,
+        fileURL: URL
+    ) {
+        let key = DownloadKey.video(request.resource.identity)
+        guard completedFileValidations[key]?.id == id else { return }
+        completedFileValidations.removeValue(forKey: key)
+        guard !isValid,
+              videoRequests[request.resource.identity] == request,
+              videoStates[request.resource.identity] == .completed(audioURL: fileURL, lyricURL: nil)
+        else { return }
+        _ = enqueue(request, validatesCompletedFile: false)
+    }
+
+    private func cancelCompletedFileValidation(for key: DownloadKey) {
+        completedFileValidations.removeValue(forKey: key)?.task.cancel()
     }
 
     func cancel(songID: Int64) {
@@ -1211,6 +1319,7 @@ final class MusicDownloadManager {
         guard !victimIDs.isEmpty else { return }
         itemOrder.removeAll { victimIDs.contains($0) }
         for songID in victimIDs {
+            cancelCompletedFileValidation(for: .music(songID))
             states.removeValue(forKey: songID)
             items.removeValue(forKey: songID)
             retryAttempts.removeValue(forKey: songID)
@@ -1232,6 +1341,7 @@ final class MusicDownloadManager {
         let victimIDs = Set(victims)
         videoItemOrder.removeAll { victimIDs.contains($0) }
         for id in victimIDs {
+            cancelCompletedFileValidation(for: .video(id))
             videoStates.removeValue(forKey: id)
             videoItems.removeValue(forKey: id)
             videoRequests.removeValue(forKey: id)
@@ -2166,7 +2276,7 @@ final class MusicDownloadManager {
     }
 
     private nonisolated static func makeAudioCache(_ root: URL) -> TrackCache {
-        TrackCache(directory: root.appending(path: "StreamCache", directoryHint: .isDirectory))
+        TrackCache.shared(directory: root.appending(path: "StreamCache", directoryHint: .isDirectory))
     }
 
     private nonisolated static func clearOwnedDownloadCache(at root: URL) async throws {
