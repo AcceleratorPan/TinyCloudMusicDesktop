@@ -1,0 +1,100 @@
+name: TinyCloudMusicIOS
+
+options:
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "18.0"
+
+packages:
+  Nuke:
+    url: https://github.com/kean/Nuke.git
+    exactVersion: 13.0.6
+
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+    SWIFT_STRICT_CONCURRENCY: complete
+    IPHONEOS_DEPLOYMENT_TARGET: 18.0
+    TARGETED_DEVICE_FAMILY: 1
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  TinyCloudMusicIOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: TinyCloudMusicIOS
+      - path: ../Sources/TinyCloudMusic
+        name: SharedMacCore
+        excludes:
+          - Resources
+          - AppModel.swift
+          - AudioUploadModels.swift
+          - MusicDownloadInfrastructure.swift
+          - NOSAudioUpload.swift
+          - PersonalFMView.swift
+          - TinyCloudMusicApp.swift
+          - Views.swift
+          - CommentEmojiText.swift
+          - LibraryFeatureViews.swift
+          - ListenTogetherView.swift
+          - NativeQRLoginView.swift
+          - NeteaseWebLoginView.swift
+          - VideoViews.swift
+          - MusicKnowledgeViews.swift
+          - CloudMusicView.swift
+          - DetailExtrasViews.swift
+          - NowPlayingDetailView.swift
+          - SongPlaylistViews.swift
+          - AudioContentViews.swift
+          - AudioUploadViews.swift
+          - ListeningFootprintsView.swift
+          - RecommendationHistoryView.swift
+          - NIMChatroomTransport.swift
+    dependencies:
+      - package: Nuke
+        product: Nuke
+      - package: Nuke
+        product: NukeUI
+    info:
+      path: TinyCloudMusicIOS/Info.plist
+      properties:
+        UILaunchScreen: {}
+        UIBackgroundModes:
+          - audio
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tinycloudmusic.app.ios
+        PRODUCT_MODULE_NAME: TinyCloudMusic
+        PRODUCT_NAME: TinyCloudMusic
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_USER_SCRIPT_SANDBOXING: false
+        SUPPORTS_MACCATALYST: false
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: false
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: false
+        TARGETED_DEVICE_FAMILY: 1
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: true
+    scheme:
+      testTargets:
+        - TinyCloudMusicIOSTests
+
+  TinyCloudMusicIOSTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: TinyCloudMusicIOSTests
+    dependencies:
+      - target: TinyCloudMusicIOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tinycloudmusic.app.ios.tests
+        GENERATE_INFOPLIST_FILE: true
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: true
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/TinyCloudMusic.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TinyCloudMusic"
+        BUNDLE_LOADER: "$(TEST_HOST)"

@@ -635,45 +635,52 @@ private struct PlaybackQueueView: View {
             Divider()
 
             ScrollViewReader { proxy in
-                List(player.queue) { item in
-                    Button {
-                        player.playQueuedSong(item.id)
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: player.currentSongID == item.id ? "speaker.wave.2.fill" : "music.note")
-                                .frame(width: 18)
-                                .foregroundStyle(player.currentSongID == item.id ? .red : .secondary)
-                            if let song = item.song {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    SongTitleText(song: song)
-                                        .lineLimit(1)
-                                    Text(song.artistsDisplay)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(player.queue) { item in
+                            Button {
+                                player.playQueuedSong(item.id)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: player.currentSongID == item.id ? "speaker.wave.2.fill" : "music.note")
+                                        .frame(width: 18)
+                                        .foregroundStyle(player.currentSongID == item.id ? .red : .secondary)
+                                    if let song = item.song {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            SongTitleText(song: song)
+                                                .lineLimit(1)
+                                            Text(song.artistsDisplay)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
+                                        Spacer(minLength: 0)
+                                        Text(song.durationText)
+                                            .font(.caption.monospacedDigit())
+                                            .foregroundStyle(.tertiary)
+                                    } else {
+                                        Text("正在加载歌曲…")
+                                            .foregroundStyle(.secondary)
+                                        Spacer(minLength: 0)
+                                    }
                                 }
-                                Spacer(minLength: 0)
-                                Text(song.durationText)
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(.tertiary)
-                            } else {
-                                Text("正在加载歌曲…")
-                                    .foregroundStyle(.secondary)
-                                Spacer(minLength: 0)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .contentShape(Rectangle())
                             }
+                            .buttonStyle(.plain)
+                            .disabled(player.isControlInteractionLocked)
+                            .id(item.id)
+                            .accessibilityLabel(item.song.map { "\($0.name)，\($0.artistsDisplay)" } ?? "正在加载歌曲")
+                            .accessibilityValue(player.currentSongID == item.id ? "当前歌曲" : item.song?.durationText ?? "")
+                            .task(id: item.id) { player.resolveQueueSongs(visibleAround: item.id) }
+
+                            Divider()
+                                .padding(.leading, 40)
                         }
-                        .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
-                    .disabled(player.isControlInteractionLocked)
-                    .id(item.id)
-                    .accessibilityLabel(item.song.map { "\($0.name)，\($0.artistsDisplay)" } ?? "正在加载歌曲")
-                    .accessibilityValue(player.currentSongID == item.id ? "当前歌曲" : item.song?.durationText ?? "")
-                    .task(id: item.id) { player.resolveQueueSongs(visibleAround: item.id) }
                 }
-                .listStyle(.inset)
                 .task(id: player.currentSongID) {
-                    await Task.yield()
                     scrollToCurrent(using: proxy)
                 }
             }

@@ -1,0 +1,20 @@
+PODS:
+  - NIMSDK_LITE/NOS (10.9.40):
+    - YXArtemis_XCFramework
+  - YXArtemis_XCFramework (1.1.6)
+
+DEPENDENCIES:
+  - NIMSDK_LITE/NOS (= 10.9.40)
+
+SPEC REPOS:
+  trunk:
+    - NIMSDK_LITE
+    - YXArtemis_XCFramework
+
+SPEC CHECKSUMS:
+  NIMSDK_LITE: 4c45b713af685911bc7bb14bdc5802d929ebca1c
+  YXArtemis_XCFramework: d9a8b9439d7a6c757ed00ada53a6d2dd9b13f9c7
+
+PODFILE CHECKSUM: c023992b7a0e2b611320ecf7161ccd14f9498567
+
+COCOAPODS: 1.17.0

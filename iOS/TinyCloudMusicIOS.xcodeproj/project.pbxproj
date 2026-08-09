@@ -1,0 +1,896 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		025004862D782EF2B092A60D /* MusicDownloadInfrastructure.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD7B60CE85D0A74510637453 /* MusicDownloadInfrastructure.swift */; };
+		04E5C8D1273370F3FEC0EEF5 /* IOSDiscoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB395FBF5847CD269D0058A8 /* IOSDiscoverView.swift */; };
+		05BF70C216332FCED9A46713 /* IOSAppContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF254F5238DC5B751A6FC972 /* IOSAppContainer.swift */; };
+		06741B1BD4AE9E4E13F409A1 /* ListenTogetherModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75CC1222F7DA1CFA4769B308 /* ListenTogetherModels.swift */; };
+		0BE724755778EB1EAADDBD90 /* LiveListenTogetherService.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADAAEF4C7444BE7B5DDF6F12 /* LiveListenTogetherService.swift */; };
+		0FDF2A159E8247F9AC8D8686 /* IOSNavigationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D5C1407CB9804F81F886FBB /* IOSNavigationTests.swift */; };
+		13E887B4D6474F719741AA3C /* LiveAudioContentLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CF166DB64A3EDA4503C3CAC /* LiveAudioContentLibrary.swift */; };
+		154B9174344C923A84D10A80 /* IOSDesignSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6675A8EF2F3C82496758DD84 /* IOSDesignSupport.swift */; };
+		162EE889620A2658573339B3 /* IOSMediaView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7B3FF213685661E49A6430 /* IOSMediaView.swift */; };
+		1D1D2FEDAD47751382571F0A /* IOSRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8067201BE5809EDD600F5F3 /* IOSRootView.swift */; };
+		1D49C270EF7C10512C55C7A1 /* IOSListenTogetherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CD995D8ED966457940EA9B5 /* IOSListenTogetherView.swift */; };
+		2216036393CD11182A2CBA1F /* AudioUploadModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11ED35390DA90540E3ADA48 /* AudioUploadModels.swift */; };
+		34C0C2D2E6444C42D75331A2 /* libPods-TinyCloudMusicIOS.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 310A278EE3BC9CB45CA83168 /* libPods-TinyCloudMusicIOS.a */; };
+		401DB0E7AAAE993580F8BF9B /* LiveMusicLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 075D7D73F642BC9113F159A1 /* LiveMusicLibrary.swift */; };
+		415C2ABBC9AC26E0D1B951C3 /* MusicLibraryModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3323AA59FAFC8C3D1412056C /* MusicLibraryModels.swift */; };
+		4171C1B9BE4BCD837CD47F7D /* IOSAudioSessionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEFE65805CF3B802DDA9EC0A /* IOSAudioSessionCoordinator.swift */; };
+		44F9646374C4197E56B5C295 /* LiveMusicKnowledgeLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F1E719FE9A130466E96EF5D /* LiveMusicKnowledgeLibrary.swift */; };
+		48C31D9D8D1AB515C31A4438 /* VideoDownload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77086C91CC40976609CB58CB /* VideoDownload.swift */; };
+		4D040245E33729C171924120 /* ListeningReportModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79F46CEA114070817ADA5BF7 /* ListeningReportModels.swift */; };
+		564CA5A6CE8E4B4FE00F9FEF /* EAPITransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4D96D716B47E3003D0C8C4D /* EAPITransport.swift */; };
+		581E055FD05DB72267AE1B19 /* ListenTogetherController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 131754CA788F84A1CC9CEB58 /* ListenTogetherController.swift */; };
+		69EC769172362D506AA45894 /* CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E77773A594A0ABC6DA160CD /* CredentialStore.swift */; };
+		6C199CFB7127A7A88ACE6E0B /* LiveMusicRepository+Detail.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C3EE25EF9BEF053E397CF3 /* LiveMusicRepository+Detail.swift */; };
+		7061586EA0B507FEA73E2676 /* LiveMusicRepository+Search.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFB21EA5DA4A3A44E63D5256 /* LiveMusicRepository+Search.swift */; };
+		723B044DC6B723EC603F5497 /* LiveMusicRepository+Home.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85BC36F28342F90DAAADB142 /* LiveMusicRepository+Home.swift */; };
+		7384BA700E0285C9D32FDE57 /* IOSDiscoverSearchComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9DFAA355A76FE284925AF48 /* IOSDiscoverSearchComponents.swift */; };
+		744C7CD96E03902B0ACA0E36 /* LiveVideoLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD0C10A69517178261C50ABB /* LiveVideoLibrary.swift */; };
+		763DE3E174D0573ADFE3FDA2 /* LiveMusicExtras.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32EFE6999AC9C6004340FEB7 /* LiveMusicExtras.swift */; };
+		798FE26914C2EB6BB1223230 /* RecommendationMemoryModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0E6E339DA9FD24293B34FEE /* RecommendationMemoryModels.swift */; };
+		7B660B2912B1826FE73BE8BD /* PersonalFMController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A16360F86C183F2146604B2E /* PersonalFMController.swift */; };
+		7FB780EA31E82BC8BBB428A8 /* VideoModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3220A3504BAE1C77E7EA3E21 /* VideoModels.swift */; };
+		86DFD8BD0760C947026D956B /* AudioUploadAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BF4BF0FEE0DA85EB4FE55EF /* AudioUploadAPI.swift */; };
+		8AA2092D9E249F8908AC558D /* MusicDownloadTransfer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FB1250789EBAE48D3A9FEA6 /* MusicDownloadTransfer.swift */; };
+		8CD84862213E30E8DF010851 /* MusicDownloadModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BB9A166E20088DE5F66ACEA /* MusicDownloadModels.swift */; };
+		8F6976BD4D4140CBCD38C725 /* IOSLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FA5F49B9D869DDB09FCB305 /* IOSLibraryView.swift */; };
+		94953A8429EC78635464B12A /* MusicKnowledgeModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAC83F4BBCE8A966F2F5E7DF /* MusicKnowledgeModels.swift */; };
+		9B9345F5DCD64A13E06FF0C7 /* NOSAudioUpload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 237372F2DC585A7BA88E44F1 /* NOSAudioUpload.swift */; };
+		9E9A2DF31BAA350F5384C81F /* MusicSheetWorker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 381D3300ADCA3C28DF273F33 /* MusicSheetWorker.swift */; };
+		A5424C1B7191AD423464C0D6 /* MusicDownload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CDACFD7BBE0E9B63D8686FB /* MusicDownload.swift */; };
+		A83E4F4BD63FA70ACEBDE9EF /* MusicExtraModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2337310BADC8D014C3F7432 /* MusicExtraModels.swift */; };
+		AAD8519E78FE2B61DCEB6730 /* NukeUI in Frameworks */ = {isa = PBXBuildFile; productRef = 78EBDD1389378FD4B9732828 /* NukeUI */; };
+		AAF1BB879D5A079E7C501239 /* CredentialSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F5E4BE3212DD8BCFAFD63F4 /* CredentialSnapshot.swift */; };
+		AE8235F46F0116643E966581 /* libPods-TinyCloudMusicIOSTests.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 2AC30922AA730D1D47EB4160 /* libPods-TinyCloudMusicIOSTests.a */; };
+		B3E8F5EDB19F023E6143516F /* Nuke in Frameworks */ = {isa = PBXBuildFile; productRef = 76D1B0117082AEC1BB879291 /* Nuke */; };
+		B58916B2EE0F14DDD876657D /* IOSRouteDestinationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBC221C3AF0638732AD98F89 /* IOSRouteDestinationView.swift */; };
+		B8C9DB7D3FC65A0F6C9B5BDC /* IOSAccountView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2B6B6B0D55E6628E56E99D0 /* IOSAccountView.swift */; };
+		C4849C05435523B2E3B1CBB6 /* TinyCloudMusicIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 817A82FA72F351D7EF4B0327 /* TinyCloudMusicIOSApp.swift */; };
+		CB4D6FE6B826DE5224023ABF /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C063509456ACD12606D4E83A /* AppModel.swift */; };
+		CE15CAB30F8D89559C9D3CD5 /* CachedAsyncImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = B55A20B7602A4008DA10D22B /* CachedAsyncImage.swift */; };
+		D1D559ED90A4AC4DB09A3EF6 /* Repository.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE2DEF9F908A37745703032 /* Repository.swift */; };
+		D35BF6A6857164E915A0F884 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF467F899931BC25B9E30526 /* Models.swift */; };
+		D838C02B0D48321368D2197B /* AudioUploadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64F3B089CD0A00C67557DB59 /* AudioUploadManager.swift */; };
+		D909AE3DCCD81B6B81DBA3B0 /* PlaylistImageUpload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D3285AFCC2620384C636F99 /* PlaylistImageUpload.swift */; };
+		DA4EB4AF36BB0F8FCDB6A584 /* LiveMusicRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEB94E76E813273C24A452FC /* LiveMusicRepository.swift */; };
+		E219EA5E54266B539E0C7100 /* IOSPlayerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5799816B2706A6EB0C34D0ED /* IOSPlayerViews.swift */; };
+		E2DD81D07999535C9E79D3E8 /* CloudMusicModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CD4FB58B5B9526984D1B6E9 /* CloudMusicModels.swift */; };
+		E7DCB6F2C51EDDF1FA8C1A50 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = FDD1E960A7373EC7A423CB40 /* Assets.xcassets */; };
+		EBEF54533323A1FFB5BC568B /* PlayerController.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBE61522065BE02E8A169371 /* PlayerController.swift */; };
+		EE5413CAED6B84501C3DD730 /* TrackCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3260C177423B7167CF3E53A /* TrackCache.swift */; };
+		F28A43C4A74A001E8D176751 /* AudioContentModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A237EC957CF4DD05CA5432F7 /* AudioContentModels.swift */; };
+		F57764D7E788EE0F91EBB3C1 /* LibrarySnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52FDB14ADF7EFB9477DBB2CD /* LibrarySnapshot.swift */; };
+		F5BF8A3DD83A309C5B228D7A /* IOSNIMChatroomTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 432E2D525543D0C9A46E8073 /* IOSNIMChatroomTransport.swift */; };
+		FB0BE65F88E4ACF0A2086E09 /* SessionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6BB6CA23A8C784852235F85 /* SessionController.swift */; };
+		FEDE83731D6017744F78DF0D /* IOSSearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 695DC6210BA2F0C628B58D1D /* IOSSearchView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		08A4AE8FA87B744F9D94AEFA /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 0695D08F1ECF5FBAEF97A7F0 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 8AE4333BAB553492A05A6656;
+			remoteInfo = TinyCloudMusicIOS;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		047755E7DA16B4E1A06C6072 /* Pods-TinyCloudMusicIOSTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-TinyCloudMusicIOSTests.release.xcconfig"; path = "Target Support Files/Pods-TinyCloudMusicIOSTests/Pods-TinyCloudMusicIOSTests.release.xcconfig"; sourceTree = "<group>"; };
+		075D7D73F642BC9113F159A1 /* LiveMusicLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveMusicLibrary.swift; sourceTree = "<group>"; };
+		0F1E719FE9A130466E96EF5D /* LiveMusicKnowledgeLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveMusicKnowledgeLibrary.swift; sourceTree = "<group>"; };
+		131754CA788F84A1CC9CEB58 /* ListenTogetherController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListenTogetherController.swift; sourceTree = "<group>"; };
+		1BB9A166E20088DE5F66ACEA /* MusicDownloadModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicDownloadModels.swift; sourceTree = "<group>"; };
+		1FC5C1687718827203B94330 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		237372F2DC585A7BA88E44F1 /* NOSAudioUpload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NOSAudioUpload.swift; sourceTree = "<group>"; };
+		2AC30922AA730D1D47EB4160 /* libPods-TinyCloudMusicIOSTests.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-TinyCloudMusicIOSTests.a"; sourceTree = BUILT_PRODUCTS_DIR; };
+		2CF166DB64A3EDA4503C3CAC /* LiveAudioContentLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveAudioContentLibrary.swift; sourceTree = "<group>"; };
+		310A278EE3BC9CB45CA83168 /* libPods-TinyCloudMusicIOS.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-TinyCloudMusicIOS.a"; sourceTree = BUILT_PRODUCTS_DIR; };
+		3220A3504BAE1C77E7EA3E21 /* VideoModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoModels.swift; sourceTree = "<group>"; };
+		32EE937525F4155AA6442807 /* TinyCloudMusicIOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = TinyCloudMusicIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		32EFE6999AC9C6004340FEB7 /* LiveMusicExtras.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveMusicExtras.swift; sourceTree = "<group>"; };
+		3323AA59FAFC8C3D1412056C /* MusicLibraryModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicLibraryModels.swift; sourceTree = "<group>"; };
+		381D3300ADCA3C28DF273F33 /* MusicSheetWorker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicSheetWorker.swift; sourceTree = "<group>"; };
+		3CDACFD7BBE0E9B63D8686FB /* MusicDownload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicDownload.swift; sourceTree = "<group>"; };
+		3E77773A594A0ABC6DA160CD /* CredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialStore.swift; sourceTree = "<group>"; };
+		432E2D525543D0C9A46E8073 /* IOSNIMChatroomTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSNIMChatroomTransport.swift; sourceTree = "<group>"; };
+		49C3EE25EF9BEF053E397CF3 /* LiveMusicRepository+Detail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LiveMusicRepository+Detail.swift"; sourceTree = "<group>"; };
+		4CD995D8ED966457940EA9B5 /* IOSListenTogetherView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSListenTogetherView.swift; sourceTree = "<group>"; };
+		4FA5F49B9D869DDB09FCB305 /* IOSLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSLibraryView.swift; sourceTree = "<group>"; };
+		524DD481C7722616CC8DA31F /* Pods-TinyCloudMusicIOS.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-TinyCloudMusicIOS.release.xcconfig"; path = "Target Support Files/Pods-TinyCloudMusicIOS/Pods-TinyCloudMusicIOS.release.xcconfig"; sourceTree = "<group>"; };
+		52FDB14ADF7EFB9477DBB2CD /* LibrarySnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibrarySnapshot.swift; sourceTree = "<group>"; };
+		573EFF8698DCF3F6BF07524A /* Pods-TinyCloudMusicIOS.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-TinyCloudMusicIOS.debug.xcconfig"; path = "Target Support Files/Pods-TinyCloudMusicIOS/Pods-TinyCloudMusicIOS.debug.xcconfig"; sourceTree = "<group>"; };
+		5799816B2706A6EB0C34D0ED /* IOSPlayerViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSPlayerViews.swift; sourceTree = "<group>"; };
+		5D5C1407CB9804F81F886FBB /* IOSNavigationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSNavigationTests.swift; sourceTree = "<group>"; };
+		64F3B089CD0A00C67557DB59 /* AudioUploadManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioUploadManager.swift; sourceTree = "<group>"; };
+		6675A8EF2F3C82496758DD84 /* IOSDesignSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSDesignSupport.swift; sourceTree = "<group>"; };
+		695DC6210BA2F0C628B58D1D /* IOSSearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSSearchView.swift; sourceTree = "<group>"; };
+		6FB1250789EBAE48D3A9FEA6 /* MusicDownloadTransfer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicDownloadTransfer.swift; sourceTree = "<group>"; };
+		75CC1222F7DA1CFA4769B308 /* ListenTogetherModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListenTogetherModels.swift; sourceTree = "<group>"; };
+		77086C91CC40976609CB58CB /* VideoDownload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDownload.swift; sourceTree = "<group>"; };
+		79F46CEA114070817ADA5BF7 /* ListeningReportModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListeningReportModels.swift; sourceTree = "<group>"; };
+		7CD4FB58B5B9526984D1B6E9 /* CloudMusicModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudMusicModels.swift; sourceTree = "<group>"; };
+		7F5E4BE3212DD8BCFAFD63F4 /* CredentialSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialSnapshot.swift; sourceTree = "<group>"; };
+		817A82FA72F351D7EF4B0327 /* TinyCloudMusicIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyCloudMusicIOSApp.swift; sourceTree = "<group>"; };
+		85BC36F28342F90DAAADB142 /* LiveMusicRepository+Home.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LiveMusicRepository+Home.swift"; sourceTree = "<group>"; };
+		8BFE26FFCD9EB37B5CAB5AFC /* Pods-TinyCloudMusicIOSTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-TinyCloudMusicIOSTests.debug.xcconfig"; path = "Target Support Files/Pods-TinyCloudMusicIOSTests/Pods-TinyCloudMusicIOSTests.debug.xcconfig"; sourceTree = "<group>"; };
+		8D3285AFCC2620384C636F99 /* PlaylistImageUpload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistImageUpload.swift; sourceTree = "<group>"; };
+		95C03AD38023EDB8DDAC7BF4 /* TinyCloudMusicIOSTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = TinyCloudMusicIOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		9BF4BF0FEE0DA85EB4FE55EF /* AudioUploadAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioUploadAPI.swift; sourceTree = "<group>"; };
+		A16360F86C183F2146604B2E /* PersonalFMController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalFMController.swift; sourceTree = "<group>"; };
+		A237EC957CF4DD05CA5432F7 /* AudioContentModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioContentModels.swift; sourceTree = "<group>"; };
+		A2B6B6B0D55E6628E56E99D0 /* IOSAccountView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSAccountView.swift; sourceTree = "<group>"; };
+		A4D96D716B47E3003D0C8C4D /* EAPITransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EAPITransport.swift; sourceTree = "<group>"; };
+		AD7B60CE85D0A74510637453 /* MusicDownloadInfrastructure.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicDownloadInfrastructure.swift; sourceTree = "<group>"; };
+		ADAAEF4C7444BE7B5DDF6F12 /* LiveListenTogetherService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveListenTogetherService.swift; sourceTree = "<group>"; };
+		AF254F5238DC5B751A6FC972 /* IOSAppContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSAppContainer.swift; sourceTree = "<group>"; };
+		B55A20B7602A4008DA10D22B /* CachedAsyncImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CachedAsyncImage.swift; sourceTree = "<group>"; };
+		BAC83F4BBCE8A966F2F5E7DF /* MusicKnowledgeModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicKnowledgeModels.swift; sourceTree = "<group>"; };
+		BB7B3FF213685661E49A6430 /* IOSMediaView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSMediaView.swift; sourceTree = "<group>"; };
+		BD0C10A69517178261C50ABB /* LiveVideoLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveVideoLibrary.swift; sourceTree = "<group>"; };
+		C063509456ACD12606D4E83A /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		C0E6E339DA9FD24293B34FEE /* RecommendationMemoryModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecommendationMemoryModels.swift; sourceTree = "<group>"; };
+		C2337310BADC8D014C3F7432 /* MusicExtraModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicExtraModels.swift; sourceTree = "<group>"; };
+		C3260C177423B7167CF3E53A /* TrackCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackCache.swift; sourceTree = "<group>"; };
+		C6BB6CA23A8C784852235F85 /* SessionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionController.swift; sourceTree = "<group>"; };
+		D8067201BE5809EDD600F5F3 /* IOSRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSRootView.swift; sourceTree = "<group>"; };
+		D9DFAA355A76FE284925AF48 /* IOSDiscoverSearchComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSDiscoverSearchComponents.swift; sourceTree = "<group>"; };
+		DB395FBF5847CD269D0058A8 /* IOSDiscoverView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSDiscoverView.swift; sourceTree = "<group>"; };
+		DEE2DEF9F908A37745703032 /* Repository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Repository.swift; sourceTree = "<group>"; };
+		DF467F899931BC25B9E30526 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		E11ED35390DA90540E3ADA48 /* AudioUploadModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioUploadModels.swift; sourceTree = "<group>"; };
+		EBE61522065BE02E8A169371 /* PlayerController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerController.swift; sourceTree = "<group>"; };
+		EEB94E76E813273C24A452FC /* LiveMusicRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveMusicRepository.swift; sourceTree = "<group>"; };
+		EFB21EA5DA4A3A44E63D5256 /* LiveMusicRepository+Search.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LiveMusicRepository+Search.swift"; sourceTree = "<group>"; };
+		FBC221C3AF0638732AD98F89 /* IOSRouteDestinationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSRouteDestinationView.swift; sourceTree = "<group>"; };
+		FDD1E960A7373EC7A423CB40 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		FEFE65805CF3B802DDA9EC0A /* IOSAudioSessionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSAudioSessionCoordinator.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		9645FC454E6F5E40076DBF2E /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B3E8F5EDB19F023E6143516F /* Nuke in Frameworks */,
+				AAD8519E78FE2B61DCEB6730 /* NukeUI in Frameworks */,
+				34C0C2D2E6444C42D75331A2 /* libPods-TinyCloudMusicIOS.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D123FE78888F4F915FCE84B4 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AE8235F46F0116643E966581 /* libPods-TinyCloudMusicIOSTests.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		02CD04BB20E1111322286FA0 /* LibraryMedia */ = {
+			isa = PBXGroup;
+			children = (
+				A2B6B6B0D55E6628E56E99D0 /* IOSAccountView.swift */,
+				4FA5F49B9D869DDB09FCB305 /* IOSLibraryView.swift */,
+				BB7B3FF213685661E49A6430 /* IOSMediaView.swift */,
+			);
+			path = LibraryMedia;
+			sourceTree = "<group>";
+		};
+		0EDBD59F5F81FCF0B0E265D1 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				32EE937525F4155AA6442807 /* TinyCloudMusicIOS.app */,
+				95C03AD38023EDB8DDAC7BF4 /* TinyCloudMusicIOSTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		3EDF9DABED6A85FA7EFC3096 /* TCM */ = {
+			isa = PBXGroup;
+			children = (
+				9FED9B3D217BE47001E23B78 /* Sources */,
+			);
+			name = TCM;
+			path = ..;
+			sourceTree = "<group>";
+		};
+		4476699E68FC70D3473E5C66 /* DiscoverSearch */ = {
+			isa = PBXGroup;
+			children = (
+				D9DFAA355A76FE284925AF48 /* IOSDiscoverSearchComponents.swift */,
+				DB395FBF5847CD269D0058A8 /* IOSDiscoverView.swift */,
+				FBC221C3AF0638732AD98F89 /* IOSRouteDestinationView.swift */,
+				695DC6210BA2F0C628B58D1D /* IOSSearchView.swift */,
+			);
+			path = DiscoverSearch;
+			sourceTree = "<group>";
+		};
+		464A993CF3DEEED8CB65FFB4 = {
+			isa = PBXGroup;
+			children = (
+				3EDF9DABED6A85FA7EFC3096 /* TCM */,
+				8E05F36353C445DD25094477 /* TinyCloudMusicIOS */,
+				90EE86D72D1846D1056D7D32 /* TinyCloudMusicIOSTests */,
+				0EDBD59F5F81FCF0B0E265D1 /* Products */,
+				E12B842680C7A037BFB161C3 /* Pods */,
+				F8EC4DFC6D1C048D1FC4B3BB /* Frameworks */,
+			);
+			sourceTree = "<group>";
+		};
+		4A3268EF695DCDD0AD279278 /* SharedMacCore */ = {
+			isa = PBXGroup;
+			children = (
+				A237EC957CF4DD05CA5432F7 /* AudioContentModels.swift */,
+				9BF4BF0FEE0DA85EB4FE55EF /* AudioUploadAPI.swift */,
+				64F3B089CD0A00C67557DB59 /* AudioUploadManager.swift */,
+				B55A20B7602A4008DA10D22B /* CachedAsyncImage.swift */,
+				7CD4FB58B5B9526984D1B6E9 /* CloudMusicModels.swift */,
+				7F5E4BE3212DD8BCFAFD63F4 /* CredentialSnapshot.swift */,
+				3E77773A594A0ABC6DA160CD /* CredentialStore.swift */,
+				A4D96D716B47E3003D0C8C4D /* EAPITransport.swift */,
+				79F46CEA114070817ADA5BF7 /* ListeningReportModels.swift */,
+				131754CA788F84A1CC9CEB58 /* ListenTogetherController.swift */,
+				75CC1222F7DA1CFA4769B308 /* ListenTogetherModels.swift */,
+				2CF166DB64A3EDA4503C3CAC /* LiveAudioContentLibrary.swift */,
+				ADAAEF4C7444BE7B5DDF6F12 /* LiveListenTogetherService.swift */,
+				32EFE6999AC9C6004340FEB7 /* LiveMusicExtras.swift */,
+				0F1E719FE9A130466E96EF5D /* LiveMusicKnowledgeLibrary.swift */,
+				075D7D73F642BC9113F159A1 /* LiveMusicLibrary.swift */,
+				EEB94E76E813273C24A452FC /* LiveMusicRepository.swift */,
+				49C3EE25EF9BEF053E397CF3 /* LiveMusicRepository+Detail.swift */,
+				85BC36F28342F90DAAADB142 /* LiveMusicRepository+Home.swift */,
+				EFB21EA5DA4A3A44E63D5256 /* LiveMusicRepository+Search.swift */,
+				BD0C10A69517178261C50ABB /* LiveVideoLibrary.swift */,
+				DF467F899931BC25B9E30526 /* Models.swift */,
+				3CDACFD7BBE0E9B63D8686FB /* MusicDownload.swift */,
+				1BB9A166E20088DE5F66ACEA /* MusicDownloadModels.swift */,
+				6FB1250789EBAE48D3A9FEA6 /* MusicDownloadTransfer.swift */,
+				C2337310BADC8D014C3F7432 /* MusicExtraModels.swift */,
+				BAC83F4BBCE8A966F2F5E7DF /* MusicKnowledgeModels.swift */,
+				3323AA59FAFC8C3D1412056C /* MusicLibraryModels.swift */,
+				381D3300ADCA3C28DF273F33 /* MusicSheetWorker.swift */,
+				EBE61522065BE02E8A169371 /* PlayerController.swift */,
+				8D3285AFCC2620384C636F99 /* PlaylistImageUpload.swift */,
+				C0E6E339DA9FD24293B34FEE /* RecommendationMemoryModels.swift */,
+				DEE2DEF9F908A37745703032 /* Repository.swift */,
+				C6BB6CA23A8C784852235F85 /* SessionController.swift */,
+				C3260C177423B7167CF3E53A /* TrackCache.swift */,
+				77086C91CC40976609CB58CB /* VideoDownload.swift */,
+				3220A3504BAE1C77E7EA3E21 /* VideoModels.swift */,
+			);
+			name = SharedMacCore;
+			path = TinyCloudMusic;
+			sourceTree = "<group>";
+		};
+		6325E0C6FDDC27855171B6FA /* Platform */ = {
+			isa = PBXGroup;
+			children = (
+				FEFE65805CF3B802DDA9EC0A /* IOSAudioSessionCoordinator.swift */,
+				432E2D525543D0C9A46E8073 /* IOSNIMChatroomTransport.swift */,
+			);
+			path = Platform;
+			sourceTree = "<group>";
+		};
+		7F3A1DC4FC808DB14634DC1B /* SharedOverrides */ = {
+			isa = PBXGroup;
+			children = (
+				C063509456ACD12606D4E83A /* AppModel.swift */,
+				E11ED35390DA90540E3ADA48 /* AudioUploadModels.swift */,
+				AD7B60CE85D0A74510637453 /* MusicDownloadInfrastructure.swift */,
+				237372F2DC585A7BA88E44F1 /* NOSAudioUpload.swift */,
+				A16360F86C183F2146604B2E /* PersonalFMController.swift */,
+			);
+			path = SharedOverrides;
+			sourceTree = "<group>";
+		};
+		8C80F799F4820ED604E0329A /* Player */ = {
+			isa = PBXGroup;
+			children = (
+				6675A8EF2F3C82496758DD84 /* IOSDesignSupport.swift */,
+				4CD995D8ED966457940EA9B5 /* IOSListenTogetherView.swift */,
+				5799816B2706A6EB0C34D0ED /* IOSPlayerViews.swift */,
+			);
+			path = Player;
+			sourceTree = "<group>";
+		};
+		8E05F36353C445DD25094477 /* TinyCloudMusicIOS */ = {
+			isa = PBXGroup;
+			children = (
+				FDD1E960A7373EC7A423CB40 /* Assets.xcassets */,
+				1FC5C1687718827203B94330 /* Info.plist */,
+				962C3DF5323669C9D6DE46BA /* App */,
+				6325E0C6FDDC27855171B6FA /* Platform */,
+				7F3A1DC4FC808DB14634DC1B /* SharedOverrides */,
+				C4ACAA8502D7C080D41CB385 /* UI */,
+			);
+			path = TinyCloudMusicIOS;
+			sourceTree = "<group>";
+		};
+		90EE86D72D1846D1056D7D32 /* TinyCloudMusicIOSTests */ = {
+			isa = PBXGroup;
+			children = (
+				5D5C1407CB9804F81F886FBB /* IOSNavigationTests.swift */,
+			);
+			path = TinyCloudMusicIOSTests;
+			sourceTree = "<group>";
+		};
+		962C3DF5323669C9D6DE46BA /* App */ = {
+			isa = PBXGroup;
+			children = (
+				AF254F5238DC5B751A6FC972 /* IOSAppContainer.swift */,
+				52FDB14ADF7EFB9477DBB2CD /* LibrarySnapshot.swift */,
+				817A82FA72F351D7EF4B0327 /* TinyCloudMusicIOSApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		9FED9B3D217BE47001E23B78 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				4A3268EF695DCDD0AD279278 /* SharedMacCore */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		C4ACAA8502D7C080D41CB385 /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				D8067201BE5809EDD600F5F3 /* IOSRootView.swift */,
+				4476699E68FC70D3473E5C66 /* DiscoverSearch */,
+				02CD04BB20E1111322286FA0 /* LibraryMedia */,
+				8C80F799F4820ED604E0329A /* Player */,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
+		E12B842680C7A037BFB161C3 /* Pods */ = {
+			isa = PBXGroup;
+			children = (
+				573EFF8698DCF3F6BF07524A /* Pods-TinyCloudMusicIOS.debug.xcconfig */,
+				524DD481C7722616CC8DA31F /* Pods-TinyCloudMusicIOS.release.xcconfig */,
+				8BFE26FFCD9EB37B5CAB5AFC /* Pods-TinyCloudMusicIOSTests.debug.xcconfig */,
+				047755E7DA16B4E1A06C6072 /* Pods-TinyCloudMusicIOSTests.release.xcconfig */,
+			);
+			name = Pods;
+			path = Pods;
+			sourceTree = "<group>";
+		};
+		F8EC4DFC6D1C048D1FC4B3BB /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				310A278EE3BC9CB45CA83168 /* libPods-TinyCloudMusicIOS.a */,
+				2AC30922AA730D1D47EB4160 /* libPods-TinyCloudMusicIOSTests.a */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		803717A5DA9F49650966F3DD /* TinyCloudMusicIOSTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 6E809462CDE382AE97ED739A /* Build configuration list for PBXNativeTarget "TinyCloudMusicIOSTests" */;
+			buildPhases = (
+				B5E1FF0198AC4C548AA51536 /* [CP] Check Pods Manifest.lock */,
+				B1FB29A7A95563E5377BAB7E /* Sources */,
+				D123FE78888F4F915FCE84B4 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				BABE9EC4834B4D5A3CCA9C05 /* PBXTargetDependency */,
+			);
+			name = TinyCloudMusicIOSTests;
+			productName = TinyCloudMusicIOSTests;
+			productReference = 95C03AD38023EDB8DDAC7BF4 /* TinyCloudMusicIOSTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		8AE4333BAB553492A05A6656 /* TinyCloudMusicIOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 2D24C572247F8974A0285987 /* Build configuration list for PBXNativeTarget "TinyCloudMusicIOS" */;
+			buildPhases = (
+				4B40D7A37DBBC2A6030AD985 /* [CP] Check Pods Manifest.lock */,
+				515966E73E57C3F3DD29E149 /* Sources */,
+				D2DA0299262CC663DA9EA957 /* Resources */,
+				9645FC454E6F5E40076DBF2E /* Frameworks */,
+				B92449DD2F99124BFC91D49A /* [CP] Embed Pods Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = TinyCloudMusicIOS;
+			packageProductDependencies = (
+				76D1B0117082AEC1BB879291 /* Nuke */,
+				78EBDD1389378FD4B9732828 /* NukeUI */,
+			);
+			productName = TinyCloudMusicIOS;
+			productReference = 32EE937525F4155AA6442807 /* TinyCloudMusicIOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		0695D08F1ECF5FBAEF97A7F0 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					803717A5DA9F49650966F3DD = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+					8AE4333BAB553492A05A6656 = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = A0BE925E6847FD3F379D12FC /* Build configuration list for PBXProject "TinyCloudMusicIOS" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 464A993CF3DEEED8CB65FFB4;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				3835EFED639457E1A73A5A5F /* XCRemoteSwiftPackageReference "Nuke" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 0EDBD59F5F81FCF0B0E265D1 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				8AE4333BAB553492A05A6656 /* TinyCloudMusicIOS */,
+				803717A5DA9F49650966F3DD /* TinyCloudMusicIOSTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		D2DA0299262CC663DA9EA957 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E7DCB6F2C51EDDF1FA8C1A50 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		4B40D7A37DBBC2A6030AD985 /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-TinyCloudMusicIOS-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+		B5E1FF0198AC4C548AA51536 /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-TinyCloudMusicIOSTests-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+		B92449DD2F99124BFC91D49A /* [CP] Embed Pods Frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-TinyCloudMusicIOS/Pods-TinyCloudMusicIOS-frameworks-${CONFIGURATION}-input-files.xcfilelist",
+			);
+			name = "[CP] Embed Pods Frameworks";
+			outputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-TinyCloudMusicIOS/Pods-TinyCloudMusicIOS-frameworks-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-TinyCloudMusicIOS/Pods-TinyCloudMusicIOS-frameworks.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		515966E73E57C3F3DD29E149 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CB4D6FE6B826DE5224023ABF /* AppModel.swift in Sources */,
+				F28A43C4A74A001E8D176751 /* AudioContentModels.swift in Sources */,
+				86DFD8BD0760C947026D956B /* AudioUploadAPI.swift in Sources */,
+				D838C02B0D48321368D2197B /* AudioUploadManager.swift in Sources */,
+				2216036393CD11182A2CBA1F /* AudioUploadModels.swift in Sources */,
+				CE15CAB30F8D89559C9D3CD5 /* CachedAsyncImage.swift in Sources */,
+				E2DD81D07999535C9E79D3E8 /* CloudMusicModels.swift in Sources */,
+				AAF1BB879D5A079E7C501239 /* CredentialSnapshot.swift in Sources */,
+				69EC769172362D506AA45894 /* CredentialStore.swift in Sources */,
+				564CA5A6CE8E4B4FE00F9FEF /* EAPITransport.swift in Sources */,
+				B8C9DB7D3FC65A0F6C9B5BDC /* IOSAccountView.swift in Sources */,
+				05BF70C216332FCED9A46713 /* IOSAppContainer.swift in Sources */,
+				4171C1B9BE4BCD837CD47F7D /* IOSAudioSessionCoordinator.swift in Sources */,
+				154B9174344C923A84D10A80 /* IOSDesignSupport.swift in Sources */,
+				7384BA700E0285C9D32FDE57 /* IOSDiscoverSearchComponents.swift in Sources */,
+				04E5C8D1273370F3FEC0EEF5 /* IOSDiscoverView.swift in Sources */,
+				8F6976BD4D4140CBCD38C725 /* IOSLibraryView.swift in Sources */,
+				1D49C270EF7C10512C55C7A1 /* IOSListenTogetherView.swift in Sources */,
+				162EE889620A2658573339B3 /* IOSMediaView.swift in Sources */,
+				F5BF8A3DD83A309C5B228D7A /* IOSNIMChatroomTransport.swift in Sources */,
+				E219EA5E54266B539E0C7100 /* IOSPlayerViews.swift in Sources */,
+				1D1D2FEDAD47751382571F0A /* IOSRootView.swift in Sources */,
+				B58916B2EE0F14DDD876657D /* IOSRouteDestinationView.swift in Sources */,
+				FEDE83731D6017744F78DF0D /* IOSSearchView.swift in Sources */,
+				F57764D7E788EE0F91EBB3C1 /* LibrarySnapshot.swift in Sources */,
+				581E055FD05DB72267AE1B19 /* ListenTogetherController.swift in Sources */,
+				06741B1BD4AE9E4E13F409A1 /* ListenTogetherModels.swift in Sources */,
+				4D040245E33729C171924120 /* ListeningReportModels.swift in Sources */,
+				13E887B4D6474F719741AA3C /* LiveAudioContentLibrary.swift in Sources */,
+				0BE724755778EB1EAADDBD90 /* LiveListenTogetherService.swift in Sources */,
+				763DE3E174D0573ADFE3FDA2 /* LiveMusicExtras.swift in Sources */,
+				44F9646374C4197E56B5C295 /* LiveMusicKnowledgeLibrary.swift in Sources */,
+				401DB0E7AAAE993580F8BF9B /* LiveMusicLibrary.swift in Sources */,
+				6C199CFB7127A7A88ACE6E0B /* LiveMusicRepository+Detail.swift in Sources */,
+				723B044DC6B723EC603F5497 /* LiveMusicRepository+Home.swift in Sources */,
+				7061586EA0B507FEA73E2676 /* LiveMusicRepository+Search.swift in Sources */,
+				DA4EB4AF36BB0F8FCDB6A584 /* LiveMusicRepository.swift in Sources */,
+				744C7CD96E03902B0ACA0E36 /* LiveVideoLibrary.swift in Sources */,
+				D35BF6A6857164E915A0F884 /* Models.swift in Sources */,
+				A5424C1B7191AD423464C0D6 /* MusicDownload.swift in Sources */,
+				025004862D782EF2B092A60D /* MusicDownloadInfrastructure.swift in Sources */,
+				8CD84862213E30E8DF010851 /* MusicDownloadModels.swift in Sources */,
+				8AA2092D9E249F8908AC558D /* MusicDownloadTransfer.swift in Sources */,
+				A83E4F4BD63FA70ACEBDE9EF /* MusicExtraModels.swift in Sources */,
+				94953A8429EC78635464B12A /* MusicKnowledgeModels.swift in Sources */,
+				415C2ABBC9AC26E0D1B951C3 /* MusicLibraryModels.swift in Sources */,
+				9E9A2DF31BAA350F5384C81F /* MusicSheetWorker.swift in Sources */,
+				9B9345F5DCD64A13E06FF0C7 /* NOSAudioUpload.swift in Sources */,
+				7B660B2912B1826FE73BE8BD /* PersonalFMController.swift in Sources */,
+				EBEF54533323A1FFB5BC568B /* PlayerController.swift in Sources */,
+				D909AE3DCCD81B6B81DBA3B0 /* PlaylistImageUpload.swift in Sources */,
+				798FE26914C2EB6BB1223230 /* RecommendationMemoryModels.swift in Sources */,
+				D1D559ED90A4AC4DB09A3EF6 /* Repository.swift in Sources */,
+				FB0BE65F88E4ACF0A2086E09 /* SessionController.swift in Sources */,
+				C4849C05435523B2E3B1CBB6 /* TinyCloudMusicIOSApp.swift in Sources */,
+				EE5413CAED6B84501C3DD730 /* TrackCache.swift in Sources */,
+				48C31D9D8D1AB515C31A4438 /* VideoDownload.swift in Sources */,
+				7FB780EA31E82BC8BBB428A8 /* VideoModels.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B1FB29A7A95563E5377BAB7E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0FDF2A159E8247F9AC8D8686 /* IOSNavigationTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		BABE9EC4834B4D5A3CCA9C05 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 8AE4333BAB553492A05A6656 /* TinyCloudMusicIOS */;
+			targetProxy = 08A4AE8FA87B744F9D94AEFA /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		014DBE81A29563E21602238C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 573EFF8698DCF3F6BF07524A /* Pods-TinyCloudMusicIOS.debug.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				INFOPLIST_FILE = TinyCloudMusicIOS/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.tinycloudmusic.app.ios;
+				PRODUCT_MODULE_NAME = TinyCloudMusic;
+				PRODUCT_NAME = TinyCloudMusic;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		215F70008A492128656B1BFC /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 8BFE26FFCD9EB37B5CAB5AFC /* Pods-TinyCloudMusicIOSTests.debug.xcconfig */;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.tinycloudmusic.app.ios.tests;
+				SDKROOT = iphoneos;
+				SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TinyCloudMusic.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TinyCloudMusic";
+			};
+			name = Debug;
+		};
+		4AE992E639F22814312AFB50 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		59E9EDD0FAC1150C7E4BCA0A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		861CC99EF817057A90B2FE65 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 047755E7DA16B4E1A06C6072 /* Pods-TinyCloudMusicIOSTests.release.xcconfig */;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.tinycloudmusic.app.ios.tests;
+				SDKROOT = iphoneos;
+				SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TinyCloudMusic.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TinyCloudMusic";
+			};
+			name = Release;
+		};
+		ED0EB6AB0AEEF4A5163B4B89 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 524DD481C7722616CC8DA31F /* Pods-TinyCloudMusicIOS.release.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				INFOPLIST_FILE = TinyCloudMusicIOS/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.tinycloudmusic.app.ios;
+				PRODUCT_MODULE_NAME = TinyCloudMusic;
+				PRODUCT_NAME = TinyCloudMusic;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		2D24C572247F8974A0285987 /* Build configuration list for PBXNativeTarget "TinyCloudMusicIOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				014DBE81A29563E21602238C /* Debug */,
+				ED0EB6AB0AEEF4A5163B4B89 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		6E809462CDE382AE97ED739A /* Build configuration list for PBXNativeTarget "TinyCloudMusicIOSTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				215F70008A492128656B1BFC /* Debug */,
+				861CC99EF817057A90B2FE65 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A0BE925E6847FD3F379D12FC /* Build configuration list for PBXProject "TinyCloudMusicIOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4AE992E639F22814312AFB50 /* Debug */,
+				59E9EDD0FAC1150C7E4BCA0A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		3835EFED639457E1A73A5A5F /* XCRemoteSwiftPackageReference "Nuke" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/kean/Nuke.git";
+			requirement = {
+				kind = exactVersion;
+				version = 13.0.6;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		76D1B0117082AEC1BB879291 /* Nuke */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3835EFED639457E1A73A5A5F /* XCRemoteSwiftPackageReference "Nuke" */;
+			productName = Nuke;
+		};
+		78EBDD1389378FD4B9732828 /* NukeUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3835EFED639457E1A73A5A5F /* XCRemoteSwiftPackageReference "Nuke" */;
+			productName = NukeUI;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 0695D08F1ECF5FBAEF97A7F0 /* Project object */;
+}
