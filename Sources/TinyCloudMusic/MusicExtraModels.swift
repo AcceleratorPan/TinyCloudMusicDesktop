@@ -28,7 +28,7 @@ struct SearchDirectMatch: Identifiable, Equatable, Sendable {
 }
 
 struct MusicPlaylistPage: Equatable, Sendable {
-    let playlists: [MusicLibraryPlaylist]
+    let playlists: [Playlist]
     let offset: Int
     let hasMore: Bool
 }

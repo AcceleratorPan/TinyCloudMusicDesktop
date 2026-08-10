@@ -327,37 +327,10 @@ private struct IOSNowPlayingArtworkPage: View {
 
 struct IOSPlaybackControls: View {
     @Bindable var player: PlayerController
-    @State private var isScrubbing = false
-    @State private var scrubPosition: TimeInterval = 0
 
     var body: some View {
         VStack(spacing: 10) {
-            Slider(
-                value: Binding(
-                    get: { isScrubbing ? scrubPosition : player.position },
-                    set: { scrubPosition = $0 }
-                ),
-                in: 0...max(player.duration, 1),
-                onEditingChanged: { editing in
-                    if editing {
-                        scrubPosition = player.position
-                        isScrubbing = true
-                    } else {
-                        player.seek(to: scrubPosition)
-                        isScrubbing = false
-                    }
-                }
-            )
-            .disabled(player.currentSong == nil)
-            .accessibilityLabel("播放进度")
-
-            HStack {
-                Text(IOSDurationText.format(isScrubbing ? scrubPosition : player.position))
-                Spacer()
-                Text(IOSDurationText.format(player.duration))
-            }
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(.secondary)
+            IOSPlaybackProgress(player: player)
 
             HStack(spacing: 10) {
                 Button {
@@ -420,6 +393,43 @@ struct IOSPlaybackControls: View {
                 ) { player.cycleRepeatMode() }
             }
             .disabled(player.isControlInteractionLocked)
+        }
+    }
+}
+
+private struct IOSPlaybackProgress: View {
+    @Bindable var player: PlayerController
+    @State private var isScrubbing = false
+    @State private var scrubPosition: TimeInterval = 0
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Slider(
+                value: Binding(
+                    get: { isScrubbing ? scrubPosition : player.position },
+                    set: { scrubPosition = $0 }
+                ),
+                in: 0...max(player.duration, 1),
+                onEditingChanged: { editing in
+                    if editing {
+                        scrubPosition = player.position
+                        isScrubbing = true
+                    } else {
+                        player.seek(to: scrubPosition)
+                        isScrubbing = false
+                    }
+                }
+            )
+            .disabled(player.currentSong == nil)
+            .accessibilityLabel("播放进度")
+
+            HStack {
+                Text(IOSDurationText.format(isScrubbing ? scrubPosition : player.position))
+                Spacer()
+                Text(IOSDurationText.format(player.duration))
+            }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
         }
     }
 }
@@ -634,12 +644,18 @@ private struct IOSLyricsView: View {
                         ContentUnavailableView("暂无歌词", systemImage: "quote.bubble")
                     } else {
                         ForEach(Array(player.lyrics.enumerated()), id: \.element.id) { index, line in
+                            let isCurrent = index == player.currentLyricIndex
                             Button {
                                 player.seek(to: TimeInterval(line.timestampMilliseconds) / 1_000)
                             } label: {
                                 VStack(alignment: .leading, spacing: 5) {
-                                    primaryLyric(line, isCurrent: index == player.currentLyricIndex)
-                                        .font(index == player.currentLyricIndex ? .title3.weight(.bold) : .body)
+                                    IOSPrimaryLyric(
+                                        player: player,
+                                        line: line,
+                                        isCurrent: isCurrent,
+                                        reduceMotion: reduceMotion
+                                    )
+                                    .font(isCurrent ? .title3.weight(.bold) : .body)
                                     if let translation = line.translation, !translation.isEmpty {
                                         Text(translation).font(.subheadline)
                                     }
@@ -647,7 +663,7 @@ private struct IOSLyricsView: View {
                                         Text(romanization).font(.caption)
                                     }
                                 }
-                                .foregroundStyle(index == player.currentLyricIndex ? Color.primary : Color.secondary)
+                                .foregroundStyle(isCurrent ? Color.primary : Color.secondary)
                                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                                 .contentShape(Rectangle())
                             }
@@ -671,9 +687,15 @@ private struct IOSLyricsView: View {
             }
         }
     }
+}
 
-    @ViewBuilder
-    private func primaryLyric(_ line: LyricLine, isCurrent: Bool) -> some View {
+private struct IOSPrimaryLyric: View {
+    @Bindable var player: PlayerController
+    let line: LyricLine
+    let isCurrent: Bool
+    let reduceMotion: Bool
+
+    @ViewBuilder var body: some View {
         if line.words.isEmpty {
             Text(line.text.isEmpty ? "…" : line.text)
         } else {
@@ -692,11 +714,11 @@ private struct IOSLyricsView: View {
     }
 }
 
-private struct IOSLyricFillStyle: @MainActor AnimatableModifier {
+private struct IOSLyricFillStyle: AnimatableModifier {
     let isCurrent: Bool
     var progress: Double
 
-    var animatableData: Double {
+    nonisolated var animatableData: Double {
         get { progress }
         set { progress = newValue }
     }

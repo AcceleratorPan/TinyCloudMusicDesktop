@@ -257,7 +257,8 @@ private final class AppModelAccountReadRepository: MusicRepository, @unchecked S
                 signature: "",
                 artwork: Artwork(symbol: "person.crop.circle", accent: .blue)
             ),
-            playlists: []
+            playlists: [],
+            hasMore: false
         )
     }
 

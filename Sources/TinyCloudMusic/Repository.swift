@@ -263,7 +263,7 @@ struct FixtureMusicRepository: MusicRepository {
             return .playlist(playlist, songs: songs, trackIDs: songs.map(\.id), loadedTrackCount: songs.count)
         case let .user(id):
             guard let user = Fixture.users.first(where: { $0.id == id }) else { throw AppError.invalidRoute }
-            return .user(user, playlists: Array(Fixture.playlists.prefix(3)))
+            return .user(user, playlists: Array(Fixture.playlists.prefix(3)), hasMore: false)
         case .home, .search, .cloudMusic, .comments, .similarSongs, .recommendationHistory, .listeningFootprints,
              .mv, .video, .podcast, .podcastEpisode, .broadcast, .podcastSubscriptions,
              .musicStyles, .musicStyle:

@@ -439,12 +439,17 @@ enum DetailContent: Equatable, Sendable {
     case artist(Artist, songs: [Song])
     case album(Album, songs: [Song])
     case playlist(Playlist, songs: [Song], trackIDs: [Int64], loadedTrackCount: Int)
-    case user(UserProfile, playlists: [Playlist])
+    case user(UserProfile, playlists: [Playlist], hasMore: Bool)
 }
 
 enum PlaylistSongPaging {
+#if os(iOS)
+    static let initialCount = 50
+    static let pageCount = 50
+#else
     static let initialCount = 200
     static let pageCount = 100
+#endif
 
     static func initialRange(total: Int) -> Range<Int> {
         0..<min(initialCount, max(0, total))

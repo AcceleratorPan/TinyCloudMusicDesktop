@@ -75,7 +75,6 @@ private struct ResolvedFolders: Sendable {
     let video: URL?
     let image: URL?
     let sheet: URL?
-    let cache: URL?
 }
 
 private actor ArtworkFileWriter {
@@ -107,6 +106,7 @@ final class AppModel {
         didSet { discardInactiveDetails() }
     }
     var homeSlots: [HomeSlot] = []
+    private(set) var homeLoadRevision = 0
     var searchState = SearchState()
     var searchLoad: SearchLoad = .idle
     var isSearchLoadingMore = false
@@ -134,7 +134,6 @@ final class AppModel {
     private(set) var pendingMutations: Set<LibraryMutationKey> = []
     private var podcastSubscriptionOverrides: [Int64: Bool] = [:]
     private(set) var podcastSubscriptionRevision: UInt64 = 0
-    private(set) var cacheConfigurationRevision: UInt64 = 0
     var broadcastCollectionOverrides: [String: Bool] = [:]
     var currentUserID: Int64? {
         didSet {
@@ -180,6 +179,7 @@ final class AppModel {
     @ObservationIgnored private var detailGenerations: [Route: Int] = [:]
     @ObservationIgnored private var homeCache: [String: HomeSection] = [:]
     @ObservationIgnored private var homeTasks: [String: HomeTaskEntry] = [:]
+    @ObservationIgnored private var pendingHomeSectionIDs: Set<String> = []
     @ObservationIgnored private var detailCache: [Route: DetailCacheEntry] = [:]
     @ObservationIgnored private var staleDetailRoutes: Set<Route> = []
     @ObservationIgnored private var cachedPlaylistRevision = -1
@@ -202,7 +202,6 @@ final class AppModel {
     @ObservationIgnored private var resolvedVideoDownloadFolder: URL?
     @ObservationIgnored private var resolvedImageFolder: URL?
     @ObservationIgnored private var resolvedSheetFolder: URL?
-    @ObservationIgnored private var resolvedCacheFolder: URL?
     @ObservationIgnored private var bookmarkResolveTask: Task<Void, Never>?
     @ObservationIgnored private var bookmarkGeneration = 0
     @ObservationIgnored private let downloadCacheConfigurator: @MainActor (URL) -> Void
@@ -270,8 +269,9 @@ final class AppModel {
             videoDownloadBookmark: defaults.data(forKey: "videoDownloadBookmark"),
             imageBookmark: defaults.data(forKey: "imageBookmark"),
             sheetBookmark: defaults.data(forKey: "sheetBookmark"),
-            cacheBookmark: defaults.data(forKey: "cacheBookmark")
+            cacheBookmark: nil
         )
+        defaults.removeObject(forKey: "cacheBookmark")
         downloads?.setMaximumConcurrentDownloads(settings.downloadConcurrency)
         self.downloadCacheConfigurator(cacheFolderURL.standardizedFileURL)
         rebuildHomeSlots()
@@ -295,21 +295,28 @@ final class AppModel {
 
     func loadHome() {
         homeGeneration += 1
-        let generation = homeGeneration
         homeTasks.values.forEach { $0.task.cancel() }
         homeTasks.removeAll()
+        pendingHomeSectionIDs = Set(settings.homeSectionIDs)
         rebuildHomeSlots(load: .loading)
         ArtworkPipeline.shared.retryFailedImages()
+        homeLoadRevision &+= 1
+    }
 
-        for slot in homeSlots {
-            startHomeTask(id: slot.id, generation: generation)
-        }
+    func loadHomeSectionIfNeeded(id: String) {
+        guard pendingHomeSectionIDs.contains(id),
+              homeTasks[id] == nil,
+              homeSlots.contains(where: { $0.id == id })
+        else { return }
+        if homeCache[id] == nil { updateHomeSlot(id: id, load: .loading) }
+        startHomeTask(id: id, generation: homeGeneration)
     }
 
     func retryHomeSection(id: String) {
         guard homeSlots.contains(where: { $0.id == id }) else { return }
         let generation = homeGeneration
         homeTasks[id]?.task.cancel()
+        pendingHomeSectionIDs.insert(id)
         updateHomeSlot(id: id, load: .loading)
         ArtworkPipeline.shared.retryFailedImages()
         startHomeTask(id: id, generation: generation)
@@ -441,7 +448,14 @@ final class AppModel {
         search(offset: 0)
     }
 
-    func refreshAccountState() async {
+    func refreshAccountState(whenAccountReady: @MainActor () -> Void = {}) async {
+        var didNotifyAccountReady = false
+        func notifyAccountReady() {
+            guard !didNotifyAccountReady else { return }
+            didNotifyAccountReady = true
+            whenAccountReady()
+        }
+        defer { notifyAccountReady() }
         guard let library else { return }
         defer {
             invalidateAccountDomainIfNeeded(
@@ -459,6 +473,7 @@ final class AppModel {
                 guard accountRefreshGeneration == generation else { return }
                 _ = resetAccountScopedState(userID: nil, credentialRevision: nil)
             }
+            notifyAccountReady()
             return
         }
         do {
@@ -477,6 +492,7 @@ final class AppModel {
                 } else {
                     likedSongIDs = []
                 }
+                notifyAccountReady()
                 return
             }
             if currentUserID != user.id || accountCredentialRevision != credentialRevision {
@@ -489,6 +505,7 @@ final class AppModel {
                     credentialRevision: credentialRevision
                 )
             }
+            notifyAccountReady()
             let playlists = try await accountPlaylists(
                 userID: user.id,
                 credentialRevision: credentialRevision
@@ -973,6 +990,7 @@ final class AppModel {
         playlistLoadMoreTaskIDs = playlistLoadMoreTaskIDs.filter { activePlaylistIDs.contains($0.key) }
         loadingPlaylistIDs.formIntersection(activePlaylistIDs)
         playlistLoadMoreErrors = playlistLoadMoreErrors.filter { activePlaylistIDs.contains($0.key) }
+        detailLoads = detailLoads.filter { activeRoutes.contains($0.key) || detailCache[$0.key] != nil }
     }
 
     func setAppearance(_ appearance: Appearance) {
@@ -1038,12 +1056,13 @@ final class AppModel {
         showToast("首页栏目已更新")
         if enabled {
             let title = homeDescriptors.first(where: { $0.id == id })?.title ?? id
-            homeSlots.append(HomeSlot(id: id, title: title, load: .loading))
+            homeSlots.append(HomeSlot(id: id, title: title, load: .idle))
             homeSlots.sort { descriptorIndex($0.id) < descriptorIndex($1.id) }
-            startHomeTask(id: id, generation: homeGeneration)
+            if homeLoadRevision > 0 { pendingHomeSectionIDs.insert(id) }
         } else {
             homeTasks[id]?.task.cancel()
             homeTasks[id] = nil
+            pendingHomeSectionIDs.remove(id)
             homeCache[id] = nil
             homeSlots.removeAll { $0.id == id }
         }
@@ -1075,30 +1094,6 @@ final class AppModel {
         } catch {
             settingsMessage = "无法保存视频下载目录权限"
         }
-    }
-
-    func setCacheFolder(_ url: URL) {
-        do {
-            let bookmark = try folderBookmark(for: url)
-            settings.cacheBookmark = bookmark
-            defaults.set(bookmark, forKey: "cacheBookmark")
-            commitCacheFolder(url)
-            restoreBookmarkedFolders()
-            settingsMessage = nil
-            showToast("缓存位置已保存")
-        } catch {
-            settingsMessage = "无法保存缓存目录权限"
-        }
-    }
-
-    func clearCacheFolder() {
-        guard settings.cacheBookmark != nil || resolvedCacheFolder != nil else { return }
-        settings.cacheBookmark = nil
-        defaults.removeObject(forKey: "cacheBookmark")
-        commitCacheFolder(nil)
-        restoreBookmarkedFolders()
-        settingsMessage = nil
-        showToast("缓存位置已恢复默认")
     }
 
     func setImageFolder(_ url: URL) {
@@ -1461,12 +1456,8 @@ final class AppModel {
         sheetFolderURL.path(percentEncoded: false)
     }
 
-    var cachePath: String {
-        cacheFolderURL.path(percentEncoded: false)
-    }
-
     var cacheFolderURL: URL {
-        resolvedCacheFolder ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appending(path: "TinyCloudMusic", directoryHint: .isDirectory)
     }
 
@@ -1591,6 +1582,7 @@ final class AppModel {
     private func finishHomeTask(id: String, taskID: UUID) {
         guard homeTasks[id]?.id == taskID else { return }
         homeTasks[id] = nil
+        pendingHomeSectionIDs.remove(id)
     }
 
     private func storeSearchHints(_ values: [String], for key: String) {
@@ -1609,10 +1601,11 @@ final class AppModel {
     private func storeDetail(_ content: DetailContent, for route: Route) {
         let now = Date()
         detailCache[route] = DetailCacheEntry(content: content, loadedAt: now, lastAccess: now)
-        guard detailCache.count > 64,
+        guard detailCache.count > 12,
               let oldest = detailCache.min(by: { $0.value.lastAccess < $1.value.lastAccess })?.key
         else { return }
         detailCache[oldest] = nil
+        if !path.contains(oldest) { detailLoads[oldest] = nil }
     }
 
     private var cachedFavoritePlaylistID: Int64? {
@@ -1657,6 +1650,7 @@ final class AppModel {
         homeGeneration += 1
         homeTasks.values.forEach { $0.task.cancel() }
         homeTasks.removeAll()
+        pendingHomeSectionIDs.removeAll()
         homeCache.removeAll()
         rebuildHomeSlots()
 
@@ -1773,8 +1767,7 @@ final class AppModel {
             settings.downloadBookmark,
             settings.videoDownloadBookmark,
             settings.imageBookmark,
-            settings.sheetBookmark,
-            settings.cacheBookmark
+            settings.sheetBookmark
         )
         let resolver = bookmarkResolver
         bookmarkResolveTask = Task { @MainActor [weak self] in
@@ -1783,13 +1776,11 @@ final class AppModel {
                 let video = await resolver(bookmarks.1)
                 let image = await resolver(bookmarks.2)
                 let sheet = await resolver(bookmarks.3)
-                let cache = await resolver(bookmarks.4)
                 return ResolvedFolders(
                     download: download,
                     video: video,
                     image: image,
-                    sheet: sheet,
-                    cache: cache
+                    sheet: sheet
                 )
             }.value
             guard let self else { return }
@@ -1799,18 +1790,8 @@ final class AppModel {
             self.resolvedVideoDownloadFolder = resolved.video
             self.resolvedImageFolder = resolved.image
             self.resolvedSheetFolder = resolved.sheet
-            self.commitCacheFolder(resolved.cache)
             self.bookmarkResolveTask = nil
         }
-    }
-
-    private func commitCacheFolder(_ folder: URL?) {
-        let previousRoot = cacheFolderURL.standardizedFileURL
-        resolvedCacheFolder = folder?.standardizedFileURL
-        let root = cacheFolderURL.standardizedFileURL
-        guard root != previousRoot else { return }
-        downloadCacheConfigurator(root)
-        cacheConfigurationRevision &+= 1
     }
 
     nonisolated private static func resolveFolder(_ bookmark: Data?) -> URL? {

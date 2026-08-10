@@ -91,8 +91,13 @@ private struct IOSDetailContentView: View {
                         model: model,
                         player: player
                     )
-                case let .user(user, playlists):
-                    IOSUserDetail(user: user, playlists: playlists, model: model)
+                case let .user(user, playlists, hasMore):
+                    IOSUserDetail(
+                        user: user,
+                        playlists: playlists,
+                        initialPlaylistsHaveMore: hasMore,
+                        model: model
+                    )
                 }
             }
             .padding(.horizontal, 16)
@@ -121,6 +126,10 @@ private struct IOSArtistDetail: View {
     @Bindable var player: PlayerController
     @State private var section = IOSArtistDetailSection.songs
     @State private var albumsPhase: IOSDetailPhase<[MusicArtistAlbum]> = .loading
+    @State private var albumsPage: MusicArtistAlbumPage?
+    @State private var isLoadingMoreAlbums = false
+    @State private var albumsLoadMoreError: String?
+    @State private var albumsLoadGeneration = 0
     @State private var similarArtistsPhase: IOSDetailPhase<[MusicLibraryArtist]> = .loading
     @State private var albumsRetryID = 0
     @State private var similarArtistsRetryID = 0
@@ -138,7 +147,10 @@ private struct IOSArtistDetail: View {
                 circularArtwork: true,
                 saveArtwork: saveArtwork
             )
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 132), spacing: 8)], spacing: 8) {
+            LazyVGrid(
+                columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible())],
+                spacing: 8
+            ) {
                 if let first = songs.first {
                     IOSDetailActionButton(
                         title: "播放热门歌曲",
@@ -159,7 +171,7 @@ private struct IOSArtistDetail: View {
                     model.setArtistFollowed(artist.id, followed: !followed)
                 }
             }
-            .controlSize(.large)
+            .frame(maxWidth: 440, alignment: .leading)
 
             Picker("歌手详情", selection: $section) {
                 ForEach(IOSArtistDetailSection.allCases, id: \.self) { Text($0.rawValue).tag($0) }
@@ -187,7 +199,11 @@ private struct IOSArtistDetail: View {
                 emptyTitle: "暂无专辑",
                 emptySymbol: "square.stack",
                 phase: albumsPhase,
-                retry: { albumsRetryID += 1 }
+                retry: { albumsRetryID += 1 },
+                hasMore: albumsPage?.hasMore == true,
+                isLoadingMore: isLoadingMoreAlbums,
+                loadMoreError: albumsLoadMoreError,
+                loadMore: { Task { await loadMoreAlbums() } }
             ) { item in
                 IOSDetailNavigationRow(
                     title: item.album.name,
@@ -248,6 +264,9 @@ private struct IOSArtistDetail: View {
         if loadedArtistID != artist.id {
             loadedArtistID = artist.id
             albumsPhase = .loading
+            albumsPage = nil
+            albumsLoadMoreError = nil
+            albumsLoadGeneration &+= 1
             similarArtistsPhase = .loading
         }
         switch section {
@@ -261,16 +280,27 @@ private struct IOSArtistDetail: View {
             }
             albumsPhase = .loading
             let revision = extras.transport.credentialSnapshotValue().revision
+            albumsLoadGeneration &+= 1
+            let generation = albumsLoadGeneration
+            let artistID = artist.id
             do {
                 let page = try await extras.artistAlbums(
-                    artistID: artist.id,
+                    artistID: artistID,
                     expectedCredentialRevision: revision
                 )
                 try Task.checkCancellation()
-                guard extras.transport.credentialSnapshotValue().revision == revision else { return }
+                guard albumsLoadGeneration == generation,
+                      loadedArtistID == artistID,
+                      extras.transport.credentialSnapshotValue().revision == revision
+                else { return }
+                albumsPage = page
                 albumsPhase = .loaded(page.albums)
             } catch is CancellationError {
             } catch {
+                guard albumsLoadGeneration == generation,
+                      loadedArtistID == artistID,
+                      extras.transport.credentialSnapshotValue().revision == revision
+                else { return }
                 albumsPhase = .failed(error.localizedDescription)
             }
         case .similarArtists:
@@ -293,6 +323,57 @@ private struct IOSArtistDetail: View {
             } catch {
                 similarArtistsPhase = .failed(error.localizedDescription)
             }
+        }
+    }
+
+    @MainActor
+    private func loadMoreAlbums() async {
+        guard let extras = model.extras,
+              let page = albumsPage,
+              page.hasMore,
+              !isLoadingMoreAlbums
+        else { return }
+        let generation = albumsLoadGeneration
+        let artistID = artist.id
+        let offset = page.albums.count
+        let revision = extras.transport.credentialSnapshotValue().revision
+        isLoadingMoreAlbums = true
+        albumsLoadMoreError = nil
+        defer {
+            if albumsLoadGeneration == generation,
+               loadedArtistID == artistID,
+               extras.transport.credentialSnapshotValue().revision == revision {
+                isLoadingMoreAlbums = false
+            }
+        }
+        do {
+            let next = try await extras.artistAlbums(
+                artistID: artistID,
+                offset: offset,
+                expectedCredentialRevision: revision
+            )
+            try Task.checkCancellation()
+            guard albumsLoadGeneration == generation,
+                  loadedArtistID == artistID,
+                  albumsPage?.albums.count == offset,
+                  extras.transport.credentialSnapshotValue().revision == revision
+            else { return }
+            var seen = Set(page.albums.map(\.id))
+            let additions = next.albums.filter { seen.insert($0.id).inserted }
+            let combined = page.albums + additions
+            albumsPage = MusicArtistAlbumPage(
+                albums: combined,
+                offset: page.offset,
+                hasMore: next.hasMore && !additions.isEmpty
+            )
+            albumsPhase = .loaded(combined)
+        } catch is CancellationError {
+        } catch {
+            guard albumsLoadGeneration == generation,
+                  loadedArtistID == artistID,
+                  extras.transport.credentialSnapshotValue().revision == revision
+            else { return }
+            albumsLoadMoreError = error.localizedDescription
         }
     }
 }
@@ -320,7 +401,10 @@ private struct IOSAlbumDetail: View {
                 artwork: album.artwork,
                 saveArtwork: saveArtwork
             )
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 132), spacing: 8)], spacing: 8) {
+            LazyVGrid(
+                columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible())],
+                spacing: 8
+            ) {
                 if let first = songs.first {
                     IOSDetailActionButton(title: "播放", symbol: "play.fill", prominent: true) {
                         player.play(first, in: songs)
@@ -337,7 +421,7 @@ private struct IOSAlbumDetail: View {
                     model.setAlbumSubscribed(album.id, subscribed: !subscribed)
                 }
             }
-            .controlSize(.large)
+            .frame(maxWidth: 440, alignment: .leading)
 
             Picker("专辑详情", selection: $section) {
                 ForEach(IOSAlbumDetailSection.allCases, id: \.self) { Text($0.rawValue).tag($0) }
@@ -350,7 +434,12 @@ private struct IOSAlbumDetail: View {
                 if songs.isEmpty {
                     IOSDetailEmptyState(title: "专辑暂无歌曲", symbol: "music.note")
                 } else {
-                    IOSSongList(songs: songs, model: model, player: player)
+                    IOSSongList(
+                        songs: songs,
+                        showsTrackNumbers: true,
+                        model: model,
+                        player: player
+                    )
                 }
             case .knowledge:
                 IOSKnowledgeDetailSection(
@@ -420,6 +509,10 @@ private struct IOSPlaylistDetail: View {
                 description: playlist.description,
                 metadata: playlistMetadata,
                 artwork: playlist.artwork,
+                creator: playlist.creator,
+                openCreator: playlist.creatorID > 0
+                    ? { model.open(.user(playlist.creatorID)) }
+                    : nil,
                 saveArtwork: saveArtwork
             )
             actions
@@ -556,7 +649,10 @@ private struct IOSPlaylistDetail: View {
     }
 
     private var actions: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 132), spacing: 8)], spacing: 8) {
+        LazyVGrid(
+            columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible())],
+            spacing: 8
+        ) {
             if let first = songs.first {
                 IOSDetailActionButton(title: "播放全部", symbol: "play.fill", prominent: true) {
                     player.play(first, in: songs, allSongIDs: trackIDs, playlistID: playlist.id)
@@ -590,11 +686,6 @@ private struct IOSPlaylistDetail: View {
                         || model.pendingMutations.contains(.playlistSubscription(playlist.id))
                 ) { model.setPlaylistSubscribed(playlist.id, subscribed: !subscribed) }
             }
-            if playlist.creatorID > 0 {
-                IOSDetailActionButton(title: "查看创建者", symbol: "person.crop.circle") {
-                    model.open(.user(playlist.creatorID))
-                }
-            }
             if canManagePlaylist {
                 Menu {
                     Button("编辑歌单", systemImage: "pencil") { showsMetadataEditor = true }
@@ -613,14 +704,16 @@ private struct IOSPlaylistDetail: View {
                         else { Image(systemName: "ellipsis.circle") }
                         Text("管理歌单")
                     }
-                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle(radius: 8))
+                .controlSize(.large)
                 .disabled(isPreparingCover || isPublishing)
                 .accessibilityLabel(isPreparingCover ? "正在准备封面" : isPublishing ? "正在设为公开" : "管理歌单")
             }
         }
-        .controlSize(.large)
+        .frame(maxWidth: 440, alignment: .leading)
     }
 
     private var downloadOptions: some View {
@@ -678,7 +771,7 @@ private struct IOSPlaylistDetail: View {
     }
 
     private var playlistMetadata: [String] {
-        var values = [playlist.creator, "\(trackIDs.count.formatted()) 首歌曲"]
+        var values = ["\(trackIDs.count.formatted()) 首歌曲"]
         if playlist.isPrivate { values.append("私密歌单") }
         if !playlist.tags.isEmpty { values.append(playlist.tags.joined(separator: " · ")) }
         if playlist.subscriberCount > 0 { values.append("\(playlist.subscriberCount.formatted()) 人收藏") }
@@ -857,13 +950,35 @@ private enum IOSUserDetailSection: String, CaseIterable {
 private struct IOSUserDetail: View {
     let user: UserProfile
     let playlists: [Playlist]
+    let initialPlaylistsHaveMore: Bool
     @Bindable var model: AppModel
     @State private var section = IOSUserDetailSection.playlists
+    @State private var displayedPlaylists: [Playlist]
+    @State private var playlistsHaveMore: Bool
+    @State private var playlistOffset: Int
+    @State private var isLoadingMorePlaylists = false
+    @State private var playlistsLoadMoreError: String?
+    @State private var playlistsLoadGeneration = 0
     @State private var usersPhase: IOSDetailPhase<[MusicLibraryUser]> = .loading
     @State private var artistsPhase: IOSDetailPhase<[MusicLibraryArtist]> = .loading
     @State private var usersRetryID = 0
     @State private var artistsRetryID = 0
     @State private var loadedUserID: Int64?
+
+    init(
+        user: UserProfile,
+        playlists: [Playlist],
+        initialPlaylistsHaveMore: Bool,
+        model: AppModel
+    ) {
+        self.user = user
+        self.playlists = playlists
+        self.initialPlaylistsHaveMore = initialPlaylistsHaveMore
+        self.model = model
+        _displayedPlaylists = State(initialValue: playlists)
+        _playlistsHaveMore = State(initialValue: initialPlaylistsHaveMore)
+        _playlistOffset = State(initialValue: playlists.count)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -884,10 +999,10 @@ private struct IOSUserDetail: View {
                         followed ? "取消关注" : "关注用户",
                         systemImage: followed ? "person.badge.minus" : "person.badge.plus"
                     )
-                    .frame(minHeight: 44)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
+                .buttonBorderShape(.roundedRectangle(radius: 8))
                 .controlSize(.large)
                 .disabled(model.currentUserID == nil || model.pendingMutations.contains(.userFollow(user.id)))
             }
@@ -900,26 +1015,31 @@ private struct IOSUserDetail: View {
             sectionContent
         }
         .task(id: selectedLoadID) { await loadSelectedSection() }
+        .onChange(of: playlists) { _, _ in resetPlaylists() }
+        .onChange(of: initialPlaylistsHaveMore) { _, _ in resetPlaylists() }
     }
 
     @ViewBuilder
     private var sectionContent: some View {
         switch section {
         case .playlists:
-            IOSDetailSectionHeader(title: "公开歌单", count: playlists.count)
-            if playlists.isEmpty {
-                IOSDetailEmptyState(title: "暂无公开歌单", symbol: "music.note.list")
-            } else {
-                LazyVStack(spacing: 0) {
-                    ForEach(playlists) { playlist in
-                        IOSDetailNavigationRow(
-                            title: playlist.name,
-                            subtitle: "\(playlist.trackCount.formatted()) 首歌曲",
-                            imageURL: playlist.artwork.remoteURL,
-                            symbol: "music.note.list"
-                        ) { model.open(.playlist(playlist.id)) }
-                    }
-                }
+            IOSDetailCollection(
+                title: "公开歌单",
+                emptyTitle: "暂无公开歌单",
+                emptySymbol: "music.note.list",
+                phase: .loaded(displayedPlaylists),
+                retry: {},
+                hasMore: playlistsHaveMore,
+                isLoadingMore: isLoadingMorePlaylists,
+                loadMoreError: playlistsLoadMoreError,
+                loadMore: { Task { await loadMorePlaylists() } }
+            ) { playlist in
+                IOSDetailNavigationRow(
+                    title: playlist.name,
+                    subtitle: "\(playlist.trackCount.formatted()) 首歌曲",
+                    imageURL: playlist.artwork.remoteURL,
+                    symbol: "music.note.list"
+                ) { model.open(.playlist(playlist.id)) }
             }
         case .users:
             IOSDetailCollection(
@@ -985,6 +1105,7 @@ private struct IOSUserDetail: View {
     private func loadSelectedSection() async {
         if loadedUserID != user.id {
             loadedUserID = user.id
+            resetPlaylists()
             usersPhase = .loading
             artistsPhase = .loading
         }
@@ -995,30 +1116,122 @@ private struct IOSUserDetail: View {
             return
         }
         let revision = library.transport.credentialSnapshotValue().revision
+        let requestedSection = section
+        let userID = user.id
         do {
-            switch section {
+            switch requestedSection {
             case .playlists:
                 return
             case .users:
                 if case .loaded = usersPhase { return }
                 usersPhase = .loading
-                let values = try await library.followingUsers(userID: user.id)
+                let values = try await library.followingUsers(
+                    userID: userID,
+                    onUpdate: { values in
+                        guard !Task.isCancelled,
+                              loadedUserID == userID,
+                              section == requestedSection,
+                              library.transport.credentialSnapshotValue().revision == revision
+                        else { return }
+                        usersPhase = .loaded(values)
+                    }
+                )
                 try Task.checkCancellation()
-                guard library.transport.credentialSnapshotValue().revision == revision else { return }
+                guard loadedUserID == userID,
+                      section == requestedSection,
+                      library.transport.credentialSnapshotValue().revision == revision
+                else { return }
                 usersPhase = .loaded(values)
             case .artists:
                 if case .loaded = artistsPhase { return }
                 artistsPhase = .loading
-                let values = try await library.followedArtists(userID: user.id)
+                let values = try await library.followedArtists(
+                    userID: userID,
+                    onUpdate: { values in
+                        guard !Task.isCancelled,
+                              loadedUserID == userID,
+                              section == requestedSection,
+                              library.transport.credentialSnapshotValue().revision == revision
+                        else { return }
+                        artistsPhase = .loaded(values)
+                    }
+                )
                 try Task.checkCancellation()
-                guard library.transport.credentialSnapshotValue().revision == revision else { return }
+                guard loadedUserID == userID,
+                      section == requestedSection,
+                      library.transport.credentialSnapshotValue().revision == revision
+                else { return }
                 artistsPhase = .loaded(values)
             }
         } catch is CancellationError {
         } catch {
+            guard loadedUserID == userID,
+                  section == requestedSection,
+                  library.transport.credentialSnapshotValue().revision == revision
+            else { return }
             let message = error.localizedDescription
-            if section == .users { usersPhase = .failed(message) }
-            else if section == .artists { artistsPhase = .failed(message) }
+            if requestedSection == .users, case .loading = usersPhase {
+                usersPhase = .failed(message)
+            } else if requestedSection == .artists, case .loading = artistsPhase {
+                artistsPhase = .failed(message)
+            }
+        }
+    }
+
+    @MainActor
+    private func resetPlaylists() {
+        playlistsLoadGeneration &+= 1
+        displayedPlaylists = playlists
+        playlistOffset = playlists.count
+        playlistsHaveMore = initialPlaylistsHaveMore
+        isLoadingMorePlaylists = false
+        playlistsLoadMoreError = nil
+    }
+
+    @MainActor
+    private func loadMorePlaylists() async {
+        guard let extras = model.extras,
+              playlistsHaveMore,
+              !isLoadingMorePlaylists
+        else { return }
+        let generation = playlistsLoadGeneration
+        let userID = user.id
+        let offset = playlistOffset
+        let revision = extras.transport.credentialSnapshotValue().revision
+        isLoadingMorePlaylists = true
+        playlistsLoadMoreError = nil
+        defer {
+            if playlistsLoadGeneration == generation,
+               self.user.id == userID,
+               extras.transport.credentialSnapshotValue().revision == revision {
+                isLoadingMorePlaylists = false
+            }
+        }
+        do {
+            let page = try await extras.userPlaylists(
+                userID: userID,
+                offset: offset,
+                limit: 50,
+                expectedCredentialRevision: revision
+            )
+            try Task.checkCancellation()
+            guard playlistsLoadGeneration == generation,
+                  playlistOffset == offset,
+                  self.user.id == userID,
+                  extras.transport.credentialSnapshotValue().revision == revision
+            else { return }
+            var seen = Set(displayedPlaylists.map(\.id))
+            let additions = page.playlists.filter { seen.insert($0.id).inserted }
+            displayedPlaylists += additions
+            playlistOffset = offset + page.playlists.count
+            playlistsHaveMore = page.hasMore && !page.playlists.isEmpty && !additions.isEmpty
+        } catch is CancellationError {
+        } catch {
+            guard playlistsLoadGeneration == generation,
+                  self.user.id == userID,
+                  extras.transport.credentialSnapshotValue().revision == revision
+            else { return }
+            playlistsLoadMoreError = error.localizedDescription
         }
     }
 }
@@ -1030,45 +1243,95 @@ private struct IOSDetailHeader: View {
     let description: String
     let metadata: [String]
     let artwork: Artwork
+    var creator: String = ""
+    var openCreator: (() -> Void)? = nil
     var circularArtwork = false
     var saveArtwork: (() -> Void)? = nil
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ScaledMetric(relativeTo: .body) private var horizontalCoverSize: CGFloat = 128
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: 16) {
-                cover(size: 116)
-                identity
+        VStack(alignment: .leading, spacing: 8) {
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    stackedHeader
+                } else {
+                    horizontalHeader
+                }
             }
-            VStack(alignment: .leading, spacing: 14) {
-                cover(size: 176)
-                identity
-            }
+            IOSExpandableDescription(text: description)
+                .id(description)
+            Divider()
         }
-        if !description.isEmpty {
-            Text(description)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        Divider()
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var identity: some View {
-        VStack(alignment: .leading, spacing: 8) {
+    private var horizontalHeader: some View {
+        HStack(alignment: .top, spacing: 12) {
+            cover(size: horizontalCoverSize)
+            identity(compact: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(height: horizontalCoverSize, alignment: .top)
+                .clipped()
+        }
+    }
+
+    private var stackedHeader: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            cover(size: 176)
+            identity(compact: false)
+        }
+    }
+
+    private func identity(compact: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
             Label(category, systemImage: symbol)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.red)
             Text(title)
                 .font(.title2.bold())
-                .fixedSize(horizontal: false, vertical: true)
-            if !metadata.isEmpty {
+                .lineLimit(compact ? 2 : nil)
+                .truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: !compact)
+            if !creator.isEmpty {
+                HStack(alignment: .firstTextBaseline, spacing: 0) {
+                    if let openCreator {
+                        Button(action: openCreator) {
+                            Text(creator)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(IOSPressedButtonStyle())
+                        .foregroundStyle(.red)
+                        .layoutPriority(1)
+                        .accessibilityLabel("查看创建者 \(creator)")
+                        .accessibilityHint("打开创建者主页")
+                    } else {
+                        Text(creator)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    if !metadata.isEmpty {
+                        Text(" · \(metadata.joined(separator: " · "))")
+                            .lineLimit(compact ? 1 : nil)
+                            .truncationMode(.tail)
+                    }
+                }
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            } else if !metadata.isEmpty {
                 Text(metadata.joined(separator: " · "))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(compact ? 2 : nil)
+                    .truncationMode(.tail)
+                    .fixedSize(horizontal: false, vertical: !compact)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .layoutPriority(1)
     }
 
     private func cover(size: CGFloat) -> some View {
@@ -1083,8 +1346,9 @@ private struct IOSDetailHeader: View {
             if let saveArtwork {
                 Button(action: saveArtwork) {
                     Image(systemName: "square.and.arrow.down")
-                        .frame(width: 44, height: 44)
+                        .frame(width: 36, height: 36)
                         .background(.regularMaterial, in: Circle())
+                        .frame(width: 44, height: 44)
                 }
                 .buttonStyle(IOSPressedButtonStyle())
                 .padding(4)
@@ -1092,6 +1356,57 @@ private struct IOSDetailHeader: View {
             }
         }
         .frame(width: size, height: size)
+    }
+}
+
+private struct IOSExpandableDescription: View {
+    let text: String
+
+    @State private var isExpanded = false
+    @State private var fullHeight: CGFloat = 0
+    @State private var collapsedHeight: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        if !text.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(text)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(isExpanded ? nil : 2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .background {
+                        Text(text)
+                            .font(.subheadline)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .hidden()
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { fullHeight = $0 }
+                    }
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                        if !isExpanded { collapsedHeight = $0 }
+                    }
+                if isExpanded || fullHeight > collapsedHeight + 1 {
+                    Button {
+                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
+                            isExpanded.toggle()
+                        }
+                    } label: {
+                        Label(
+                            isExpanded ? "收起" : "展开",
+                            systemImage: isExpanded ? "chevron.up" : "chevron.down"
+                        )
+                        .font(.caption.weight(.medium))
+                        .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(IOSPressedButtonStyle())
+                    .foregroundStyle(.red)
+                    .accessibilityLabel(isExpanded ? "收起描述" : "展开完整描述")
+                    .accessibilityValue(isExpanded ? "已展开" : "已收起")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 
@@ -1127,6 +1442,10 @@ private struct IOSDetailCollection<Item: Identifiable, Row: View>: View {
     let emptySymbol: String
     let phase: IOSDetailPhase<[Item]>
     let retry: () -> Void
+    var hasMore = false
+    var isLoadingMore = false
+    var loadMoreError: String?
+    var loadMore: () -> Void = {}
     @ViewBuilder let row: (Item) -> Row
 
     var body: some View {
@@ -1163,6 +1482,24 @@ private struct IOSDetailCollection<Item: Identifiable, Row: View>: View {
                         ForEach(items) { item in
                             row(item)
                             Divider().padding(.leading, 64)
+                        }
+                        if let loadMoreError {
+                            IOSInlineRetry(message: loadMoreError, action: loadMore)
+                        } else if hasMore {
+                            HStack(spacing: 10) {
+                                if isLoadingMore {
+                                    ProgressView()
+                                    Text("正在载入更多\(title)")
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    Button("载入更多", action: loadMore)
+                                        .buttonStyle(.bordered)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 60)
+                            .onAppear {
+                                if !isLoadingMore { loadMore() }
+                            }
                         }
                     }
                 }
@@ -1252,9 +1589,11 @@ private struct IOSDetailActionButton: View {
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
             }
-            .frame(maxWidth: .infinity, minHeight: 44)
+            .frame(maxWidth: .infinity)
         }
         .disabled(disabled)
+        .buttonBorderShape(.roundedRectangle(radius: 8))
+        .controlSize(.large)
         .accessibilityLabel(showsProgress ? "\(title)，处理中" : title)
     }
 }
@@ -1329,15 +1668,13 @@ private struct IOSManagedPlaylistSongRow: View {
                         Text(song.name)
                             .font(.body.weight(.medium))
                             .foregroundStyle(.primary)
-                            .fixedSize(horizontal: false, vertical: true)
+                            .lineLimit(1)
                             .multilineTextAlignment(.leading)
-                        Text(song.artistsDisplay)
+                        Text([song.artistsDisplay, song.album.name]
+                            .filter { !$0.isEmpty }
+                            .joined(separator: " · "))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                        Text(song.album.name)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
                             .lineLimit(1)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1761,50 +2098,44 @@ private struct IOSPlaylistSongOrderSheet: View {
 
     var body: some View {
         NavigationStack {
-            Group {
-                if isLoading {
-                    ProgressView("正在载入完整歌单")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if let loadError {
-                    ContentUnavailableView {
-                        Label("歌曲载入失败", systemImage: "wifi.exclamationmark")
-                    } description: {
-                        Text(loadError)
-                    } actions: {
-                        Button("重试") { loadID += 1 }
-                            .buttonStyle(.bordered)
-                    }
-                } else {
-                    List {
-                        ForEach(draft, id: \.self) { trackID in
-                            HStack(spacing: 12) {
-                                Image(systemName: "music.note")
+            List {
+                ForEach(draft, id: \.self) { trackID in
+                    HStack(spacing: 12) {
+                        Image(systemName: "music.note")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 24)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(songsByID[trackID]?.name ?? "歌曲 \(trackID)")
+                                .fixedSize(horizontal: false, vertical: true)
+                            if let artists = songsByID[trackID]?.artistsDisplay, !artists.isEmpty {
+                                Text(artists)
+                                    .font(.caption)
                                     .foregroundStyle(.secondary)
-                                    .frame(width: 24)
-                                    .accessibilityHidden(true)
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(songsByID[trackID]?.name ?? "歌曲 \(trackID)")
-                                        .fixedSize(horizontal: false, vertical: true)
-                                    if let artists = songsByID[trackID]?.artistsDisplay, !artists.isEmpty {
-                                        Text(artists)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(2)
-                                    }
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                                    .lineLimit(2)
                             }
-                            .frame(minHeight: 44)
                         }
-                        .onMove { source, destination in
-                            guard !isSaving else { return }
-                            draft.move(fromOffsets: source, toOffset: destination)
-                            saveError = nil
-                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .environment(\.editMode, .constant(.active))
+                    .frame(minHeight: 44)
+                }
+                .onMove { source, destination in
+                    guard !isSaving else { return }
+                    draft.move(fromOffsets: source, toOffset: destination)
+                    saveError = nil
+                }
+                if isLoading {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("正在补充歌曲信息")
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 52)
+                } else if let loadError {
+                    IOSInlineRetry(message: loadError) { loadID += 1 }
                 }
             }
+            .environment(\.editMode, .constant(.active))
             .navigationTitle("歌曲排序")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -1849,8 +2180,6 @@ private struct IOSPlaylistSongOrderSheet: View {
 
     private var canSave: Bool {
         !isSaving
-            && !isLoading
-            && loadError == nil
             && (writeCompleted || draft != original)
             && context.matches(model: model, library: library)
     }
@@ -1872,16 +2201,29 @@ private struct IOSPlaylistSongOrderSheet: View {
             dismiss()
             return
         }
+        let requestID = loadID
         isLoading = true
         loadError = nil
-        do {
-            let songs = try await repository.songs(ids: original)
-            try Task.checkCancellation()
-            guard context.matches(model: model, library: library) else {
-                throw CancellationError()
+        defer {
+            if loadID == requestID, context.matches(model: model, library: library) {
+                isLoading = false
             }
-            songsByID.merge(songs.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
-            isLoading = false
+        }
+        do {
+            var seen = Set<Int64>()
+            let missing = original.filter {
+                songsByID[$0] == nil && seen.insert($0).inserted
+            }
+            for start in stride(from: 0, to: missing.count, by: 100) {
+                let songs = try await repository.songs(
+                    ids: Array(missing[start..<min(start + 100, missing.count)])
+                )
+                try Task.checkCancellation()
+                guard loadID == requestID,
+                      context.matches(model: model, library: library)
+                else { throw CancellationError() }
+                songsByID.merge(songs.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
+            }
         } catch is CancellationError {
         } catch {
             guard context.matches(model: model, library: library) else {
@@ -1889,7 +2231,6 @@ private struct IOSPlaylistSongOrderSheet: View {
                 return
             }
             loadError = error.localizedDescription
-            isLoading = false
         }
     }
 

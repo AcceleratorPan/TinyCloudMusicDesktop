@@ -228,7 +228,7 @@
 			);
 			sourceTree = "<group>";
 		};
-		4A3268EF695DCDD0AD279278 /* SharedMacCore */ = {
+		4A3268EF695DCDD0AD279278 /* SharedCore */ = {
 			isa = PBXGroup;
 			children = (
 				A237EC957CF4DD05CA5432F7 /* AudioContentModels.swift */,
@@ -269,7 +269,7 @@
 				77086C91CC40976609CB58CB /* VideoDownload.swift */,
 				3220A3504BAE1C77E7EA3E21 /* VideoModels.swift */,
 			);
-			name = SharedMacCore;
+			name = SharedCore;
 			path = TinyCloudMusic;
 			sourceTree = "<group>";
 		};
@@ -338,7 +338,7 @@
 		9FED9B3D217BE47001E23B78 /* Sources */ = {
 			isa = PBXGroup;
 			children = (
-				4A3268EF695DCDD0AD279278 /* SharedMacCore */,
+				4A3268EF695DCDD0AD279278 /* SharedCore */,
 			);
 			path = Sources;
 			sourceTree = "<group>";

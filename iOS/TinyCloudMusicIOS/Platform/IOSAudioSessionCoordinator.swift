@@ -153,15 +153,19 @@ final class IOSAudioSessionCoordinator {
         guard metadataSongID != song.id else { return }
         metadataSongID = song.id
         artworkTask?.cancel()
-        guard let url = song.album.artwork.remoteURL else { return }
+        guard let request = ArtworkPipeline.request(
+            for: song.album.artwork.remoteURL,
+            size: CGSize(width: 512, height: 512),
+            displayScale: 2
+        ) else { return }
         artworkTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let data = try await ArtworkPipeline.shared.loadData(for: url)
+                let image = try await ArtworkPipeline.shared.loadImage(for: request)
                 try Task.checkCancellation()
-                guard self.metadataSongID == song.id, let image = UIImage(data: data) else { return }
+                guard self.metadataSongID == song.id else { return }
                 var updated = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
-                updated[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+                updated[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: image.size) { @Sendable _ in image }
                 MPNowPlayingInfoCenter.default().nowPlayingInfo = updated
             } catch {
                 return

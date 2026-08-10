@@ -110,8 +110,11 @@ final class IOSAppContainer {
         }
         await model.session?.restore()
         player.setAccountCredentialRevision(model.session?.credentialRevision ?? 0)
-        if model.session != nil { await model.refreshAccountState() }
-        model.loadHome()
+        if model.session != nil {
+            await model.refreshAccountState { [model] in model.loadHome() }
+        } else {
+            model.loadHome()
+        }
         updateStartupError()
         isStarting = false
     }

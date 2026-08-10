@@ -1906,11 +1906,16 @@ final class PlayerController {
         timeObserver = avPlayer.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.1, preferredTimescale: 600),
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] time in
+#if os(iOS)
+            let seconds = time.seconds
+            Task { @MainActor [weak self] in self?.updatePosition(seconds) }
+#else
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.updatePosition(self.avPlayer.currentTime().seconds)
             }
+#endif
         }
 
         playerStateObservation = avPlayer.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
@@ -1947,7 +1952,11 @@ final class PlayerController {
             object: item,
             queue: .main
         ) { [weak self] _ in
+#if os(iOS)
+            Task { @MainActor [weak self] in self?.didReachEnd(generation: generation, songID: songID) }
+#else
             MainActor.assumeIsolated { self?.didReachEnd(generation: generation, songID: songID) }
+#endif
         }
         itemFailureObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemFailedToPlayToEndTime,
@@ -1956,9 +1965,15 @@ final class PlayerController {
         ) { [weak self] notification in
             let message = (notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?.localizedDescription
                 ?? "本地缓存播放失败"
+#if os(iOS)
+            Task { @MainActor [weak self] in
+                self?.failAndAdvance(generation: generation, songID: songID, message: message)
+            }
+#else
             MainActor.assumeIsolated {
                 self?.failAndAdvance(generation: generation, songID: songID, message: message)
             }
+#endif
         }
     }
 

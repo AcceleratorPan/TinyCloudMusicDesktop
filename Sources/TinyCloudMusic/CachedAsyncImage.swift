@@ -18,10 +18,14 @@ enum CachedAsyncImagePhase {
 @MainActor
 @Observable
 final class ArtworkPipeline {
+#if os(iOS)
+    static let memoryCostLimit = 96 * 1_024 * 1_024
+#else
     static let memoryCostLimit = 256 * 1_024 * 1_024
+#endif
     static let diskCostLimit = 512 * 1_024 * 1_024
     static let maximumResponseSize = 25 * 1_024 * 1_024
-    static let diskTTL: TimeInterval = 24 * 60 * 60
+    static let memoryTTL: TimeInterval = 24 * 60 * 60
     static let shared = ArtworkPipeline()
 
     private static let logger = Logger(subsystem: "TinyCloudMusic", category: "ArtworkCache")
@@ -31,6 +35,8 @@ final class ArtworkPipeline {
     private(set) var failureRefreshGeneration = 0
     private(set) var cacheDirectory: URL
     private var cacheRoot: URL
+    private var isClearingCache = false
+    private var deferredCacheRoot: URL?
 
     private init() {
         let root = Self.defaultCacheRoot
@@ -49,33 +55,55 @@ final class ArtworkPipeline {
 
     func configure(cacheRoot: URL) {
         let requestedRoot = cacheRoot.standardizedFileURL
-        let requestedDirectory = Self.artworkDirectory(in: requestedRoot)
-        guard requestedDirectory != cacheDirectory.standardizedFileURL else { return }
+        guard !isClearingCache else {
+            deferredCacheRoot = requestedRoot
+            return
+        }
+        configureImmediately(cacheRoot: requestedRoot)
+    }
 
-        let oldPipeline = pipeline
-        let result = Self.makePipeline(cacheRoot: requestedRoot)
-        pipeline = result.pipeline
-        cacheDirectory = result.cacheDirectory
-        self.cacheRoot = requestedRoot
-        generation += 1
-        oldPipeline.invalidate()
+    private func configureImmediately(cacheRoot requestedRoot: URL) {
+        let requestedDirectory = Self.artworkDirectory(in: requestedRoot)
+        guard requestedRoot != cacheRoot
+                || requestedDirectory != cacheDirectory.standardizedFileURL
+        else { return }
+
+        replacePipeline(cacheRoot: requestedRoot)
     }
 
     func retryFailedImages() {
         failureRefreshGeneration += 1
     }
 
-    func clearCache() async {
+    func clearCache() async throws {
+        guard !isClearingCache else { return }
+        isClearingCache = true
+        defer {
+            isClearingCache = false
+            if let deferredCacheRoot {
+                self.deferredCacheRoot = nil
+                configureImmediately(cacheRoot: deferredCacheRoot)
+            }
+        }
+
         let oldPipeline = pipeline
         let dataCache = oldPipeline.configuration.dataCache as? DataCache
         oldPipeline.invalidate()
         oldPipeline.cache.removeAll()
-        await Task.detached(priority: .utility) { dataCache?.flush() }.value
-
-        let result = Self.makePipeline(cacheRoot: cacheRoot)
-        pipeline = result.pipeline
-        cacheDirectory = result.cacheDirectory
-        generation += 1
+        do {
+            try await Task.detached(priority: .utility) {
+                dataCache?.flush()
+                guard let directory = dataCache?.path else { return }
+                let manager = FileManager.default
+                if manager.fileExists(atPath: directory.path) {
+                    try manager.removeItem(at: directory)
+                }
+            }.value
+        } catch {
+            replacePipeline(cacheRoot: cacheRoot)
+            throw error
+        }
+        replacePipeline(cacheRoot: cacheRoot)
     }
 
     func loadImage(for request: ImageRequest, maximumRetryCount: Int = 2) async throws -> PlatformImage {
@@ -102,10 +130,9 @@ final class ArtworkPipeline {
     static func request(
         for url: URL?,
         size: CGSize,
-        displayScale: CGFloat = 1,
-        now: Date = Date()
+        displayScale: CGFloat = 1
     ) -> ImageRequest? {
-        guard var request = originalRequest(for: url, now: now),
+        guard var request = originalRequest(for: url),
               size.width.isFinite, size.height.isFinite,
               size.width > 0, size.height > 0,
               displayScale.isFinite, displayScale > 0
@@ -126,7 +153,7 @@ final class ArtworkPipeline {
         ceil(max(size.width, size.height) / 32) * 32
     }
 
-    private static func originalRequest(for url: URL?, now: Date = Date()) -> ImageRequest? {
+    private static func originalRequest(for url: URL?) -> ImageRequest? {
         guard let sourceURL = url else { return nil }
         let url = ArtworkURLPolicy.secureURL(for: sourceURL)
         guard
@@ -134,12 +161,7 @@ final class ArtworkPipeline {
               scheme == "https" || scheme == "http"
         else { return nil }
 
-        let epoch = Int(now.timeIntervalSince1970 / diskTTL)
-        var request = ImageRequest(url: url)
-        // The epoch is part of both memory and disk identity. This bounds same-URL
-        // artwork staleness without defeating Nuke's original-data sharing or LRU.
-        request.imageID = "\(url.absoluteString)#artwork-v2-\(epoch)"
-        return request
+        return ImageRequest(url: url)
     }
 
     static func isTransient(_ error: any Error) -> Bool {
@@ -216,6 +238,16 @@ final class ArtworkPipeline {
         return cache
     }
 
+    private func replacePipeline(cacheRoot: URL) {
+        let oldPipeline = pipeline
+        let result = Self.makePipeline(cacheRoot: cacheRoot)
+        pipeline = result.pipeline
+        cacheDirectory = result.cacheDirectory
+        self.cacheRoot = cacheRoot
+        generation += 1
+        oldPipeline.invalidate()
+    }
+
     private static func makePipeline(
         dataCache: DataCache?,
         sessionConfiguration: URLSessionConfiguration = .default
@@ -229,7 +261,7 @@ final class ArtworkPipeline {
         session.timeoutIntervalForResource = 60
 
         let memory = ImageCache(costLimit: memoryCostLimit, countLimit: 2_000)
-        memory.ttl = diskTTL
+        memory.ttl = memoryTTL
 
         var configuration = ImagePipeline.Configuration(dataLoader: DataLoader(configuration: session))
         configuration.imageCache = memory
@@ -305,8 +337,12 @@ struct CachedAsyncImage<Content: View>: View {
     @ViewBuilder
     private func image(size: CGSize) -> some View {
         let controller = artworkPipeline
-        let pixelEdge = ArtworkPipeline.bucketedEdge(for: size) * max(1, displayScale)
-        if let request = ArtworkPipeline.request(for: url, size: size, displayScale: displayScale) {
+        if url == nil {
+            content(.failure)
+        } else if !size.width.isFinite || !size.height.isFinite || size.width <= 0 || size.height <= 0 {
+            content(.empty)
+        } else if let request = ArtworkPipeline.request(for: url, size: size, displayScale: displayScale) {
+            let pixelEdge = ArtworkPipeline.bucketedEdge(for: size) * max(1, displayScale)
             LazyImage(request: request) { state in
                 if let image = state.image {
                     content(.success(image))
@@ -322,7 +358,7 @@ struct CachedAsyncImage<Content: View>: View {
             // NukeUI 13 omits thumbnail from LazyImageContext equality.
             .id("\(url?.absoluteString ?? ""):\(pixelEdge):\(controller.generation):\(requestNonce)")
         } else {
-            content(.empty)
+            content(.failure)
         }
     }
 

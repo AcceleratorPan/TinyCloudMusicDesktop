@@ -110,7 +110,7 @@ extension LiveMusicRepository {
                 "verifyId": 1,
                 "newDetailPage": true,
                 "e_r": true,
-                "n": "300",
+                "n": String(PlaylistSongPaging.initialCount),
                 "s": "5"
             ],
             cache: .detail,
@@ -159,21 +159,30 @@ extension LiveMusicRepository {
             id: id,
             expectedCredentialRevision: expectedCredentialRevision
         )
-        let (profileResponse, playlists) = try await (profileData, playlistsTask)
+        let (profileResponse, playlistPage) = try await (profileData, playlistsTask)
         guard let profile = decodeLiveUserDetail(profileResponse) else {
             throw EAPIError.missingData("profile")
         }
-        return .user(profile, playlists: playlists)
+        return .user(
+            profile,
+            playlists: playlistPage.playlists,
+            hasMore: playlistPage.hasMore
+        )
     }
 
     private func userPlaylists(
         id: Int64,
         expectedCredentialRevision: UInt64?
-    ) async throws -> [Playlist] {
+    ) async throws -> (playlists: [Playlist], hasMore: Bool) {
+#if os(iOS)
+        let pageSize = 50
+#else
         let pageSize = 100
+#endif
         var offset = 0
         var playlists: [Playlist] = []
         var seen = Set<Int64>()
+        var hasMore = false
 
         while true {
             try Task.checkCancellation()
@@ -194,13 +203,17 @@ extension LiveMusicRepository {
 
             let (nextOffset, overflow) = offset.addingReportingOverflow(values.count)
             guard !overflow, nextOffset > offset else { break }
-            let hasMore = root["more"] != nil
+            hasMore = root["more"] != nil
                 ? root.bool("more")
                 : root["hasMore"] != nil ? root.bool("hasMore") : values.count == pageSize
+#if os(iOS)
+            break
+#else
             guard hasMore else { break }
             offset = nextOffset
+#endif
         }
-        return playlists
+        return (playlists, hasMore)
     }
 
     func songs(ids: [Int64]) async throws -> [Song] {

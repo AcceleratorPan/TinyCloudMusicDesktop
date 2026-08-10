@@ -16,6 +16,7 @@ struct IOSLibraryView: View {
     private let library: LiveMusicLibrary?
     private let extras: LiveMusicExtras?
     @State private var phase: IOSLibraryPhase = .loading
+    @State private var progressiveSnapshot: LibrarySnapshot?
 
     init(container: IOSAppContainer) {
         model = container.model
@@ -26,7 +27,7 @@ struct IOSLibraryView: View {
 
     var body: some View {
         Group {
-            if let snapshot = model.librarySnapshot {
+            if let snapshot = progressiveSnapshot ?? model.librarySnapshot {
                 libraryList(snapshot)
             } else {
                 phaseContent
@@ -222,9 +223,12 @@ struct IOSLibraryView: View {
         }
         let revision = library.transport.credentialSnapshotValue().revision
         if !force, let snapshot = model.librarySnapshot, snapshot.user.id == model.currentUserID {
+            progressiveSnapshot = nil
             phase = .loaded
             return
         }
+        let playlistRevision = model.playlistContentRevision
+        progressiveSnapshot = nil
         if model.librarySnapshot == nil { phase = .loading }
         do {
             let login = try await library.loginState(
@@ -243,15 +247,45 @@ struct IOSLibraryView: View {
             )
             async let following = library.myFollowing(
                 forceRefresh: force,
-                expectedCredentialRevision: revision
+                expectedCredentialRevision: revision,
+                onUpdate: { values in
+                    publishLibraryProgress(
+                        user: user,
+                        revision: revision,
+                        playlistRevision: playlistRevision,
+                        following: values
+                    )
+                }
             )
-            let playlists = force
-                ? try await library.userPlaylists(
+            let playlists: [Playlist]
+            if force {
+                playlists = try await library.userPlaylists(
                     userID: user.id,
                     forceRefresh: true,
-                    expectedCredentialRevision: revision
+                    expectedCredentialRevision: revision,
+                    onUpdate: { values in
+                        publishLibraryProgress(
+                            user: user,
+                            revision: revision,
+                            playlistRevision: playlistRevision,
+                            playlists: values
+                        )
+                    }
                 )
-                : try await model.accountPlaylists(userID: user.id, credentialRevision: revision)
+            } else {
+                playlists = try await model.accountPlaylists(
+                    userID: user.id,
+                    credentialRevision: revision,
+                    onUpdate: { values in
+                        publishLibraryProgress(
+                            user: user,
+                            revision: revision,
+                            playlistRevision: playlistRevision,
+                            playlists: values
+                        )
+                    }
+                )
+            }
             let (loadedSongs, loadedFollowing) = try await (songs, following)
             let recommendedUsers = (try? await extras.recommendedUsers(expectedCredentialRevision: revision)) ?? []
             try Task.checkCancellation()
@@ -264,14 +298,39 @@ struct IOSLibraryView: View {
                     following: loadedFollowing,
                     recommendedUsers: recommendedUsers
                 ),
-                playlistRevision: model.playlistContentRevision
+                playlistRevision: playlistRevision
             )
+            progressiveSnapshot = nil
             phase = .loaded
             await model.refreshAccountState()
         } catch is CancellationError {
         } catch {
-            phase = .failed(error.localizedDescription)
+            phase = progressiveSnapshot == nil ? .failed(error.localizedDescription) : .loaded
         }
+    }
+
+    @MainActor
+    private func publishLibraryProgress(
+        user: MusicLibraryUser,
+        revision: UInt64,
+        playlistRevision: Int,
+        playlists: [Playlist]? = nil,
+        following: [MusicLibraryFollow]? = nil
+    ) {
+        guard model.currentUserID == user.id,
+              library?.transport.credentialSnapshotValue().revision == revision,
+              model.playlistContentRevision == playlistRevision
+        else { return }
+        let current = progressiveSnapshot?.user.id == user.id
+            ? progressiveSnapshot
+            : (model.librarySnapshot?.user.id == user.id ? model.librarySnapshot : nil)
+        progressiveSnapshot = LibrarySnapshot(
+            user: user,
+            songs: current?.songs ?? [],
+            playlists: playlists ?? current?.playlists ?? [],
+            following: following ?? current?.following ?? [],
+            recommendedUsers: current?.recommendedUsers ?? []
+        )
     }
 }
 
@@ -365,6 +424,7 @@ private struct IOSSubscribedAlbumsView: View {
     @State private var isLoading = false
     @State private var isLoadingMore = false
     @State private var errorMessage: String?
+    @State private var loadGeneration = 0
 
     var body: some View {
         Group {
@@ -452,13 +512,21 @@ private struct IOSSubscribedAlbumsView: View {
             return
         }
         if reset {
+            loadGeneration &+= 1
             isLoading = true
+            isLoadingMore = false
             errorMessage = nil
         } else {
-            guard !isLoadingMore else { return }
+            guard !isLoading, !isLoadingMore, hasMore else { return }
             isLoadingMore = true
         }
+        let generation = loadGeneration
         let requestOffset = reset ? 0 : offset
+        defer {
+            if loadGeneration == generation, self.revision == revision {
+                if reset { isLoading = false } else { isLoadingMore = false }
+            }
+        }
         do {
             let page = try await library.iosSubscribedAlbums(
                 offset: requestOffset,
@@ -466,7 +534,10 @@ private struct IOSSubscribedAlbumsView: View {
                 expectedCredentialRevision: revision
             )
             try Task.checkCancellation()
-            guard self.revision == revision else { return }
+            guard loadGeneration == generation,
+                  self.revision == revision,
+                  reset || offset == requestOffset
+            else { return }
             if reset {
                 albums = page.albums
             } else {
@@ -478,10 +549,9 @@ private struct IOSSubscribedAlbumsView: View {
             errorMessage = nil
         } catch is CancellationError {
         } catch {
+            guard loadGeneration == generation, self.revision == revision else { return }
             errorMessage = error.localizedDescription
         }
-        isLoading = false
-        isLoadingMore = false
     }
 }
 
@@ -1405,6 +1475,7 @@ struct IOSRecommendationHistoryView: View {
             isLoading = false
         } catch is CancellationError {
         } catch {
+            guard self.selected == selected, self.revision == revision else { return }
             isLoading = false
             errorMessage = error.localizedDescription
         }
@@ -1444,6 +1515,7 @@ struct IOSListeningFootprintsView: View {
     @State private var annualReport: AnnualListeningReport?
     @State private var isLoading = true
     @State private var errorMessage: String?
+    @State private var loadGeneration = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1491,7 +1563,8 @@ struct IOSListeningFootprintsView: View {
     }
 
     private func todayContent(_ ranks: [ListeningRankEntry]) -> some View {
-        List {
+        let songs = ranks.map(\.song)
+        return List {
             Section("今日排行") {
                 if ranks.isEmpty {
                     IOSLibraryEmptyRow(title: "今天暂无听歌记录", symbol: "music.note")
@@ -1500,7 +1573,7 @@ struct IOSListeningFootprintsView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             IOSSongRow(
                                 song: entry.song,
-                                songs: ranks.map(\.song),
+                                songs: songs,
                                 model: model,
                                 player: player
                             )
@@ -1526,7 +1599,8 @@ struct IOSListeningFootprintsView: View {
     }
 
     private func reportContent(_ report: ListeningReport) -> some View {
-        List {
+        let songs = report.topSongs.map(\.song)
+        return List {
             Section {
                 Text(report.title)
                     .font(.headline)
@@ -1540,7 +1614,7 @@ struct IOSListeningFootprintsView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             IOSSongRow(
                                 song: entry.song,
-                                songs: report.topSongs.map(\.song),
+                                songs: songs,
                                 model: model,
                                 player: player
                             )
@@ -1569,7 +1643,10 @@ struct IOSListeningFootprintsView: View {
                             Text("\(year) 年").tag(Optional(year))
                         }
                     }
-                    .onChange(of: selectedYear) { _, _ in Task { await loadAnnual(force: false) } }
+                    .onChange(of: selectedYear) { oldValue, newValue in
+                        guard oldValue != nil, oldValue != newValue else { return }
+                        Task { await loadAnnual(force: false) }
+                    }
                 }
                 if let footprint = footprints.first(where: { $0.year == selectedYear }) {
                     Section("年度概览") {
@@ -1584,6 +1661,7 @@ struct IOSListeningFootprintsView: View {
                         IOSListeningMetrics(metrics: annualReport.overviewMetrics)
                     }
                     ForEach(annualReport.sections) { section in
+                        let songs = section.tracks.map(\.song)
                         Section(section.title) {
                             if let subtitle = section.subtitle, !subtitle.isEmpty { Text(subtitle) }
                             ForEach(section.metrics) { metric in
@@ -1595,7 +1673,7 @@ struct IOSListeningFootprintsView: View {
                                 VStack(alignment: .leading, spacing: 3) {
                                     IOSSongRow(
                                         song: track.song,
-                                        songs: section.tracks.map(\.song),
+                                        songs: songs,
                                         model: model,
                                         player: player
                                     )
@@ -1619,41 +1697,78 @@ struct IOSListeningFootprintsView: View {
 
     @MainActor
     private func load(force: Bool) async {
-        guard let library = model.library, model.currentUserID != nil else { return }
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        let period = period
+        let revision = revision
+        guard let library = model.library, model.currentUserID != nil else {
+            isLoading = false
+            return
+        }
         isLoading = true
         errorMessage = nil
         todayRanks = nil
         report = nil
         annualReport = nil
-        let revision = revision
         do {
             if period == .today {
-                todayRanks = try await library.todayListeningRank(
+                let value = try await library.todayListeningRank(
                     forceRefresh: force,
                     expectedCredentialRevision: revision
                 )
+                try Task.checkCancellation()
+                guard loadGeneration == generation,
+                      self.period == period,
+                      self.revision == revision
+                else { return }
+                todayRanks = value
                 isLoading = false
             } else if period == .year {
-                footprints = try await library.yearListeningFootprints(
+                let values = try await library.yearListeningFootprints(
                     forceRefresh: force,
                     expectedCredentialRevision: revision
                 )
-                let supported = footprints.map(\.year)
-                    .filter(AnnualListeningReportDecoder.supportedYears.contains)
-                    .sorted(by: >)
-                selectedYear = selectedYear.flatMap { supported.contains($0) ? $0 : nil } ?? supported.first
-                isLoading = false
+                try Task.checkCancellation()
+                guard loadGeneration == generation,
+                      self.period == period,
+                      self.revision == revision
+                else { return }
+                footprints = values
+                    .filter { AnnualListeningReportDecoder.supportedYears.contains($0.year) }
+                    .sorted { $0.year > $1.year }
+                selectedYear = selectedYear.flatMap { year in
+                    footprints.contains(where: { $0.year == year }) ? year : nil
+                } ?? footprints.first?.year
+                guard selectedYear != nil else {
+                    isLoading = false
+                    return
+                }
                 await loadAnnual(force: force)
             } else if let reportPeriod = period.reportPeriod {
-                report = try await library.listeningReport(
+                let value = try await library.listeningReport(
                     period: reportPeriod,
                     forceRefresh: force,
                     expectedCredentialRevision: revision
                 )
+                try Task.checkCancellation()
+                guard loadGeneration == generation,
+                      self.period == period,
+                      self.revision == revision
+                else { return }
+                report = value
                 isLoading = false
             }
         } catch is CancellationError {
+            guard loadGeneration == generation,
+                  self.period == period,
+                  self.revision == revision
+            else { return }
+            isLoading = false
         } catch {
+            guard loadGeneration == generation,
+                  self.period == period,
+                  self.revision == revision
+            else { return }
             isLoading = false
             errorMessage = error.localizedDescription
         }
@@ -1661,17 +1776,28 @@ struct IOSListeningFootprintsView: View {
 
     @MainActor
     private func loadAnnual(force: Bool) async {
-        guard period == .year,
-              let library = model.library,
+        guard period == .year else { return }
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        guard let library = model.library,
               let selectedYear,
               AnnualListeningReportDecoder.supportedYears.contains(selectedYear)
         else {
             annualReport = nil
+            isLoading = false
             return
         }
+        let revision = revision
         isLoading = true
         errorMessage = nil
-        let revision = revision
+        defer {
+            if loadGeneration == generation,
+               period == .year,
+               self.selectedYear == selectedYear,
+               self.revision == revision {
+                isLoading = false
+            }
+        }
         do {
             let value = try await library.annualListeningReport(
                 year: selectedYear,
@@ -1679,12 +1805,19 @@ struct IOSListeningFootprintsView: View {
                 expectedCredentialRevision: revision
             )
             try Task.checkCancellation()
-            guard self.selectedYear == selectedYear, self.revision == revision else { return }
+            guard loadGeneration == generation,
+                  period == .year,
+                  self.selectedYear == selectedYear,
+                  self.revision == revision
+            else { return }
             annualReport = value
-            isLoading = false
         } catch is CancellationError {
         } catch {
-            isLoading = false
+            guard loadGeneration == generation,
+                  period == .year,
+                  self.selectedYear == selectedYear,
+                  self.revision == revision
+            else { return }
             errorMessage = error.localizedDescription
         }
     }
@@ -2507,6 +2640,7 @@ private enum IOSCommentEmojiCatalog {
 private struct IOSCommentEmojiText: View {
     let content: String
     private let parts: [IOSCommentEmojiPart]
+    @Environment(\.displayScale) private var displayScale
     @State private var images: [String: UIImage] = [:]
 
     init(content: String, remotePictureIDs: [String: String]) {
@@ -2540,7 +2674,11 @@ private struct IOSCommentEmojiText: View {
     private func loadImages() async {
         var loaded: [String: UIImage] = [:]
         for case let .emoji(token, url) in parts where loaded[token] == nil {
-            guard let request = ArtworkPipeline.request(for: url, size: CGSize(width: 24, height: 24)) else {
+            guard let request = ArtworkPipeline.request(
+                for: url,
+                size: CGSize(width: 24, height: 24),
+                displayScale: displayScale
+            ) else {
                 continue
             }
             do {

@@ -71,12 +71,18 @@ struct LiveMusicExtras: Sendable {
     func userPlaylists(
         userID: Int64,
         offset: Int = 0,
-        limit: Int = 20
+        limit: Int = 20,
+        expectedCredentialRevision: UInt64? = nil
     ) async throws -> MusicPlaylistPage {
         guard userID > 0, offset >= 0, limit > 0 else { throw EAPIError.invalidPayload }
-        let root = try await userPlaylistResponse(userID: userID, offset: offset, limit: limit)
+        let root = try await userPlaylistResponse(
+            userID: userID,
+            offset: offset,
+            limit: limit,
+            expectedCredentialRevision: expectedCredentialRevision
+        )
         return MusicPlaylistPage(
-            playlists: root.array("playlist").compactMap(MusicLibraryDecoder.playlist),
+            playlists: root.array("playlist").compactMap(repository.decodeLivePlaylist),
             offset: offset,
             hasMore: root.bool("more")
         )
@@ -278,11 +284,17 @@ struct LiveMusicExtras: Sendable {
         LiveMusicRepository(transport: transport)
     }
 
-    private func userPlaylistResponse(userID: Int64, offset: Int, limit: Int) async throws -> [String: Any] {
+    private func userPlaylistResponse(
+        userID: Int64,
+        offset: Int,
+        limit: Int,
+        expectedCredentialRevision: UInt64? = nil
+    ) async throws -> [String: Any] {
         try await call(
             EAPIEndpoint("/eapi/user/playlist", signing: "/api/user/playlist"),
             payload: ["uid": userID, "offset": offset, "limit": limit],
-            cache: .playlistSummaries
+            cache: .playlistSummaries,
+            expectedCredentialRevision: expectedCredentialRevision
         )
     }
 

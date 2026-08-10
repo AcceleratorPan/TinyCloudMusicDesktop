@@ -2125,7 +2125,7 @@ struct TransportSessionPerformanceTests {
         }
         let repository = LiveMusicRepository(transport: fixtureTransport(snapshot: snapshot))
         let detail = try await repository.detail(for: .user(7))
-        guard case let .user(_, playlists) = detail else {
+        guard case let .user(_, playlists, _) = detail else {
             Issue.record("User detail decoded as another route")
             return
         }

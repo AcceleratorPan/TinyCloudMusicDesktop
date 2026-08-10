@@ -163,6 +163,7 @@ private struct IOSVideoRecommendationsView: View {
     @State private var isLoading = true
     @State private var isLoadingMore = false
     @State private var errorMessage: String?
+    @State private var loadGeneration = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -233,6 +234,11 @@ private struct IOSVideoRecommendationsView: View {
 
     @MainActor
     private func load(force: Bool) async {
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        let section = section
+        let revision = revision
+        isLoadingMore = false
         guard let library = model.videoLibrary else {
             isLoading = false
             errorMessage = "视频服务不可用"
@@ -243,33 +249,46 @@ private struct IOSVideoRecommendationsView: View {
         items = []
         subscriptionPage = nil
         nextOffset = 0
-        let revision = revision
         do {
+            let loadedItems: [VideoRecommendation]
+            let loadedPage: VideoSubscriptionPage?
             switch section {
             case .recommendations:
-                items = try await library.recommendations(
+                loadedItems = try await library.recommendations(
                     refreshCache: force,
                     expectedCredentialRevision: revision
                 )
-                nextOffset = items.count
+                loadedPage = nil
             case .mvs:
-                items = try await library.personalizedMVs(
+                loadedItems = try await library.personalizedMVs(
                     refreshCache: force,
                     expectedCredentialRevision: revision
                 )
+                loadedPage = nil
             case .subscriptions:
                 let page = try await library.subscriptions(
                     refreshCache: force,
                     expectedCredentialRevision: revision
                 )
-                subscriptionPage = page
-                items = page.items
-                model.recordVideoSubscriptions(page.items.map(\.resource))
+                loadedItems = page.items
+                loadedPage = page
             }
             try Task.checkCancellation()
+            guard loadGeneration == generation,
+                  self.section == section,
+                  self.revision == revision
+            else { return }
+            items = loadedItems
+            subscriptionPage = loadedPage
+            nextOffset = section == .recommendations ? loadedItems.count : 0
+            if let loadedPage { model.recordVideoSubscriptions(loadedPage.items.map(\.resource)) }
             isLoading = false
         } catch is CancellationError {
         } catch {
+            guard loadGeneration == generation,
+                  self.section == section,
+                  self.revision == revision
+            else { return }
             isLoading = false
             errorMessage = error.localizedDescription
         }
@@ -277,17 +296,33 @@ private struct IOSVideoRecommendationsView: View {
 
     @MainActor
     private func loadMore() async {
-        guard let library = model.videoLibrary, !isLoadingMore else { return }
+        guard let library = model.videoLibrary, !isLoading, !isLoadingMore else { return }
+        let generation = loadGeneration
+        let section = section
+        let revision = revision
         isLoadingMore = true
         errorMessage = nil
-        let revision = revision
+        defer {
+            if loadGeneration == generation,
+               self.section == section,
+               self.revision == revision {
+                isLoadingMore = false
+            }
+        }
         do {
             switch section {
             case .recommendations:
+                let offset = nextOffset
                 let next = try await library.recommendations(
-                    offset: nextOffset,
+                    offset: offset,
                     expectedCredentialRevision: revision
                 )
+                try Task.checkCancellation()
+                guard loadGeneration == generation,
+                      self.section == section,
+                      self.revision == revision,
+                      nextOffset == offset
+                else { return }
                 var seen = Set(items.map(\.id))
                 let additions = next.filter { seen.insert($0.id).inserted }
                 items += additions
@@ -298,6 +333,12 @@ private struct IOSVideoRecommendationsView: View {
                     offset: page.nextOffset,
                     expectedCredentialRevision: revision
                 )
+                try Task.checkCancellation()
+                guard loadGeneration == generation,
+                      self.section == section,
+                      self.revision == revision,
+                      subscriptionPage?.nextOffset == page.nextOffset
+                else { return }
                 let combined = page.appending(next)
                 subscriptionPage = combined
                 items = combined.items
@@ -307,9 +348,12 @@ private struct IOSVideoRecommendationsView: View {
             }
         } catch is CancellationError {
         } catch {
+            guard loadGeneration == generation,
+                  self.section == section,
+                  self.revision == revision
+            else { return }
             errorMessage = error.localizedDescription
         }
-        isLoadingMore = false
     }
 }
 
@@ -1355,6 +1399,7 @@ private enum IOSCommentEmojiCatalog {
 private struct IOSCommentEmojiText: View {
     let content: String
     private let parts: [IOSCommentEmojiPart]
+    @Environment(\.displayScale) private var displayScale
     @State private var images: [String: UIImage] = [:]
 
     init(content: String, remotePictureIDs: [String: String]) {
@@ -1390,7 +1435,8 @@ private struct IOSCommentEmojiText: View {
         for case let .emoji(token, url) in parts where loaded[token] == nil {
             guard let request = ArtworkPipeline.request(
                 for: url,
-                size: CGSize(width: 20, height: 20)
+                size: CGSize(width: 20, height: 20),
+                displayScale: displayScale
             ) else { continue }
             do {
                 let source = try await ArtworkPipeline.shared.loadImage(for: request)
@@ -1427,7 +1473,9 @@ private struct IOSAudioDiscoveryView: View {
     @State private var channels: [BroadcastChannel] = []
     @State private var channelPage: BroadcastChannelPage?
     @State private var isLoading = true
+    @State private var isLoadingMore = false
     @State private var errorMessage: String?
+    @State private var loadGeneration = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1456,7 +1504,10 @@ private struct IOSAudioDiscoveryView: View {
                     Picker("分类", selection: $selectedCategoryID) {
                         ForEach(categories) { Text($0.name).tag(Optional($0.id)) }
                     }
-                    .onChange(of: selectedCategoryID) { _, _ in Task { await loadPodcasts() } }
+                    .onChange(of: selectedCategoryID) { oldValue, newValue in
+                        guard oldValue != nil, oldValue != newValue else { return }
+                        Task { await loadPodcasts() }
+                    }
                 }
                 Section(selectedCategory?.name ?? "推荐播客") {
                     if podcasts.isEmpty {
@@ -1507,6 +1558,7 @@ private struct IOSAudioDiscoveryView: View {
                         if channelPage?.hasMore == true {
                             Button("载入更多") { Task { await loadChannels(reset: false) } }
                                 .frame(maxWidth: .infinity, minHeight: 44)
+                                .disabled(isLoadingMore)
                         }
                     }
                 }
@@ -1518,6 +1570,10 @@ private struct IOSAudioDiscoveryView: View {
 
     @MainActor
     private func load() async {
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        let section = section
+        isLoadingMore = false
         guard let library = model.audioLibrary else {
             isLoading = false
             errorMessage = "声音服务不可用"
@@ -1527,15 +1583,24 @@ private struct IOSAudioDiscoveryView: View {
         errorMessage = nil
         do {
             if section == .podcasts {
-                categories = try await library.podcastCategories()
-                selectedCategoryID = selectedCategoryID ?? categories.first?.id
+                let values = try await library.podcastCategories()
+                try Task.checkCancellation()
+                guard loadGeneration == generation, self.section == section else { return }
+                categories = values
+                if !values.contains(where: { $0.id == selectedCategoryID }) {
+                    selectedCategoryID = values.first?.id
+                }
                 await loadPodcasts()
             } else {
-                filters = try await library.broadcastFilters()
+                let value = try await library.broadcastFilters()
+                try Task.checkCancellation()
+                guard loadGeneration == generation, self.section == section else { return }
+                filters = value
                 await loadChannels(reset: true)
             }
         } catch is CancellationError {
         } catch {
+            guard loadGeneration == generation, self.section == section else { return }
             isLoading = false
             errorMessage = error.localizedDescription
         }
@@ -1543,17 +1608,42 @@ private struct IOSAudioDiscoveryView: View {
 
     @MainActor
     private func loadPodcasts(force: Bool = false) async {
-        guard let library = model.audioLibrary, let selectedCategory else {
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        let section = section
+        guard section == .podcasts,
+              let library = model.audioLibrary,
+              let selectedCategory
+        else {
             isLoading = false
             return
         }
+        let categoryID = selectedCategory.id
         isLoading = true
         errorMessage = nil
+        defer {
+            if loadGeneration == generation,
+               self.section == section,
+               selectedCategoryID == categoryID {
+                isLoading = false
+            }
+        }
         do {
-            podcasts = try await library.recommendedPodcasts(categoryID: selectedCategory.id, refreshCache: force)
+            let values = try await library.recommendedPodcasts(categoryID: categoryID, refreshCache: force)
+            try Task.checkCancellation()
+            guard loadGeneration == generation,
+                  self.section == section,
+                  selectedCategoryID == categoryID
+            else { return }
+            podcasts = values
         } catch is CancellationError {
-        } catch { errorMessage = error.localizedDescription }
-        isLoading = false
+        } catch {
+            guard loadGeneration == generation,
+                  self.section == section,
+                  selectedCategoryID == categoryID
+            else { return }
+            errorMessage = error.localizedDescription
+        }
     }
 
     private var selectedCategory: PodcastCategory? {
@@ -1562,20 +1652,58 @@ private struct IOSAudioDiscoveryView: View {
 
     @MainActor
     private func loadChannels(reset: Bool) async {
-        guard let library = model.audioLibrary else { return }
-        isLoading = true
+        guard section == .broadcasts, let library = model.audioLibrary else { return }
+        let categoryID = categoryID
+        let regionID = regionID
+        let currentPage: BroadcastChannelPage?
+        if reset {
+            loadGeneration &+= 1
+            isLoading = true
+            isLoadingMore = false
+            currentPage = nil
+        } else {
+            guard !isLoading,
+                  !isLoadingMore,
+                  let page = channelPage,
+                  page.hasMore
+            else { return }
+            isLoadingMore = true
+            currentPage = page
+        }
+        let generation = loadGeneration
         errorMessage = nil
+        defer {
+            if loadGeneration == generation,
+               section == .broadcasts,
+               self.categoryID == categoryID,
+               self.regionID == regionID {
+                if reset { isLoading = false } else { isLoadingMore = false }
+            }
+        }
         do {
             let value = try await library.broadcastChannels(
                 categoryID: categoryID,
                 regionID: regionID,
-                cursor: reset ? .initial : channelPage?.nextCursor ?? .initial
+                cursor: currentPage?.nextCursor ?? .initial
             )
-            channelPage = reset ? value : channelPage?.appending(value) ?? value
+            try Task.checkCancellation()
+            guard loadGeneration == generation,
+                  section == .broadcasts,
+                  self.categoryID == categoryID,
+                  self.regionID == regionID,
+                  reset || channelPage?.nextCursor == currentPage?.nextCursor
+            else { return }
+            channelPage = currentPage?.appending(value) ?? value
             channels = channelPage?.channels ?? []
         } catch is CancellationError {
-        } catch { errorMessage = error.localizedDescription }
-        isLoading = false
+        } catch {
+            guard loadGeneration == generation,
+                  section == .broadcasts,
+                  self.categoryID == categoryID,
+                  self.regionID == regionID
+            else { return }
+            errorMessage = error.localizedDescription
+        }
     }
 }
 
@@ -2140,6 +2268,7 @@ private struct IOSPersonalFMContent: View {
     @Bindable var player: PlayerController
 
     var body: some View {
+        let songs = controller.tracks.map(\.song)
         List {
             Section {
                 Menu {
@@ -2189,7 +2318,7 @@ private struct IOSPersonalFMContent: View {
                     ForEach(controller.tracks) { track in
                         IOSSongRow(
                             song: track.song,
-                            songs: controller.tracks.map(\.song),
+                            songs: songs,
                             model: model,
                             player: player
                         )
@@ -2294,8 +2423,12 @@ private struct IOSMusicStyleDetailView: View {
     @State private var isLoading = true
     @State private var isLoadingMore = false
     @State private var errorMessage: String?
+    @State private var loadGeneration = 0
+    @State private var loadedStyleID: Int64?
 
     var body: some View {
+        let items = page?.items ?? []
+        let songs = items.compactMap { if case let .song(song) = $0 { song } else { nil } }
         VStack(spacing: 0) {
             Picker("内容类型", selection: $kind) {
                 ForEach(MusicStyleResourceKind.allCases, id: \.self) { Text($0.rawValue).tag($0) }
@@ -2315,8 +2448,12 @@ private struct IOSMusicStyleDetailView: View {
                         Section("曲风简介") { Text(detail.description).textSelection(.enabled) }
                     }
                     Section(kind.rawValue) {
-                        ForEach(page?.items ?? []) { item in resourceRow(item) }
-                        if page?.nextCursor != nil {
+                        ForEach(items) { item in resourceRow(item, songs: songs) }
+                        if let errorMessage {
+                            IOSInlineRetry(message: errorMessage) {
+                                Task { await loadMore() }
+                            }
+                        } else if page?.nextCursor != nil {
                             Button("载入更多") { Task { await loadMore() } }
                                 .frame(maxWidth: .infinity, minHeight: 44)
                                 .disabled(isLoadingMore)
@@ -2332,12 +2469,12 @@ private struct IOSMusicStyleDetailView: View {
     }
 
     @ViewBuilder
-    private func resourceRow(_ item: MusicStyleResource) -> some View {
+    private func resourceRow(_ item: MusicStyleResource, songs: [Song]) -> some View {
         switch item {
         case let .song(song):
             IOSSongRow(
                 song: song,
-                songs: (page?.items ?? []).compactMap { if case let .song(value) = $0 { value } else { nil } },
+                songs: songs,
                 model: model,
                 player: player
             )
@@ -2358,32 +2495,93 @@ private struct IOSMusicStyleDetailView: View {
 
     @MainActor
     private func load() async {
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        let requestedStyleID = styleID
+        let requestedKind = kind
         guard let library = model.knowledgeLibrary else {
             isLoading = false
             errorMessage = "曲风服务不可用"
             return
         }
         isLoading = true
+        isLoadingMore = false
         page = nil
         errorMessage = nil
+        defer {
+            if loadGeneration == generation,
+               styleID == requestedStyleID,
+               kind == requestedKind {
+                isLoading = false
+            }
+        }
         do {
-            async let loadedDetail = library.styleDetail(id: styleID, name: styleName)
-            async let loadedPage = library.stylePage(id: styleID, kind: kind)
-            (detail, page) = try await (loadedDetail, loadedPage)
+            async let loadedPage = library.stylePage(id: requestedStyleID, kind: requestedKind)
+            let loadedDetail = if loadedStyleID == requestedStyleID, let detail {
+                detail
+            } else {
+                try await library.styleDetail(id: requestedStyleID, name: styleName)
+            }
+            let nextPage = try await loadedPage
+            try Task.checkCancellation()
+            guard loadGeneration == generation,
+                  styleID == requestedStyleID,
+                  kind == requestedKind
+            else { return }
+            detail = loadedDetail
+            loadedStyleID = requestedStyleID
+            page = nextPage
         } catch is CancellationError {
-        } catch { errorMessage = error.localizedDescription }
-        isLoading = false
+        } catch {
+            guard loadGeneration == generation,
+                  styleID == requestedStyleID,
+                  kind == requestedKind
+            else { return }
+            errorMessage = error.localizedDescription
+        }
     }
 
     @MainActor
     private func loadMore() async {
-        guard let library = model.knowledgeLibrary, let page, let cursor = page.nextCursor else { return }
+        guard let library = model.knowledgeLibrary,
+              let page,
+              let cursor = page.nextCursor,
+              !isLoading,
+              !isLoadingMore
+        else { return }
+        let generation = loadGeneration
+        let requestedStyleID = styleID
+        let requestedKind = kind
         isLoadingMore = true
+        errorMessage = nil
+        defer {
+            if loadGeneration == generation,
+               styleID == requestedStyleID,
+               kind == requestedKind {
+                isLoadingMore = false
+            }
+        }
         do {
-            let next = try await library.stylePage(id: styleID, kind: kind, cursor: cursor)
+            let next = try await library.stylePage(
+                id: requestedStyleID,
+                kind: requestedKind,
+                cursor: cursor
+            )
+            try Task.checkCancellation()
+            guard loadGeneration == generation,
+                  styleID == requestedStyleID,
+                  kind == requestedKind,
+                  self.page?.nextCursor == cursor
+            else { return }
             self.page = page.appending(next)
-        } catch { errorMessage = error.localizedDescription }
-        isLoadingMore = false
+        } catch is CancellationError {
+        } catch {
+            guard loadGeneration == generation,
+                  styleID == requestedStyleID,
+                  kind == requestedKind
+            else { return }
+            errorMessage = error.localizedDescription
+        }
     }
 }
 
@@ -2548,11 +2746,9 @@ private struct IOSMusicSheetPreview: View {
     let song: Song
     let sheet: MusicSheetSummary
     @Bindable var model: AppModel
-    @State private var preview: MusicSheetPreview?
     @State private var pdfURL: URL?
     @State private var isLoading = true
     @State private var isSaving = false
-    @State private var isPreparingShare = false
     @State private var shareItem: IOSLocalShareItem?
     @State private var errorMessage: String?
 
@@ -2565,22 +2761,6 @@ private struct IOSMusicSheetPreview: View {
                     IOSLibraryFailureView(title: "无法打开乐谱", message: errorMessage) { Task { await load() } }
                 } else if let pdfURL {
                     IOSPDFView(url: pdfURL)
-                } else if case let .images(images) = preview, !images.isEmpty {
-                    TabView {
-                        ForEach(Array(images.enumerated()), id: \.offset) { index, url in
-                            ScrollView([.horizontal, .vertical]) {
-                                CachedAsyncImage(url: url) { phase in
-                                    switch phase {
-                                    case let .success(image): image.resizable().scaledToFit()
-                                    case .empty: ProgressView()
-                                    case .failure: ContentUnavailableView("第 \(index + 1) 页加载失败", systemImage: "photo")
-                                    }
-                                }
-                                .padding()
-                            }
-                        }
-                    }
-                    .tabViewStyle(.page(indexDisplayMode: .always))
                 } else {
                     IOSLibraryEmptyState(title: "此乐谱不支持预览", symbol: "doc.questionmark")
                 }
@@ -2590,17 +2770,18 @@ private struct IOSMusicSheetPreview: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
                 ToolbarItemGroup(placement: .primaryAction) {
-                    Button { Task { await sharePDF() } } label: {
-                        if isPreparingShare { ProgressView() }
-                        else { Image(systemName: "square.and.arrow.up") }
+                    Button {
+                        if let pdfURL { shareItem = IOSLocalShareItem(url: pdfURL) }
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
                     }
                     .accessibilityLabel("分享或存入文件")
-                    .disabled(preview == nil || isPreparingShare || isSaving)
+                    .disabled(pdfURL == nil || isSaving)
                     Button { Task { await savePDF() } } label: {
                         if isSaving { ProgressView() } else { Image(systemName: "arrow.down.circle") }
                     }
                     .accessibilityLabel("保存乐谱")
-                    .disabled(preview == nil || isSaving)
+                    .disabled(pdfURL == nil || isSaving)
                 }
             }
         }
@@ -2613,15 +2794,18 @@ private struct IOSMusicSheetPreview: View {
         guard let library = model.knowledgeLibrary else { return }
         isLoading = true
         errorMessage = nil
+        pdfURL = nil
         do {
             let value = try await library.sheetPreview(id: sheet.id)
-            preview = value
-            if case .pdf = value {
+            switch value {
+            case .images, .pdf:
                 pdfURL = try await MusicSheetWorker.shared.preparePDF(
                     sheetID: sheet.id,
                     preview: value,
                     cacheRoot: model.cacheFolderURL
                 )
+            case .unsupported:
+                break
             }
         } catch is CancellationError {
         } catch { errorMessage = error.localizedDescription }
@@ -2630,22 +2814,11 @@ private struct IOSMusicSheetPreview: View {
 
     @MainActor
     private func savePDF() async {
-        guard let preview else { return }
+        guard let pdfURL else { return }
         isSaving = true
         do {
-            let source: URL
-            if let pdfURL {
-                source = pdfURL
-            } else {
-                source = try await MusicSheetWorker.shared.preparePDF(
-                    sheetID: sheet.id,
-                    preview: preview,
-                    cacheRoot: model.cacheFolderURL
-                )
-                pdfURL = source
-            }
             _ = try await MusicSheetWorker.shared.savePDF(
-                at: source,
+                at: pdfURL,
                 song: song,
                 sheet: sheet,
                 to: model.sheetFolderURL
@@ -2653,21 +2826,6 @@ private struct IOSMusicSheetPreview: View {
             model.showToast("乐谱已保存")
         } catch { errorMessage = error.localizedDescription }
         isSaving = false
-    }
-
-    @MainActor
-    private func sharePDF() async {
-        guard let preview else { return }
-        isPreparingShare = true
-        do {
-            let source = try await MusicSheetWorker.shared.preparePDF(
-                sheetID: sheet.id,
-                preview: preview,
-                cacheRoot: model.cacheFolderURL
-            )
-            shareItem = IOSLocalShareItem(url: source)
-        } catch { errorMessage = error.localizedDescription }
-        isPreparingShare = false
     }
 }
 

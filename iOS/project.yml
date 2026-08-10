@@ -26,7 +26,7 @@ targets:
     sources:
       - path: TinyCloudMusicIOS
       - path: ../Sources/TinyCloudMusic
-        name: SharedMacCore
+        name: SharedCore
         excludes:
           - Resources
           - AppModel.swift

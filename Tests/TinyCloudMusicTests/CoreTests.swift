@@ -705,23 +705,15 @@ struct CoreTests {
     @MainActor
     func artworkRequestPolicy() throws {
         let url = try #require(URL(string: "https://example.com/artwork.png"))
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
-        let small = try #require(ArtworkPipeline.request(for: url, size: CGSize(width: 44, height: 44), now: now))
-        let nearby = try #require(ArtworkPipeline.request(for: url, size: CGSize(width: 56, height: 56), now: now))
+        let small = try #require(ArtworkPipeline.request(for: url, size: CGSize(width: 44, height: 44)))
+        let nearby = try #require(ArtworkPipeline.request(for: url, size: CGSize(width: 56, height: 56)))
         let retina = try #require(
-            ArtworkPipeline.request(for: url, size: CGSize(width: 56, height: 56), displayScale: 2, now: now)
-        )
-        let expired = try #require(
-            ArtworkPipeline.request(
-                for: url,
-                size: CGSize(width: 44, height: 44),
-                now: now.addingTimeInterval(ArtworkPipeline.diskTTL)
-            )
+            ArtworkPipeline.request(for: url, size: CGSize(width: 56, height: 56), displayScale: 2)
         )
 
         #expect(small.thumbnail == nearby.thumbnail)
         #expect(small.imageID == nearby.imageID)
-        #expect(small.imageID != expired.imageID)
+        #expect(small.imageID == url.absoluteString)
         #expect(retina.thumbnail != nearby.thumbnail)
         #expect(retina.scale == 2)
         #expect(ArtworkPipeline.request(for: URL(fileURLWithPath: "/tmp/image"), size: CGSize(width: 44, height: 44)) == nil)
@@ -733,13 +725,13 @@ struct CoreTests {
 
         let insecureNetease = try #require(URL(string: "http://p1.music.126.net/cover.jpg"))
         let secureRequest = try #require(
-            ArtworkPipeline.request(for: insecureNetease, size: CGSize(width: 44, height: 44), now: now)
+            ArtworkPipeline.request(for: insecureNetease, size: CGSize(width: 44, height: 44))
         )
         #expect(secureRequest.url?.scheme == "https")
         #expect(secureRequest.imageID?.hasPrefix("https://") == true)
         let protocolRelative = try #require(URL(string: "//p1.music.126.net/cover.jpg"))
         let protocolRelativeRequest = try #require(
-            ArtworkPipeline.request(for: protocolRelative, size: CGSize(width: 44, height: 44), now: now)
+            ArtworkPipeline.request(for: protocolRelative, size: CGSize(width: 44, height: 44))
         )
         #expect(protocolRelativeRequest.url?.absoluteString == "https://p1.music.126.net/cover.jpg")
 

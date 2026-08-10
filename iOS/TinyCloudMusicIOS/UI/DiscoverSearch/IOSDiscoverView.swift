@@ -3,6 +3,12 @@ import SwiftUI
 struct IOSDiscoverView: View {
     @Bindable var model: AppModel
     @Bindable var player: PlayerController
+    @State private var renderedHomeRevision = 0
+    @State private var homeWindowCount = 2
+
+    private var renderedSlotCount: Int {
+        renderedHomeRevision == model.homeLoadRevision ? homeWindowCount : 2
+    }
 
     var body: some View {
         ScrollView {
@@ -22,8 +28,20 @@ struct IOSDiscoverView: View {
                     .buttonStyle(.bordered)
                 }
 
-                ForEach(model.homeSlots) { slot in
+                ForEach(model.homeSlots.prefix(renderedSlotCount)) { slot in
                     IOSHomeSectionView(slot: slot, model: model, player: player)
+                }
+
+                if renderedSlotCount < model.homeSlots.count {
+                    ProgressView("正在载入更多栏目")
+                        .frame(maxWidth: .infinity, minHeight: 72)
+                        .id("\(model.homeLoadRevision):\(renderedSlotCount)")
+                        .onScrollVisibilityChange(threshold: 0.5) { visible in
+                            guard visible else { return }
+                            let nextCount = min(renderedSlotCount + 2, model.homeSlots.count)
+                            renderedHomeRevision = model.homeLoadRevision
+                            homeWindowCount = nextCount
+                        }
                 }
             }
             .padding(.horizontal, 16)
@@ -90,6 +108,9 @@ private struct IOSHomeSectionView: View {
                     .scrollClipDisabled()
                 }
             }
+        }
+        .task(id: "\(slot.id):\(model.homeLoadRevision)") {
+            model.loadHomeSectionIfNeeded(id: slot.id)
         }
     }
 }

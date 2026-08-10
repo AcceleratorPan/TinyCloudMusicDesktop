@@ -1323,7 +1323,7 @@ private struct DetailContentView: View {
                         model: model,
                         player: player
                     )
-                case let .user(user, playlists):
+                case let .user(user, playlists, _):
                     UserDetailContent(user: user, playlists: playlists, model: model)
                 }
             }
@@ -1565,6 +1565,10 @@ private struct PlaylistDetailContent: View {
                 artwork: playlist.artwork,
                 saveArtwork: model.saveArtwork,
                 metadata: playlistMetadata,
+                creator: playlist.creator,
+                openCreator: playlist.creatorID > 0
+                    ? { model.open(.user(playlist.creatorID)) }
+                    : nil,
                 actions: headerActions
             )
 
@@ -1763,7 +1767,6 @@ private struct PlaylistDetailContent: View {
 
     private var playlistMetadata: [String] {
         [
-            playlist.creator.isEmpty ? nil : "创建者 \(playlist.creator)",
             "\(max(playlist.trackCount, trackIDs.count).formatted()) 首歌曲",
             playlist.isPrivate ? "私密歌单" : nil,
             playlist.tags.isEmpty ? nil : playlist.tags.joined(separator: " · "),
@@ -1811,15 +1814,6 @@ private struct PlaylistDetailContent: View {
                 .disabled(isFavoritingAll)
                 .help("收藏尚未收藏的 \(unlikedSongCount) 首歌曲")
                 .accessibilityLabel(isFavoritingAll ? "正在全部收藏" : "全部收藏")
-            }
-            if playlist.creatorID != 0 {
-                Button { model.open(.user(playlist.creatorID)) } label: {
-                    Image(systemName: "person.crop.circle")
-                }
-                .buttonStyle(.bordered)
-                .help("查看创建者 \(playlist.creator)")
-                .accessibilityLabel("查看创建者 \(playlist.creator)")
-                .accessibilityHint("打开创建者主页")
             }
             if model.currentUserID != playlist.creatorID {
                 Button { model.setPlaylistSubscribed(playlist.id, subscribed: !isSubscribed) } label: {
@@ -2725,21 +2719,27 @@ private struct DetailHeader: View {
     let artwork: Artwork
     let saveArtwork: (URL, String) -> Void
     var metadata: [String] = []
+    var creator: String = ""
+    var openCreator: (() -> Void)? = nil
     var circularArtwork = false
     var actions: AnyView?
+    @State private var informationHeight: CGFloat = 0
+    @State private var isArtworkSizeFrozen = false
+
+    private var artworkSize: CGFloat { max(192, informationHeight) }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 28) {
+        HStack(alignment: .top, spacing: 28) {
             ArtworkView(
                 artwork: artwork,
                 highResolution: true,
                 saveTitle: title,
                 saveAction: saveArtwork
             )
-                .frame(width: 192, height: 192)
-                .clipShape(RoundedRectangle(cornerRadius: circularArtwork ? 96 : 8, style: .continuous))
+                .frame(width: artworkSize, height: artworkSize)
+                .clipShape(RoundedRectangle(cornerRadius: circularArtwork ? artworkSize / 2 : 8, style: .continuous))
                 .overlay {
-                    RoundedRectangle(cornerRadius: circularArtwork ? 96 : 8, style: .continuous)
+                    RoundedRectangle(cornerRadius: circularArtwork ? artworkSize / 2 : 8, style: .continuous)
                         .stroke(.white.opacity(0.16), lineWidth: 1)
                 }
                 .shadow(color: .black.opacity(0.18), radius: 16, y: 8)
@@ -2753,13 +2753,43 @@ private struct DetailHeader: View {
                     .font(.system(size: 34, weight: .bold))
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
-                if !metadata.isEmpty {
+                if !creator.isEmpty {
+                    HStack(alignment: .firstTextBaseline, spacing: 0) {
+                        if let openCreator {
+                            Button(action: openCreator) {
+                                Text(creator)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Color.accentColor)
+                            .layoutPriority(1)
+                            .help("打开\(creator)的主页")
+                            .accessibilityLabel("查看创建者 \(creator)")
+                            .accessibilityHint("打开创建者主页")
+                        } else {
+                            Text(creator)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                        if !metadata.isEmpty {
+                            Text("   ·   \(metadata.joined(separator: "   ·   "))")
+                                .lineLimit(2)
+                                .truncationMode(.tail)
+                        }
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+                } else if !metadata.isEmpty {
                     Text(metadata.joined(separator: "   ·   "))
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
                 }
-                ExpandableDescription(text: description)
+                ExpandableDescription(text: description) {
+                    isArtworkSizeFrozen = true
+                }
                     .id(description)
                 if let actions {
                     actions
@@ -2769,6 +2799,9 @@ private struct DetailHeader: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .layoutPriority(1)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                if !isArtworkSizeFrozen { informationHeight = $0 }
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.bottom, 24)
@@ -2778,6 +2811,7 @@ private struct DetailHeader: View {
 
 private struct ExpandableDescription: View {
     let text: String
+    let onExpand: () -> Void
 
     @State private var isExpanded = false
     @State private var fullHeight: CGFloat = 0
@@ -2804,6 +2838,7 @@ private struct ExpandableDescription: View {
                     }
                 if isExpanded || fullHeight > collapsedHeight + 1 {
                     Button {
+                        if !isExpanded { onExpand() }
                         withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
                             isExpanded.toggle()
                         }
@@ -3347,7 +3382,7 @@ struct SettingsView: View {
                 try await MusicSheetWorker.shared.clearCache(at: cacheRoot)
             }
             async let artworkFailure = cacheClearFailure("图片缓存") {
-                await ArtworkPipeline.shared.clearCache()
+                try await ArtworkPipeline.shared.clearCache()
             }
             let failures = await (playerFailure, downloadFailure, sheetFailure, artworkFailure)
             let messages = [failures.0, failures.1, failures.2, failures.3].compactMap { $0 }

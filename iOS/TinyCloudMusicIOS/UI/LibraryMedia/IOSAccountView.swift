@@ -1,15 +1,15 @@
 import CoreImage
 import CoreImage.CIFilterBuiltins
+import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
-@preconcurrency import WebKit
 
 struct IOSAccountView: View {
     @Bindable private var model: AppModel
     @Bindable private var player: PlayerController
     @State private var showsQRLogin = false
-    @State private var showsWebLogin = false
+    @State private var showsPhoneLogin = false
     @State private var cookie = ""
     @State private var musicU = ""
     @State private var isSavingCookie = false
@@ -47,9 +47,9 @@ struct IOSAccountView: View {
                 IOSQRLoginView(session: session, onSuccess: sessionDidChange)
             }
         }
-        .sheet(isPresented: $showsWebLogin) {
+        .sheet(isPresented: $showsPhoneLogin) {
             if let session = model.session {
-                IOSWebLoginView(session: session, onSuccess: sessionDidChange)
+                IOSPhoneLoginView(session: session, onSuccess: sessionDidChange)
             }
         }
         .fileImporter(
@@ -124,8 +124,8 @@ struct IOSAccountView: View {
                     Button { showsQRLogin = true } label: {
                         Label("二维码登录", systemImage: "qrcode")
                     }
-                    Button { showsWebLogin = true } label: {
-                        Label("官方网页登录", systemImage: "safari")
+                    Button { showsPhoneLogin = true } label: {
+                        Label("手机号验证码登录", systemImage: "phone.badge.checkmark")
                     }
                     SecureField("Cookie", text: $cookie)
                         .textContentType(.password)
@@ -227,7 +227,6 @@ struct IOSAccountView: View {
             folderRow("视频下载", path: model.videoDownloadPath, kind: .video)
             folderRow("图片保存", path: model.imagePath, kind: .image)
             folderRow("乐谱保存", path: model.sheetPath, kind: .sheet)
-            folderRow("缓存", path: model.cachePath, kind: .cache)
             Button(role: .destructive) { confirmsCacheClear = true } label: {
                 if isClearingCache { HStack { ProgressView(); Text("正在清除缓存") } }
                 else { Label("清除缓存", systemImage: "trash") }
@@ -323,6 +322,7 @@ struct IOSAccountView: View {
             .frame(minHeight: 44)
         }
         .buttonStyle(.plain)
+        .disabled(isClearingCache)
         .accessibilityLabel("选择\(title)位置")
     }
 
@@ -433,7 +433,6 @@ struct IOSAccountView: View {
             case .video: model.setVideoDownloadFolder(url)
             case .image: model.setImageFolder(url)
             case .sheet: model.setSheetFolder(url)
-            case .cache: model.setCacheFolder(url)
             }
         case let .failure(error):
             message = error.localizedDescription
@@ -453,7 +452,8 @@ struct IOSAccountView: View {
             }
             do { try await MusicSheetWorker.shared.clearCache(at: model.cacheFolderURL) }
             catch { failures.append("乐谱缓存：\(error.localizedDescription)") }
-            await ArtworkPipeline.shared.clearCache()
+            do { try await ArtworkPipeline.shared.clearCache() }
+            catch { failures.append("封面缓存：\(error.localizedDescription)") }
             isClearingCache = false
             message = failures.isEmpty ? "缓存已清除。" : "部分缓存清除失败：\n" + failures.joined(separator: "\n")
         }
@@ -461,7 +461,7 @@ struct IOSAccountView: View {
 }
 
 private enum IOSFolderKind: String, Identifiable {
-    case audio, video, image, sheet, cache
+    case audio, video, image, sheet
     var id: Self { self }
 }
 
@@ -648,173 +648,361 @@ private enum IOSNativeQRCode {
     }
 }
 
-private enum IOSWebLoginPhase: Equatable {
-    case loading
-    case waiting
-    case saving
-    case failed(String)
+enum IOSPhoneLoginError: LocalizedError, Equatable, Sendable {
+    case invalidPhone
+    case invalidCode
+    case missingSessionCookie
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidPhone: "请输入有效的中国大陆手机号"
+        case .invalidCode: "请输入有效的短信验证码"
+        case .missingSessionCookie: "登录成功，但响应缺少会话凭据，请使用二维码登录"
+        }
+    }
 }
 
-private struct IOSWebLoginView: View {
+enum IOSPhoneLoginRequest {
+    static let countryCode = "86"
+    private static let phoneCharacters = Set("0123456789 +-()")
+    private static let digits = Set("0123456789")
+
+    static func normalizedPhone(_ value: String) -> String? {
+        guard value.allSatisfy(phoneCharacters.contains) else { return nil }
+        let digits = value.filter(Self.digits.contains)
+        let phone = digits.hasPrefix(countryCode) && digits.count == 13
+            ? String(digits.dropFirst(countryCode.count))
+            : digits
+        return phone.count == 11 && phone.first == "1" && "3"..."9" ~= phone[phone.index(after: phone.startIndex)]
+            ? phone
+            : nil
+    }
+
+    static func normalizedCode(_ value: String) -> String? {
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (4...8).contains(value.count) && value.allSatisfy(Self.digits.contains) ? value : nil
+    }
+
+    static func captchaPayload(phone: String) throws -> [String: Any] {
+        guard let phone = normalizedPhone(phone) else { throw IOSPhoneLoginError.invalidPhone }
+        return [
+            "ctcode": countryCode,
+            // The upstream API intentionally spells this field "secrete".
+            "secrete": "music_middleuser_pclogin",
+            "cellphone": phone
+        ]
+    }
+
+    static func loginPayload(phone: String, code: String) throws -> [String: Any] {
+        guard let phone = normalizedPhone(phone) else { throw IOSPhoneLoginError.invalidPhone }
+        guard let code = normalizedCode(code) else { throw IOSPhoneLoginError.invalidCode }
+        return [
+            "type": "1",
+            "https": "true",
+            "phone": phone,
+            "countrycode": countryCode,
+            "captcha": code,
+            "remember": "true",
+            "secureCaptcha": ""
+        ]
+    }
+
+    static func cookieHeader(baseCookie: String, deviceID: String, now: Date = Date()) -> String {
+        var fields = baseCookie.split(separator: ";").reduce(into: [String: String]()) { result, part in
+            let pair = part.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard pair.count == 2 else { return }
+            let name = pair[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty { result[name] = pair[1].trimmingCharacters(in: .whitespacesAndNewlines) }
+        }
+        let timestamp = Int64(now.timeIntervalSince1970 * 1_000)
+        let nuid = (UUID().uuidString + UUID().uuidString).replacingOccurrences(of: "-", with: "").lowercased()
+        let defaults = [
+            "__remember_me": "true",
+            "ntes_kaola_ad": "1",
+            "_ntes_nuid": nuid,
+            "_ntes_nnid": "\(nuid),\(timestamp)",
+            "WNMCID": "\(nuid.prefix(6)).\(timestamp).01.0",
+            "WEVNSM": "1.0.0",
+            "os": "pc",
+            "osver": "Microsoft-Windows-10-Professional-build-19045-64bit",
+            "appver": "3.1.17.204416",
+            "channel": "netease",
+            "deviceId": deviceID
+        ]
+        for (name, value) in defaults where fields[name] == nil { fields[name] = value }
+        return fields.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "; ")
+    }
+}
+
+final class IOSPhoneLoginClient: @unchecked Sendable {
+    private let session: URLSession
+    private let cookieStorage: HTTPCookieStorage?
+    private let baseCookie: String
+    private let deviceID: String
+
+    init(cookie: String, deviceID: String) {
+        let requestDeviceID = deviceID.isEmpty
+            ? ((try? XEAPICodec.generateDeviceID()) ?? UUID().uuidString.replacingOccurrences(of: "-", with: ""))
+            : deviceID
+        baseCookie = IOSPhoneLoginRequest.cookieHeader(
+            baseCookie: cookie,
+            deviceID: requestDeviceID
+        )
+        self.deviceID = requestDeviceID
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpCookieAcceptPolicy = .always
+        configuration.httpMaximumConnectionsPerHost = 1
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 30
+        cookieStorage = configuration.httpCookieStorage
+        session = URLSession(configuration: configuration)
+    }
+
+    deinit { session.invalidateAndCancel() }
+
+    func sendCode(phone: String) async throws {
+        try await request(
+            path: "/weapi/sms/captcha/sent",
+            payload: IOSPhoneLoginRequest.captchaPayload(phone: phone)
+        )
+    }
+
+    func login(phone: String, code: String) async throws -> String {
+        try await request(
+            path: "/weapi/w/login/cellphone",
+            payload: IOSPhoneLoginRequest.loginPayload(phone: phone, code: code)
+        )
+        let cookie = currentCookie
+        guard !NeteaseCookieHeader.value(named: "MUSIC_U", in: cookie).isEmpty else {
+            throw IOSPhoneLoginError.missingSessionCookie
+        }
+        return cookie
+    }
+
+    private var currentCookie: String {
+        NeteaseCookieHeader.merging(baseCookie, with: cookieStorage?.cookies ?? [])
+    }
+
+    private func request(path: String, payload: [String: Any]) async throws {
+        let credentials = try SessionCredentials(cookie: currentCookie, musicU: "", deviceID: deviceID)
+        let transport = EAPITransport(
+            session: session,
+            credentialSnapshot: CredentialSnapshot(.authenticated(credentials))
+        )
+        do {
+            _ = try await transport.requestWEAPIJSONObject(
+                path: path,
+                payload: payload,
+                invalidatesAccountCache: false,
+                retryable: false,
+                restrictsRedirects: true
+            )
+        } catch let EAPIError.service(code, _) where code == -462 {
+            throw EAPIError.service(
+                code: code,
+                message: "登录触发网易云安全验证，请稍后重试或使用二维码登录"
+            )
+        } catch let EAPIError.http(status) where status == 400 && path.hasSuffix("/login/cellphone") {
+            throw EAPIError.service(
+                code: status,
+                message: "登录被网易云拒绝，请核对验证码；若持续失败，请稍后重试或使用二维码登录"
+            )
+        }
+    }
+}
+
+private enum IOSPhoneLoginField: Hashable {
+    case phone
+    case code
+}
+
+private struct IOSPhoneLoginView: View {
     @Environment(\.dismiss) private var dismiss
     @Bindable var session: SessionController
     let onSuccess: @MainActor () async -> Void
-    @State private var phase = IOSWebLoginPhase.loading
-    @State private var browserID = UUID()
+    @State private var client: IOSPhoneLoginClient
+    @State private var phone = ""
+    @State private var code = ""
+    @State private var isSendingCode = false
+    @State private var isLoggingIn = false
+    @State private var resendSeconds = 0
+    @State private var statusMessage: String?
+    @State private var errorMessage: String?
+    @State private var operationTask: Task<Void, Never>?
+    @State private var cooldownTask: Task<Void, Never>?
+    @FocusState private var focusedField: IOSPhoneLoginField?
+
+    init(session: SessionController, onSuccess: @escaping @MainActor () async -> Void) {
+        self.session = session
+        self.onSuccess = onSuccess
+        let credentials = session.state == .guest ? session.credentials : nil
+        _client = State(initialValue: IOSPhoneLoginClient(
+            cookie: credentials?.cookie ?? "",
+            deviceID: credentials?.deviceID ?? ""
+        ))
+    }
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                IOSNeteaseLoginWebView(
-                    onReady: { if phase == .loading { phase = .waiting } },
-                    onFailure: { if phase != .saving { phase = .failed($0) } },
-                    onCredentials: save
-                )
-                .id(browserID)
-                Divider()
-                status.padding(.horizontal, 16).frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+            Form {
+                Section("手机号") {
+                    LabeledContent("号码") {
+                        HStack(spacing: 8) {
+                            Text("+86").foregroundStyle(.secondary)
+                            TextField("11 位手机号", text: $phone)
+                                .keyboardType(.phonePad)
+                                .textContentType(.telephoneNumber)
+                                .privacySensitive()
+                                .multilineTextAlignment(.trailing)
+                                .focused($focusedField, equals: .phone)
+                        }
+                    }
+                    Button(action: sendCode) {
+                        if isSendingCode {
+                            HStack { ProgressView(); Text("正在发送") }
+                        } else if resendSeconds > 0 {
+                            Label("\(resendSeconds) 秒后可重发", systemImage: "clock")
+                        } else {
+                            Label("获取验证码", systemImage: "paperplane")
+                        }
+                    }
+                    .disabled(isBusy || resendSeconds > 0 || IOSPhoneLoginRequest.normalizedPhone(phone) == nil)
+                }
+
+                Section("验证码") {
+                    TextField("短信验证码", text: $code)
+                        .keyboardType(.numberPad)
+                        .textContentType(.oneTimeCode)
+                        .privacySensitive()
+                        .focused($focusedField, equals: .code)
+                    Button(action: login) {
+                        if isLoggingIn {
+                            HStack { ProgressView(); Text("正在登录") }
+                                .frame(maxWidth: .infinity)
+                        } else {
+                            Label("登录", systemImage: "checkmark.shield")
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(isBusy
+                        || IOSPhoneLoginRequest.normalizedPhone(phone) == nil
+                        || IOSPhoneLoginRequest.normalizedCode(code) == nil)
+                }
+
+                if let errorMessage {
+                    Section {
+                        Label(errorMessage, systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.red)
+                    }
+                } else if let statusMessage {
+                    Section {
+                        Label(statusMessage, systemImage: "checkmark.circle")
+                            .foregroundStyle(.green)
+                    }
+                }
             }
-            .navigationTitle("官方网页登录")
+            .scrollDismissesKeyboard(.interactively)
+            .navigationTitle("手机号登录")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
-                if case .failed = phase {
-                    ToolbarItem(placement: .primaryAction) {
-                        Button("重试") {
-                            phase = .loading
-                            browserID = UUID()
-                        }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") {
+                        operationTask?.cancel()
+                        dismiss()
                     }
                 }
             }
         }
-        .presentationDetents([.large])
-        .interactiveDismissDisabled(phase == .saving)
-    }
-
-    @ViewBuilder
-    private var status: some View {
-        switch phase {
-        case .loading:
-            HStack { ProgressView(); Text("正在打开 music.163.com") }
-        case .waiting:
-            Label("请在官方页面完成登录，成功后会自动验证。", systemImage: "lock.shield")
-                .foregroundStyle(.secondary)
-        case .saving:
-            HStack { ProgressView(); Text("正在验证登录状态") }
-        case let .failed(message):
-            Label(message, systemImage: "exclamationmark.triangle").foregroundStyle(.red)
+        .presentationDetents([.medium, .large])
+        .onAppear { focusedField = .phone }
+        .onDisappear {
+            operationTask?.cancel()
+            cooldownTask?.cancel()
         }
     }
 
-    private func save(_ credentials: SessionCredentials) {
-        guard phase != .saving else { return }
-        phase = .saving
-        Task { @MainActor in
-            if await session.save(cookie: credentials.cookie) {
+    private var isBusy: Bool { isSendingCode || isLoggingIn }
+
+    private func sendCode() {
+        guard IOSPhoneLoginRequest.normalizedPhone(phone) != nil else {
+            showError(IOSPhoneLoginError.invalidPhone.localizedDescription, focus: .phone)
+            return
+        }
+        errorMessage = nil
+        statusMessage = nil
+        isSendingCode = true
+        operationTask = Task { @MainActor in
+            defer {
+                isSendingCode = false
+                operationTask = nil
+            }
+            do {
+                try await client.sendCode(phone: phone)
+                try Task.checkCancellation()
+                statusMessage = "验证码已发送。"
+                UIAccessibility.post(notification: .announcement, argument: statusMessage)
+                focusedField = .code
+                startCooldown()
+            } catch is CancellationError {
+            } catch {
+                showError(error.localizedDescription, focus: .phone)
+            }
+        }
+    }
+
+    private func login() {
+        guard IOSPhoneLoginRequest.normalizedPhone(phone) != nil else {
+            showError(IOSPhoneLoginError.invalidPhone.localizedDescription, focus: .phone)
+            return
+        }
+        guard IOSPhoneLoginRequest.normalizedCode(code) != nil else {
+            showError(IOSPhoneLoginError.invalidCode.localizedDescription, focus: .code)
+            return
+        }
+        errorMessage = nil
+        statusMessage = nil
+        isLoggingIn = true
+        operationTask = Task { @MainActor in
+            defer {
+                isLoggingIn = false
+                operationTask = nil
+            }
+            do {
+                let cookie = try await client.login(phone: phone, code: code)
+                try Task.checkCancellation()
+                guard await session.save(cookie: cookie) else {
+                    showError("登录凭据未通过验证，请稍后重试或使用二维码登录。", focus: .code)
+                    return
+                }
                 await onSuccess()
                 dismiss()
-            } else {
-                phase = .failed("登录凭据未通过验证，请重试。")
+            } catch is CancellationError {
+            } catch {
+                showError(error.localizedDescription, focus: .code)
             }
         }
     }
-}
 
-private struct IOSNeteaseLoginWebView: UIViewRepresentable {
-    let onReady: () -> Void
-    let onFailure: (String) -> Void
-    let onCredentials: (SessionCredentials) -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onReady: onReady, onFailure: onFailure, onCredentials: onCredentials)
+    private func startCooldown() {
+        cooldownTask?.cancel()
+        resendSeconds = 60
+        cooldownTask = Task { @MainActor in
+            while resendSeconds > 0 {
+                do { try await Task.sleep(for: .seconds(1)) }
+                catch { return }
+                resendSeconds -= 1
+            }
+            cooldownTask = nil
+        }
     }
 
-    func makeUIView(context: Context) -> WKWebView {
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .nonPersistent()
-        let view = WKWebView(frame: .zero, configuration: configuration)
-        context.coordinator.cookieStore = configuration.websiteDataStore.httpCookieStore
-        configuration.websiteDataStore.httpCookieStore.add(context.coordinator)
-        view.navigationDelegate = context.coordinator
-        view.load(URLRequest(url: URL(string: "https://music.163.com/#/login")!))
-        return view
-    }
-
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
-
-    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
-        uiView.stopLoading()
-        uiView.navigationDelegate = nil
-        coordinator.cookieStore?.remove(coordinator)
-    }
-
-    @MainActor
-    final class Coordinator: NSObject, WKNavigationDelegate, WKHTTPCookieStoreObserver {
-        let onReady: () -> Void
-        let onFailure: (String) -> Void
-        let onCredentials: (SessionCredentials) -> Void
-        var cookieStore: WKHTTPCookieStore?
-        private var lastCredentials: SessionCredentials?
-
-        init(onReady: @escaping () -> Void, onFailure: @escaping (String) -> Void, onCredentials: @escaping (SessionCredentials) -> Void) {
-            self.onReady = onReady
-            self.onFailure = onFailure
-            self.onCredentials = onCredentials
-        }
-
-        func cookiesDidChange(in cookieStore: WKHTTPCookieStore) { inspect(cookieStore) }
-
-        func webView(
-            _ webView: WKWebView,
-            decidePolicyFor navigationAction: WKNavigationAction,
-            decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void
-        ) {
-            guard let url = navigationAction.request.url else {
-                decisionHandler(.cancel)
-                return
-            }
-            decisionHandler(Self.isOfficialNavigation(url) ? .allow : .cancel)
-        }
-
-        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation?) {
-            guard let url = webView.url, Self.isOfficialNavigation(url) else {
-                webView.stopLoading()
-                onFailure("已阻止非网易云官方页面。")
-                return
-            }
-        }
-
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
-            onReady()
-            if let cookieStore { inspect(cookieStore) }
-        }
-
-        func webView(_ webView: WKWebView, didFail navigation: WKNavigation?, withError error: any Error) { report(error) }
-        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation?, withError error: any Error) { report(error) }
-
-        private func report(_ error: any Error) {
-            let error = error as NSError
-            guard error.code != NSURLErrorCancelled else { return }
-            onFailure("登录页加载失败：\(error.localizedDescription)")
-        }
-
-        private func inspect(_ cookieStore: WKHTTPCookieStore) {
-            cookieStore.getAllCookies { [weak self] cookies in
-                guard let credentials = NeteaseWebCookieExtractor.credentials(from: cookies) else { return }
-                Task { @MainActor [weak self] in
-                    guard let self, credentials != lastCredentials else { return }
-                    lastCredentials = credentials
-                    onCredentials(credentials)
-                }
-            }
-        }
-
-        private static func isOfficialNavigation(_ url: URL) -> Bool {
-            if url.scheme?.lowercased() == "about" { return true }
-            let host = url.host?.lowercased() ?? ""
-            return url.scheme?.lowercased() == "https" && (host == "163.com" || host.hasSuffix(".163.com"))
-        }
+    private func showError(_ message: String, focus: IOSPhoneLoginField) {
+        statusMessage = nil
+        errorMessage = message
+        focusedField = focus
+        UIAccessibility.post(notification: .announcement, argument: message)
     }
 }
 

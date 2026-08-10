@@ -135,9 +135,10 @@ struct IOSRootView: View {
                 model.invalidateAccountDomainIfNeeded(forCredentialRevision: identity.credentialRevision)
             }
             Task {
-                await model.refreshAccountState()
-                guard sessionIdentity == identity else { return }
-                model.loadHome()
+                await model.refreshAccountState {
+                    guard sessionIdentity == identity else { return }
+                    model.loadHome()
+                }
             }
         }
         .onChange(of: model.path) { _, path in
@@ -212,8 +213,7 @@ struct IOSRootView: View {
     private var cacheConfiguration: IOSCacheConfiguration {
         IOSCacheConfiguration(
             quality: model.settings.playbackQuality,
-            root: model.cacheFolderURL.standardizedFileURL,
-            revision: model.cacheConfigurationRevision
+            root: model.cacheFolderURL.standardizedFileURL
         )
     }
 
@@ -243,7 +243,6 @@ private struct IOSSessionIdentity: Equatable {
 private struct IOSCacheConfiguration: Equatable {
     let quality: AudioQuality
     let root: URL
-    let revision: UInt64
 }
 
 private struct IOSAddSongToPlaylistView: View {

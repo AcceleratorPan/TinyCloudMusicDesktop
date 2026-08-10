@@ -5,6 +5,7 @@ struct IOSSongRow: View {
     let songs: [Song]
     var allSongIDs: [Int64]?
     var playlistID: Int64?
+    var trackNumber: Int?
     @Bindable var model: AppModel
     @Bindable var player: PlayerController
 
@@ -12,21 +13,27 @@ struct IOSSongRow: View {
         HStack(spacing: 8) {
             Button(action: play) {
                 HStack(spacing: 12) {
-                    IOSArtworkView(artwork: song.album.artwork)
-                        .frame(width: 52, height: 52)
+                    if let trackNumber {
+                        Text(trackNumber.formatted())
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .frame(width: 36, height: 52, alignment: .trailing)
+                            .accessibilityLabel("第 \(trackNumber) 首")
+                    } else {
+                        IOSArtworkView(artwork: song.album.artwork)
+                            .frame(width: 52, height: 52)
+                    }
                     VStack(alignment: .leading, spacing: 4) {
                         Text(song.name)
                             .font(.body.weight(.medium))
                             .foregroundStyle(.primary)
-                            .fixedSize(horizontal: false, vertical: true)
+                            .lineLimit(1)
                             .multilineTextAlignment(.leading)
-                        Text(song.artistsDisplay)
+                        Text([song.artistsDisplay, song.album.name]
+                            .filter { !$0.isEmpty }
+                            .joined(separator: " · "))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                        Text(song.album.name)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
                             .lineLimit(1)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -134,6 +141,7 @@ struct IOSSongList: View {
     let songs: [Song]
     var allSongIDs: [Int64]?
     var playlistID: Int64?
+    var showsTrackNumbers = false
     @Bindable var model: AppModel
     @Bindable var player: PlayerController
     var hasMore = false
@@ -143,16 +151,14 @@ struct IOSSongList: View {
 
     var body: some View {
         LazyVStack(spacing: 0) {
-            ForEach(songs) { song in
-                IOSSongRow(
-                    song: song,
-                    songs: songs,
-                    allSongIDs: allSongIDs,
-                    playlistID: playlistID,
-                    model: model,
-                    player: player
-                )
-                Divider().padding(.leading, 64)
+            if showsTrackNumbers {
+                ForEach(songs.indices, id: \.self) { index in
+                    songRow(songs[index], trackNumber: index + 1)
+                }
+            } else {
+                ForEach(songs) { song in
+                    songRow(song, trackNumber: nil)
+                }
             }
             if let loadMoreError {
                 IOSInlineRetry(message: loadMoreError, action: onLoadMore)
@@ -173,6 +179,20 @@ struct IOSSongList: View {
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func songRow(_ song: Song, trackNumber: Int?) -> some View {
+        IOSSongRow(
+            song: song,
+            songs: songs,
+            allSongIDs: allSongIDs,
+            playlistID: playlistID,
+            trackNumber: trackNumber,
+            model: model,
+            player: player
+        )
+        Divider().padding(.leading, 64)
     }
 }
 
