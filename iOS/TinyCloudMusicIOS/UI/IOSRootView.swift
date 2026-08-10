@@ -33,6 +33,7 @@ enum IOSMainTab: String, CaseIterable, Identifiable {
 
 struct IOSRootView: View {
     @Bindable var container: IOSAppContainer
+    @Environment(\.dynamicTypeSize) private var systemDynamicTypeSize
     @State private var selection = IOSMainTab.discover
     @State private var tabPaths: [IOSMainTab: [Route]] = [:]
     @State private var showingNowPlaying = false
@@ -73,9 +74,6 @@ struct IOSRootView: View {
             .tag(IOSMainTab.account)
             .tabItem { Label(IOSMainTab.account.title, systemImage: IOSMainTab.account.symbol) }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            IOSMiniPlayer(player: player) { showingNowPlaying = true }
-        }
         .tint(.red)
         .preferredColorScheme(model.settings.appearance.iosColorScheme)
         .overlay(alignment: .top) {
@@ -85,14 +83,9 @@ struct IOSRootView: View {
                     .padding(.vertical, 10)
                     .background(.regularMaterial, in: Capsule())
                     .padding(.top, 8)
-            } else if let message = model.interactionMessage {
-                Text(message)
-                    .font(.callout.weight(.medium))
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(.regularMaterial, in: Capsule())
+            } else {
+                IOSInteractionToast(message: model.interactionMessage)
                     .padding(.top, 8)
-                    .accessibilityLabel(message)
             }
         }
         .fullScreenCover(isPresented: $showingNowPlaying) {
@@ -100,23 +93,10 @@ struct IOSRootView: View {
                 showingNowPlaying = false
                 model.open(route)
             }
+            .sheet(item: $model.playlistPickerSong) { playlistPicker(for: $0) }
+            .environment(\.dynamicTypeSize, systemDynamicTypeSize)
         }
-        .sheet(item: $model.playlistPickerSong) { song in
-            if let userID = model.currentUserID,
-               let extras = model.extras,
-               let library = model.library {
-                IOSAddSongToPlaylistView(
-                    song: song,
-                    userID: userID,
-                    extras: extras,
-                    library: library,
-                    model: model
-                )
-            } else {
-                ContentUnavailableView("需要登录", systemImage: "person.crop.circle.badge.exclamationmark")
-                    .presentationDetents([.medium])
-            }
-        }
+        .sheet(item: rootPlaylistPickerSong) { playlistPicker(for: $0) }
         .sheet(isPresented: $model.isListenTogetherPresented) {
             if let controller = model.listenTogether {
                 IOSListenTogetherView(controller: controller, player: player)
@@ -156,6 +136,9 @@ struct IOSRootView: View {
         .onChange(of: model.settings.crossfadeDuration) { _, value in
             player.setCrossfadeDuration(value)
         }
+        .onChange(of: model.settings.playbackControlFadeEnabled) { _, enabled in
+            player.setPlaybackControlFadeEnabled(enabled)
+        }
         .onChange(of: listenTogetherPhase) { _, phase in
             guard let phase, case .recoveryAvailable = phase else { return }
             model.isListenTogetherPresented = true
@@ -182,17 +165,21 @@ struct IOSRootView: View {
         } message: {
             Text(model.settingsMessage ?? "")
         }
+        .environment(\.dynamicTypeSize, systemDynamicTypeSize.oneStepSmaller.oneStepSmaller)
     }
 
     private func navigationStack<Content: View>(
         for tab: IOSMainTab,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        NavigationStack(path: pathBinding(for: tab)) {
-            content()
-                .navigationDestination(for: Route.self) {
-                    IOSRouteDestinationView(route: $0, model: model, player: player)
-                }
+        VStack(spacing: 0) {
+            NavigationStack(path: pathBinding(for: tab)) {
+                content()
+                    .navigationDestination(for: Route.self) {
+                        IOSRouteDestinationView(route: $0, model: model, player: player)
+                    }
+            }
+            IOSMiniPlayer(player: player) { showingNowPlaying = true }
         }
     }
 
@@ -204,6 +191,31 @@ struct IOSRootView: View {
                 if selection == tab, model.path != path { model.path = path }
             }
         )
+    }
+
+    private var rootPlaylistPickerSong: Binding<Song?> {
+        Binding(
+            get: { showingNowPlaying ? nil : model.playlistPickerSong },
+            set: { model.playlistPickerSong = $0 }
+        )
+    }
+
+    @ViewBuilder
+    private func playlistPicker(for song: Song) -> some View {
+        if let userID = model.currentUserID,
+           let extras = model.extras,
+           let library = model.library {
+            IOSAddSongToPlaylistView(
+                song: song,
+                userID: userID,
+                extras: extras,
+                library: library,
+                model: model
+            )
+        } else {
+            ContentUnavailableView("需要登录", systemImage: "person.crop.circle.badge.exclamationmark")
+                .presentationDetents([.medium])
+        }
     }
 
     private var sessionIdentity: IOSSessionIdentity? {
@@ -243,6 +255,26 @@ private struct IOSSessionIdentity: Equatable {
 private struct IOSCacheConfiguration: Equatable {
     let quality: AudioQuality
     let root: URL
+}
+
+extension DynamicTypeSize {
+    var oneStepSmaller: Self {
+        switch self {
+        case .xSmall: .xSmall
+        case .small: .xSmall
+        case .medium: .small
+        case .large: .medium
+        case .xLarge: .large
+        case .xxLarge: .xLarge
+        case .xxxLarge: .xxLarge
+        case .accessibility1: .xxxLarge
+        case .accessibility2: .accessibility1
+        case .accessibility3: .accessibility2
+        case .accessibility4: .accessibility3
+        case .accessibility5: .accessibility4
+        @unknown default: self
+        }
+    }
 }
 
 private struct IOSAddSongToPlaylistView: View {

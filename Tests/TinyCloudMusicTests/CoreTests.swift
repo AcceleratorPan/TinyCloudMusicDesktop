@@ -454,6 +454,21 @@ struct CoreTests {
         #expect(restored.settings.videoDownloadQuality == .highest)
     }
 
+    @Test("Playback control fade defaults off and persists")
+    @MainActor
+    func playbackControlFadeSetting() {
+        let suiteName = "TinyCloudMusicTests.\(UUID())"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = AppModel(repository: FixtureMusicRepository(), defaults: defaults)
+
+        #expect(!model.settings.playbackControlFadeEnabled)
+        model.setPlaybackControlFadeEnabled(true)
+
+        let restored = AppModel(repository: FixtureMusicRepository(), defaults: defaults)
+        #expect(restored.settings.playbackControlFadeEnabled)
+    }
+
     @Test("Playlist mutation keeps stale detail visible and revalidates it")
     @MainActor
     func playlistMutationRevalidation() async throws {

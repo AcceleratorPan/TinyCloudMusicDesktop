@@ -901,6 +901,7 @@ struct AppSettings: Equatable, Sendable {
     var videoPlaybackQuality: VideoQuality
     var videoDownloadQuality: VideoQuality
     var crossfadeDuration: TimeInterval
+    var playbackControlFadeEnabled: Bool
     var homeSectionIDs: [String]
     var downloadBookmark: Data?
     var videoDownloadBookmark: Data?

@@ -93,10 +93,17 @@
   "first": {
     "code": 200,
     "data": {
-      "firstListenInfo": {
-        "firstListenTime": "1704067200000",
-        "sceneText": "Found in a daily recommendation"
-      }
+      "songInfoDto": {"songId": "42", "songName": "Fixture Song"},
+      "musicFirstListenDto": {
+        "timestamp": "1702310333313",
+        "season": "初冬",
+        "period": "深夜",
+        "date": "2023.12.11 23:58",
+        "subTitle": null,
+        "desc": null
+      },
+      "musicTotalPlayDto": {"text": "Must not be used as first-listen text"},
+      "musicLikeSongDto": {"text": "Must not be used as first-listen text"}
     }
   }
 }

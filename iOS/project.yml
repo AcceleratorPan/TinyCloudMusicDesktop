@@ -36,7 +36,6 @@ targets:
           - PersonalFMView.swift
           - TinyCloudMusicApp.swift
           - Views.swift
-          - CommentEmojiText.swift
           - LibraryFeatureViews.swift
           - ListenTogetherView.swift
           - NativeQRLoginView.swift
@@ -49,7 +48,6 @@ targets:
           - SongPlaylistViews.swift
           - AudioContentViews.swift
           - AudioUploadViews.swift
-          - ListeningFootprintsView.swift
           - RecommendationHistoryView.swift
           - NIMChatroomTransport.swift
     dependencies:

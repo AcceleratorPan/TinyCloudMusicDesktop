@@ -264,6 +264,7 @@ final class AppModel {
                 rawValue: defaults.string(forKey: "videoDownloadQuality") ?? ""
             ) ?? .high,
             crossfadeDuration: min(max(storedCrossfadeDuration, 0), 12),
+            playbackControlFadeEnabled: defaults.bool(forKey: "playbackControlFadeEnabled"),
             homeSectionIDs: storedSections.isEmpty ? defaultSections : storedSections,
             downloadBookmark: defaults.data(forKey: "downloadBookmark"),
             videoDownloadBookmark: defaults.data(forKey: "videoDownloadBookmark"),
@@ -1036,6 +1037,12 @@ final class AppModel {
         settings.crossfadeDuration = seconds
         defaults.set(seconds, forKey: "crossfadeDuration")
         showToast(seconds == 0 ? "歌曲过渡已关闭" : "歌曲过渡已保存")
+    }
+
+    func setPlaybackControlFadeEnabled(_ enabled: Bool) {
+        settings.playbackControlFadeEnabled = enabled
+        defaults.set(enabled, forKey: "playbackControlFadeEnabled")
+        showToast(enabled ? "播放控制淡入淡出已开启" : "播放控制淡入淡出已关闭")
     }
 
     func setHomeSection(_ id: String, enabled: Bool) {

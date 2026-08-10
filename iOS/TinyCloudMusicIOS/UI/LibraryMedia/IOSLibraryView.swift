@@ -1,4 +1,3 @@
-import CryptoKit
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -10,6 +9,15 @@ private enum IOSLibraryPhase: Equatable {
     case failed(String)
 }
 
+private enum IOSLibrarySection: String, CaseIterable, Identifiable {
+    case overview = "概览"
+    case dailyRecommendations = "每日推荐"
+    case playlists = "歌单"
+    case following = "关注"
+
+    var id: Self { self }
+}
+
 struct IOSLibraryView: View {
     @Bindable private var model: AppModel
     @Bindable private var player: PlayerController
@@ -17,6 +25,7 @@ struct IOSLibraryView: View {
     private let extras: LiveMusicExtras?
     @State private var phase: IOSLibraryPhase = .loading
     @State private var progressiveSnapshot: LibrarySnapshot?
+    @State private var section = IOSLibrarySection.overview
 
     init(container: IOSAppContainer) {
         model = container.model
@@ -61,13 +70,47 @@ struct IOSLibraryView: View {
     }
 
     private func libraryList(_ snapshot: LibrarySnapshot) -> some View {
+        VStack(spacing: 0) {
+            Picker("音乐库内容", selection: $section) {
+                ForEach(IOSLibrarySection.allCases) { section in
+                    Text(section.rawValue).tag(section)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding()
+
+            Divider()
+
+            TabView(selection: $section) {
+                ForEach(IOSLibrarySection.allCases) { section in
+                    libraryPage(snapshot, section: section)
+                        .tag(section)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+        }
+    }
+
+    private func libraryPage(_ snapshot: LibrarySnapshot, section: IOSLibrarySection) -> some View {
         List {
-            profileSection(snapshot)
-            commonFeaturesSection(snapshot)
-            dailyRecommendationsSection(snapshot)
-            playlistsSection(snapshot)
-            followingSection(snapshot)
-            recommendedUsersSection(snapshot)
+            switch section {
+            case .overview:
+                profileSection(snapshot)
+                commonFeaturesSection(snapshot)
+            case .dailyRecommendations:
+                dailyRecommendationsSection(snapshot)
+            case .playlists:
+                playlistsSection(snapshot)
+            case .following:
+                if snapshot.following.isEmpty && snapshot.recommendedUsers.isEmpty {
+                    Section {
+                        IOSLibraryEmptyRow(title: "暂无关注内容", symbol: "person.2")
+                    }
+                } else {
+                    followingSection(snapshot)
+                    recommendedUsersSection(snapshot)
+                }
+            }
         }
         .listStyle(.insetGrouped)
         .refreshable { await load(force: true) }
@@ -174,6 +217,11 @@ struct IOSLibraryView: View {
 
     private func playlistsSection(_ snapshot: LibrarySnapshot) -> some View {
         Section {
+            NavigationLink {
+                IOSPlaylistManagerView(model: model, library: library, userID: snapshot.user.id)
+            } label: {
+                Label("管理我的歌单", systemImage: "slider.horizontal.3")
+            }
             if snapshot.playlists.isEmpty {
                 IOSLibraryEmptyRow(title: "暂无歌单", symbol: "music.note.list")
             } else {
@@ -182,11 +230,6 @@ struct IOSLibraryView: View {
                         IOSPlaylistLabel(playlist: playlist)
                     }
                 }
-            }
-            NavigationLink {
-                IOSPlaylistManagerView(model: model, library: library, userID: snapshot.user.id)
-            } label: {
-                Label("管理我的歌单", systemImage: "slider.horizontal.3")
             }
         } header: {
             Text("歌单")
@@ -691,6 +734,7 @@ private struct IOSPlaylistManagerView: View {
             guard self.revision == revision else { return }
             name = ""
             isPrivate = false
+            model.showToast("歌单已创建")
             await reload(force: true)
         } catch {
             errorMessage = error.localizedDescription
@@ -705,6 +749,7 @@ private struct IOSPlaylistManagerView: View {
         do {
             try await library.deletePlaylist(playlist.id, expectedCredentialRevision: revision)
             guard self.revision == revision else { return }
+            model.showToast("歌单已删除")
             await reload(force: true)
         } catch {
             errorMessage = error.localizedDescription
@@ -736,6 +781,7 @@ private struct IOSPlaylistManagerView: View {
             )
         }
         guard self.revision == revision else { throw CancellationError() }
+        model.showToast("歌单信息已保存")
         await reload(force: true)
     }
 
@@ -755,6 +801,7 @@ private struct IOSPlaylistManagerView: View {
                 )
                 guard self.revision == revision else { return }
                 publish(ordered)
+                model.showToast("歌单顺序已保存")
             } catch {
                 playlists = previous
                 errorMessage = error.localizedDescription
@@ -843,7 +890,8 @@ struct IOSRecentPlaybackView: View {
     @Bindable var model: AppModel
     @Bindable var player: PlayerController
     @State private var kind = RecentPlaybackKind.song
-    @State private var load: RecentPlaybackLoad = .idle
+    @State private var history = RecentPlaybackState()
+    @State private var historyRevision: UInt64?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -855,7 +903,13 @@ struct IOSRecentPlaybackView: View {
             .pickerStyle(.segmented)
             .padding()
 
-            content
+            TabView(selection: $kind) {
+                ForEach(RecentPlaybackKind.allCases, id: \.self) { kind in
+                    content(for: kind)
+                        .tag(kind)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
         }
         .navigationTitle("最近播放")
         .navigationBarTitleDisplayMode(.inline)
@@ -868,7 +922,7 @@ struct IOSRecentPlaybackView: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .accessibilityLabel("刷新最近播放")
-                .disabled(load.isLoading)
+                .disabled(history.load(for: kind).isLoading)
             }
         }
     }
@@ -878,8 +932,8 @@ struct IOSRecentPlaybackView: View {
     }
 
     @ViewBuilder
-    private var content: some View {
-        switch load {
+    private func content(for kind: RecentPlaybackKind) -> some View {
+        switch history.load(for: kind) {
         case .idle, .loading:
             IOSLibraryLoadingView(title: "正在载入最近播放")
         case let .failed(message):
@@ -887,12 +941,12 @@ struct IOSRecentPlaybackView: View {
                 Task { await load(force: true) }
             }
         case let .loaded(value):
-            recentList(value)
+            recentList(value, kind: kind)
         }
     }
 
     @ViewBuilder
-    private func recentList(_ value: RecentPlaybackContent) -> some View {
+    private func recentList(_ value: RecentPlaybackContent, kind: RecentPlaybackKind) -> some View {
         switch value {
         case let .songs(songs):
             if songs.isEmpty {
@@ -930,7 +984,7 @@ struct IOSRecentPlaybackView: View {
                 IOSLibraryEmptyState(title: "暂无最近播放的\(kind.title)", symbol: kind.symbol)
             } else {
                 List(items) { item in
-                    if let route = route(for: item) {
+                    if let route = route(for: item, kind: kind) {
                         NavigationLink(value: route) { IOSRecentMediaLabel(item: item) }
                     } else {
                         IOSRecentMediaLabel(item: item)
@@ -941,7 +995,7 @@ struct IOSRecentPlaybackView: View {
         }
     }
 
-    private func route(for item: RecentMediaSummary) -> Route? {
+    private func route(for item: RecentMediaSummary, kind: RecentPlaybackKind) -> Route? {
         switch kind {
         case .video:
             if item.videoKind == .mv, let id = Int64(item.resourceID) { return .mv(id) }
@@ -957,14 +1011,19 @@ struct IOSRecentPlaybackView: View {
 
     @MainActor
     private func load(force: Bool) async {
-        guard let library = model.library, model.currentUserID != nil else {
-            self.load = .failed("登录后才能查看最近播放。")
-            return
-        }
+        guard let library = model.library, let accountID = model.currentUserID else { return }
         let revision = revision
-        self.load = .loading
+        if history.accountID != accountID || historyRevision != revision {
+            history.reset(accountID: accountID)
+            historyRevision = revision
+        }
+        let requestedKind = kind
+        let previousLoad = history.load(for: requestedKind)
+        if !force, case .loaded = previousLoad { return }
+        let generation = history.generation
+        history.setLoading(requestedKind)
         do {
-            let content: RecentPlaybackContent = switch kind {
+            let content: RecentPlaybackContent = switch requestedKind {
             case .song:
                 .songs(try await library.recentlyPlayedSongs(forceRefresh: force, expectedCredentialRevision: revision))
             case .album:
@@ -980,10 +1039,16 @@ struct IOSRecentPlaybackView: View {
             }
             try Task.checkCancellation()
             guard self.revision == revision else { return }
-            self.load = .loaded(content)
+            history.accept(.loaded(content), for: requestedKind, generation: generation, accountID: accountID)
         } catch is CancellationError {
+            history.accept(previousLoad, for: requestedKind, generation: generation, accountID: accountID)
         } catch {
-            self.load = .failed(error.localizedDescription)
+            history.accept(
+                .failed(error.localizedDescription),
+                for: requestedKind,
+                generation: generation,
+                accountID: accountID
+            )
         }
     }
 }
@@ -1482,393 +1547,18 @@ struct IOSRecommendationHistoryView: View {
     }
 }
 
-private enum IOSListeningPeriod: String, CaseIterable {
-    case today, week, month, year
-
-    var title: String {
-        switch self {
-        case .today: "今日"
-        case .week: "本周"
-        case .month: "本月"
-        case .year: "年度"
-        }
-    }
-
-    var reportPeriod: ListeningReportPeriod? {
-        switch self {
-        case .today: nil
-        case .week: .week
-        case .month: .month
-        case .year: .year
-        }
-    }
-}
-
 struct IOSListeningFootprintsView: View {
     @Bindable var model: AppModel
     @Bindable var player: PlayerController
-    @State private var period = IOSListeningPeriod.today
-    @State private var todayRanks: [ListeningRankEntry]?
-    @State private var report: ListeningReport?
-    @State private var footprints: [YearListeningFootprint] = []
-    @State private var selectedYear: Int?
-    @State private var annualReport: AnnualListeningReport?
-    @State private var isLoading = true
-    @State private var errorMessage: String?
-    @State private var loadGeneration = 0
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Picker("周期", selection: $period) {
-                ForEach(IOSListeningPeriod.allCases, id: \.self) { period in
-                    Text(period.title).tag(period)
-                }
-            }
-            .pickerStyle(.segmented)
-            .padding()
-            Divider()
-
-            if model.currentUserID == nil {
-                IOSLibraryEmptyState(title: "登录后查看听歌足迹", symbol: "chart.line.uptrend.xyaxis")
-            } else if isLoading && todayRanks == nil && report == nil && annualReport == nil {
-                IOSLibraryLoadingView(title: "正在载入听歌足迹")
-            } else if let errorMessage, todayRanks == nil && report == nil && annualReport == nil {
-                IOSLibraryFailureView(title: "无法载入听歌足迹", message: errorMessage) {
-                    Task { await load(force: true) }
-                }
-            } else if period == .today {
-                todayContent(todayRanks ?? [])
-            } else if period == .year {
-                annualContent
-            } else if let report {
-                reportContent(report)
-            } else {
-                IOSLibraryEmptyState(title: "暂无听歌足迹", symbol: "chart.line.uptrend.xyaxis")
-            }
-        }
-        .navigationTitle("听歌足迹")
-        .navigationBarTitleDisplayMode(.inline)
-        .task(id: "\(period.rawValue):\(model.currentUserID ?? 0):\(revision)") { await load(force: false) }
-        .toolbar {
-            ToolbarItem {
-                Button { Task { await load(force: true) } } label: { Image(systemName: "arrow.clockwise") }
-                    .accessibilityLabel("刷新听歌足迹")
-                    .disabled(isLoading)
-            }
-        }
-    }
-
-    private var revision: UInt64 {
-        model.library?.transport.credentialSnapshotValue().revision ?? 0
-    }
-
-    private func todayContent(_ ranks: [ListeningRankEntry]) -> some View {
-        let songs = ranks.map(\.song)
-        return List {
-            Section("今日排行") {
-                if ranks.isEmpty {
-                    IOSLibraryEmptyRow(title: "今天暂无听歌记录", symbol: "music.note")
-                } else {
-                    ForEach(ranks) { entry in
-                        VStack(alignment: .leading, spacing: 2) {
-                            IOSSongRow(
-                                song: entry.song,
-                                songs: songs,
-                                model: model,
-                                player: player
-                            )
-                            Text(todayDetail(entry))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .padding(.leading, 56)
-                        }
-                    }
-                }
-            }
-        }
-        .listStyle(.insetGrouped)
-        .refreshable { await load(force: true) }
-    }
-
-    private func todayDetail(_ entry: ListeningRankEntry) -> String {
-        var parts = ["播放 \(entry.playCount.formatted()) 次"]
-        if let duration = entry.durationSeconds {
-            parts.append(IOSDurationFormatter.text(duration))
-        }
-        return parts.joined(separator: " · ")
-    }
-
-    private func reportContent(_ report: ListeningReport) -> some View {
-        let songs = report.topSongs.map(\.song)
-        return List {
-            Section {
-                Text(report.title)
-                    .font(.headline)
-                IOSListeningMetrics(metrics: report.metrics)
-            }
-            Section("热门歌曲") {
-                if report.topSongs.isEmpty {
-                    IOSLibraryEmptyRow(title: "暂无歌曲排行", symbol: "music.note")
-                } else {
-                    ForEach(report.topSongs) { entry in
-                        VStack(alignment: .leading, spacing: 2) {
-                            IOSSongRow(
-                                song: entry.song,
-                                songs: songs,
-                                model: model,
-                                player: player
-                            )
-                            Text("播放 \(entry.playCount.formatted()) 次")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .padding(.leading, 56)
-                        }
-                    }
-                }
-            }
-        }
-        .listStyle(.insetGrouped)
-        .refreshable { await load(force: true) }
-    }
 
     @ViewBuilder
-    private var annualContent: some View {
-        if footprints.isEmpty {
-            IOSLibraryEmptyState(title: "暂无年度听歌足迹", symbol: "calendar")
-        } else {
-            List {
-                Section("报告年份") {
-                    Picker("年份", selection: $selectedYear) {
-                        ForEach(footprints.map(\.year), id: \.self) { year in
-                            Text("\(year) 年").tag(Optional(year))
-                        }
-                    }
-                    .onChange(of: selectedYear) { oldValue, newValue in
-                        guard oldValue != nil, oldValue != newValue else { return }
-                        Task { await loadAnnual(force: false) }
-                    }
-                }
-                if let footprint = footprints.first(where: { $0.year == selectedYear }) {
-                    Section("年度概览") {
-                        LabeledContent("播放次数", value: footprint.playCount.formatted())
-                        LabeledContent("收听时长", value: IOSDurationFormatter.text(footprint.durationSeconds))
-                    }
-                }
-                if isLoading {
-                    Section { HStack { ProgressView(); Text("正在载入年度报告") } }
-                } else if let annualReport {
-                    Section("数据概览") {
-                        IOSListeningMetrics(metrics: annualReport.overviewMetrics)
-                    }
-                    ForEach(annualReport.sections) { section in
-                        let songs = section.tracks.map(\.song)
-                        Section(section.title) {
-                            if let subtitle = section.subtitle, !subtitle.isEmpty { Text(subtitle) }
-                            ForEach(section.metrics) { metric in
-                                LabeledContent(metric.label, value: annualMetricText(metric.value))
-                            }
-                            ForEach(section.details, id: \.self) { Text($0) }
-                            ForEach(section.items) { item in Text(annualItemText(item)) }
-                            ForEach(section.tracks) { track in
-                                VStack(alignment: .leading, spacing: 3) {
-                                    IOSSongRow(
-                                        song: track.song,
-                                        songs: songs,
-                                        model: model,
-                                        player: player
-                                    )
-                                    if let caption = track.caption {
-                                        Text(caption).font(.caption).foregroundStyle(.secondary)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else if let errorMessage {
-                    Section {
-                        IOSInlineRetry(message: errorMessage) { Task { await loadAnnual(force: true) } }
-                    }
-                }
-            }
-            .listStyle(.insetGrouped)
-            .refreshable { await load(force: true) }
-        }
-    }
-
-    @MainActor
-    private func load(force: Bool) async {
-        loadGeneration &+= 1
-        let generation = loadGeneration
-        let period = period
-        let revision = revision
-        guard let library = model.library, model.currentUserID != nil else {
-            isLoading = false
-            return
-        }
-        isLoading = true
-        errorMessage = nil
-        todayRanks = nil
-        report = nil
-        annualReport = nil
-        do {
-            if period == .today {
-                let value = try await library.todayListeningRank(
-                    forceRefresh: force,
-                    expectedCredentialRevision: revision
-                )
-                try Task.checkCancellation()
-                guard loadGeneration == generation,
-                      self.period == period,
-                      self.revision == revision
-                else { return }
-                todayRanks = value
-                isLoading = false
-            } else if period == .year {
-                let values = try await library.yearListeningFootprints(
-                    forceRefresh: force,
-                    expectedCredentialRevision: revision
-                )
-                try Task.checkCancellation()
-                guard loadGeneration == generation,
-                      self.period == period,
-                      self.revision == revision
-                else { return }
-                footprints = values
-                    .filter { AnnualListeningReportDecoder.supportedYears.contains($0.year) }
-                    .sorted { $0.year > $1.year }
-                selectedYear = selectedYear.flatMap { year in
-                    footprints.contains(where: { $0.year == year }) ? year : nil
-                } ?? footprints.first?.year
-                guard selectedYear != nil else {
-                    isLoading = false
-                    return
-                }
-                await loadAnnual(force: force)
-            } else if let reportPeriod = period.reportPeriod {
-                let value = try await library.listeningReport(
-                    period: reportPeriod,
-                    forceRefresh: force,
-                    expectedCredentialRevision: revision
-                )
-                try Task.checkCancellation()
-                guard loadGeneration == generation,
-                      self.period == period,
-                      self.revision == revision
-                else { return }
-                report = value
-                isLoading = false
-            }
-        } catch is CancellationError {
-            guard loadGeneration == generation,
-                  self.period == period,
-                  self.revision == revision
-            else { return }
-            isLoading = false
-        } catch {
-            guard loadGeneration == generation,
-                  self.period == period,
-                  self.revision == revision
-            else { return }
-            isLoading = false
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    @MainActor
-    private func loadAnnual(force: Bool) async {
-        guard period == .year else { return }
-        loadGeneration &+= 1
-        let generation = loadGeneration
-        guard let library = model.library,
-              let selectedYear,
-              AnnualListeningReportDecoder.supportedYears.contains(selectedYear)
-        else {
-            annualReport = nil
-            isLoading = false
-            return
-        }
-        let revision = revision
-        isLoading = true
-        errorMessage = nil
-        defer {
-            if loadGeneration == generation,
-               period == .year,
-               self.selectedYear == selectedYear,
-               self.revision == revision {
-                isLoading = false
-            }
-        }
-        do {
-            let value = try await library.annualListeningReport(
-                year: selectedYear,
-                forceRefresh: force,
-                expectedCredentialRevision: revision
-            )
-            try Task.checkCancellation()
-            guard loadGeneration == generation,
-                  period == .year,
-                  self.selectedYear == selectedYear,
-                  self.revision == revision
-            else { return }
-            annualReport = value
-        } catch is CancellationError {
-        } catch {
-            guard loadGeneration == generation,
-                  period == .year,
-                  self.selectedYear == selectedYear,
-                  self.revision == revision
-            else { return }
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    private func annualMetricText(_ value: AnnualReportMetricValue) -> String {
-        switch value {
-        case let .number(number, suffix): "\(number.formatted())\(suffix)"
-        case let .duration(seconds): IOSDurationFormatter.text(seconds)
-        case let .date(milliseconds):
-            Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1_000)
-                .formatted(date: .abbreviated, time: .omitted)
-        case let .text(text): text
-        }
-    }
-
-    private func annualItemText(_ item: AnnualReportItem) -> String {
-        switch item {
-        case let .genre(name, percent): "\(name) · \(percent)%"
-        case let .artist(_, name, _, note): [name, note].filter { !$0.isEmpty }.joined(separator: " · ")
-        case let .month(month, seconds, _, artist, _):
-            "\(month) 月 · \(IOSDurationFormatter.text(seconds))" + (artist.map { " · \($0)" } ?? "")
-        case let .mood(month, name, genre):
-            "\(month) 月 · \(name)" + (genre.map { " · \($0)" } ?? "")
-        }
-    }
-}
-
-private struct IOSListeningMetrics: View {
-    let metrics: [ListeningMetric]
-
     var body: some View {
-        ForEach(metrics) { metric in
-            LabeledContent(metric.kind.title, value: text(metric))
+        if let library = model.library {
+            ListeningFootprintsView(model: model, library: library, player: player)
+                .navigationBarTitleDisplayMode(.inline)
+        } else {
+            ContentUnavailableView("听歌足迹暂不可用", systemImage: "chart.line.uptrend.xyaxis")
         }
-    }
-
-    private func text(_ metric: ListeningMetric) -> String {
-        switch metric.value {
-        case let .text(value): value
-        case let .number(value):
-            metric.kind == .duration ? IOSDurationFormatter.text(value) : value.formatted()
-        }
-    }
-}
-
-private enum IOSDurationFormatter {
-    static func text(_ seconds: Int64) -> String {
-        let value = max(0, seconds)
-        let hours = value / 3_600
-        let minutes = value % 3_600 / 60
-        return hours > 0 ? "\(hours) 小时 \(minutes) 分钟" : "\(minutes) 分钟"
     }
 }
 
@@ -2006,13 +1696,12 @@ struct IOSCommentsView: View {
         } message: {
             Text("此操作不可撤销。")
         }
-        .confirmationDialog(
+        .alert(
             "举报评论",
             isPresented: Binding(
                 get: { reporting != nil },
                 set: { if !$0 { reporting = nil } }
-            ),
-            titleVisibility: .visible
+            )
         ) {
             ForEach(IOSCommentReportReason.allCases) { reason in
                 Button(reason.rawValue) {
@@ -2116,6 +1805,7 @@ struct IOSCommentsView: View {
             text = ""
             isWriting = false
             await load(reset: true)
+            model.showToast("评论成功")
         } catch {
             isWriting = false
             mutationErrorMessage = error.localizedDescription
@@ -2132,6 +1822,7 @@ struct IOSCommentsView: View {
             expectedCredentialRevision: revision
         )
         await load(reset: true)
+        model.showToast("回复成功")
     }
 
     @MainActor
@@ -2147,6 +1838,7 @@ struct IOSCommentsView: View {
             )
             guard self.revision == revision else { return }
             remove(comment.id)
+            model.showToast("评论已删除")
         } catch {
             mutationErrorMessage = error.localizedDescription
         }
@@ -2304,13 +1996,12 @@ private struct IOSCommentFloorView: View {
         } message: {
             Text("此操作不可撤销。")
         }
-        .confirmationDialog(
+        .alert(
             "举报评论",
             isPresented: Binding(
                 get: { reporting != nil },
                 set: { if !$0 { reporting = nil } }
-            ),
-            titleVisibility: .visible
+            )
         ) {
             ForEach(IOSCommentReportReason.allCases) { reason in
                 Button(reason.rawValue) {
@@ -2397,6 +2088,7 @@ private struct IOSCommentFloorView: View {
         owner = owner.addingReply()
         onRootChanged(owner)
         await load(reset: true)
+        model.showToast("回复成功")
     }
 
     @MainActor
@@ -2435,6 +2127,7 @@ private struct IOSCommentFloorView: View {
                 expectedCredentialRevision: revision
             )
             guard self.revision == revision else { return }
+            model.showToast("评论已删除")
             if comment.id == owner.id {
                 onRootDeleted(owner.id)
                 dismiss()
@@ -2493,7 +2186,7 @@ private struct IOSCommentRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            IOSCommentEmojiText(content: comment.displayContent, remotePictureIDs: emojiPictureIDs)
+            CommentEmojiText(content: comment.displayContent, remotePictureIDs: emojiPictureIDs)
             HStack(spacing: 8) {
                 Button(action: like) {
                     if isMutating {
@@ -2554,7 +2247,7 @@ private struct IOSCommentReplySheet: View {
         NavigationStack {
             Form {
                 Section("回复 \(comment.nickname)") {
-                    IOSCommentEmojiText(content: comment.displayContent, remotePictureIDs: emojiPictureIDs)
+                    CommentEmojiText(content: comment.displayContent, remotePictureIDs: emojiPictureIDs)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     TextField("回复内容", text: $text, axis: .vertical)
@@ -2595,106 +2288,6 @@ private struct IOSCommentReplySheet: View {
             errorMessage = error.localizedDescription
         }
         isSubmitting = false
-    }
-}
-
-private enum IOSCommentEmojiPart: Hashable {
-    case text(String)
-    case emoji(token: String, url: URL)
-}
-
-private enum IOSCommentEmojiCatalog {
-    static func parts(in text: String, remotePictureIDs: [String: String]) -> [IOSCommentEmojiPart] {
-        var parts: [IOSCommentEmojiPart] = []
-        var plainStart = text.startIndex
-        var searchStart = text.startIndex
-        while searchStart < text.endIndex,
-              let open = text[searchStart...].firstIndex(of: "["),
-              let close = text[open...].firstIndex(of: "]") {
-            let tokenEnd = text.index(after: close)
-            let token = String(text[open..<tokenEnd])
-            guard let pictureID = remotePictureIDs[token], let url = imageURL(pictureID: pictureID) else {
-                searchStart = text.index(after: open)
-                continue
-            }
-            if plainStart < open { parts.append(.text(String(text[plainStart..<open]))) }
-            parts.append(.emoji(token: token, url: url))
-            plainStart = tokenEnd
-            searchStart = tokenEnd
-        }
-        if plainStart < text.endIndex { parts.append(.text(String(text[plainStart...]))) }
-        return parts
-    }
-
-    private static func imageURL(pictureID: String) -> URL? {
-        let key = Array("3go8&$8*3*3h0k(2)2".utf8)
-        let bytes = pictureID.utf8.enumerated().map { $0.element ^ key[$0.offset % key.count] }
-        let encrypted = Data(Insecure.MD5.hash(data: Data(bytes))).base64EncodedString()
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "+", with: "-")
-        return URL(string: "https://p1.music.126.net/\(encrypted)/\(pictureID).jpg")
-    }
-}
-
-@MainActor
-private struct IOSCommentEmojiText: View {
-    let content: String
-    private let parts: [IOSCommentEmojiPart]
-    @Environment(\.displayScale) private var displayScale
-    @State private var images: [String: UIImage] = [:]
-
-    init(content: String, remotePictureIDs: [String: String]) {
-        self.content = content
-        parts = IOSCommentEmojiCatalog.parts(in: content, remotePictureIDs: remotePictureIDs)
-    }
-
-    var body: some View {
-        renderedText
-            .fixedSize(horizontal: false, vertical: true)
-            .textSelection(.enabled)
-            .accessibilityLabel(Text(content))
-            .task(id: parts) { await loadImages() }
-    }
-
-    private var renderedText: Text {
-        parts.reduce(Text("")) { result, part in
-            switch part {
-            case let .text(text):
-                result + Text(text)
-            case let .emoji(token, _):
-                if let image = images[token] {
-                    result + Text(Image(uiImage: image)).baselineOffset(-3)
-                } else {
-                    result + Text(token)
-                }
-            }
-        }
-    }
-
-    private func loadImages() async {
-        var loaded: [String: UIImage] = [:]
-        for case let .emoji(token, url) in parts where loaded[token] == nil {
-            guard let request = ArtworkPipeline.request(
-                for: url,
-                size: CGSize(width: 24, height: 24),
-                displayScale: displayScale
-            ) else {
-                continue
-            }
-            do {
-                let image = try await ArtworkPipeline.shared.loadImage(for: request)
-                try Task.checkCancellation()
-                loaded[token] = UIGraphicsImageRenderer(size: CGSize(width: 18, height: 18)).image { _ in
-                    image.draw(in: CGRect(origin: .zero, size: CGSize(width: 18, height: 18)))
-                }
-            } catch is CancellationError {
-                return
-            } catch {
-                continue
-            }
-        }
-        guard !Task.isCancelled else { return }
-        images = loaded
     }
 }
 

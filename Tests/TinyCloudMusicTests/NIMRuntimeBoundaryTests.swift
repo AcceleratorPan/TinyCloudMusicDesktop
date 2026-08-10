@@ -777,7 +777,10 @@ struct NIMRuntimeBoundaryTests {
         ])
 
         for url in urls {
-            #expect(try runXcrun("lipo", "-archs", url.path).trimmed == "arm64")
+            let architectures = try runXcrun("lipo", "-archs", url.path)
+                .split(whereSeparator: \.isWhitespace)
+                .map(String.init)
+            #expect(Set(architectures) == ["arm64", "x86_64"])
             #expect(try runXcrun("vtool", "-show-build", url.path).contains("minos 11.0"))
             #expect(try runXcrun("otool", "-D", url.path).contains("@rpath/\(url.lastPathComponent)"))
         }

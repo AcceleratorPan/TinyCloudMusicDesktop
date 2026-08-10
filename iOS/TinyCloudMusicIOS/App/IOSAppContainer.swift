@@ -64,7 +64,8 @@ final class IOSAppContainer {
             repository: repository,
             playbackQuality: model.settings.playbackQuality,
             cacheRoot: model.cacheFolderURL,
-            crossfadeDuration: model.settings.crossfadeDuration
+            crossfadeDuration: model.settings.crossfadeDuration,
+            playbackControlFadeEnabled: model.settings.playbackControlFadeEnabled
         )
         let together = ListenTogetherController(
             service: LiveListenTogetherService(transport: transport),

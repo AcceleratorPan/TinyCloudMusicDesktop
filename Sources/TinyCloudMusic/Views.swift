@@ -256,6 +256,9 @@ struct RootView: View {
         .onChange(of: model.settings.crossfadeDuration) { _, duration in
             player.setCrossfadeDuration(duration)
         }
+        .onChange(of: model.settings.playbackControlFadeEnabled) { _, enabled in
+            player.setPlaybackControlFadeEnabled(enabled)
+        }
         .onChange(of: player.playbackReportErrorMessage) { _, message in
             guard let message else { return }
             NSAccessibility.post(
@@ -1416,6 +1419,8 @@ private struct AlbumDetailContent: View {
                 artwork: album.artwork,
                 saveArtwork: model.saveArtwork,
                 metadata: albumMetadata,
+                creator: album.artist.name,
+                openCreator: { model.open(.artist(album.artist.id)) },
                 actions: headerActions
             )
             HStack {
@@ -1466,7 +1471,6 @@ private struct AlbumDetailContent: View {
 
     private var albumMetadata: [String] {
         [
-            album.artist.name,
             "\(songs.count.formatted()) 首歌曲",
             subscriberCount > 0 ? "\(subscriberCount.formatted()) 人收藏" : nil
         ].compactMap { $0 }
@@ -3086,6 +3090,7 @@ struct SettingsView: View {
             }
 
             Section("播放") {
+                Toggle("播放控制淡入淡出", isOn: playbackControlFadeBinding)
                 LabeledContent("歌曲过渡") {
                     HStack(spacing: 10) {
                         Slider(
@@ -3196,6 +3201,15 @@ struct SettingsView: View {
                     }
                 }
             }
+
+            Section {
+                Text("Designed & Coded by AcceleratorPan · 2026")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .accessibilityLabel("Designed and coded by AcceleratorPan in 2026")
+                    .padding(.top, 8)
+            }
         }
         .formStyle(.grouped)
         .defaultScrollAnchor(.top)
@@ -3291,6 +3305,16 @@ struct SettingsView: View {
             set: {
                 crossfadeDraft = $0
                 player.setCrossfadeDuration($0)
+            }
+        )
+    }
+
+    private var playbackControlFadeBinding: Binding<Bool> {
+        Binding(
+            get: { model.settings.playbackControlFadeEnabled },
+            set: {
+                model.setPlaybackControlFadeEnabled($0)
+                player.setPlaybackControlFadeEnabled($0)
             }
         )
     }

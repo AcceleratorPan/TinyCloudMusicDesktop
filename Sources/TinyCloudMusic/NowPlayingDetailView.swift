@@ -772,29 +772,29 @@ private struct LyricRow: View {
 
     var body: some View {
         Button(action: seek) {
-            HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 5) {
+                primaryLyric
+                    .font(.title3.weight(.semibold))
+                if let romanization = line.romanization, !romanization.isEmpty {
+                    Text(romanization)
+                        .font(.subheadline)
+                        .foregroundStyle(isCurrent ? Color.secondary : Color.secondary.opacity(0.72))
+                }
+                if let translation = line.translation, !translation.isEmpty {
+                    Text(translation)
+                        .font(.subheadline)
+                        .foregroundStyle(isCurrent ? Color.secondary : Color.secondary.opacity(0.72))
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.leading, 15)
+            .overlay(alignment: .leading) {
                 Capsule()
                     .fill(.red)
-                    .frame(width: 3, height: 38)
+                    .frame(width: 3)
                     .opacity(isCurrent ? 1 : 0)
                     .accessibilityHidden(true)
-
-                VStack(alignment: .leading, spacing: 5) {
-                    primaryLyric
-                        .font(.title3.weight(.semibold))
-                    if let romanization = line.romanization, !romanization.isEmpty {
-                        Text(romanization)
-                            .font(.subheadline)
-                            .foregroundStyle(isCurrent ? Color.secondary : Color.secondary.opacity(0.72))
-                    }
-                    if let translation = line.translation, !translation.isEmpty {
-                        Text(translation)
-                            .font(.subheadline)
-                            .foregroundStyle(isCurrent ? Color.secondary : Color.secondary.opacity(0.72))
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 10)

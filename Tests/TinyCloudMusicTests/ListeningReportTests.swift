@@ -46,6 +46,22 @@ private func verifyListeningSuccessFixture() throws {
         try fixtureObject(fixture, "first"),
         now: Date(timeIntervalSince1970: 1_735_689_600)
     )
+    let dateOnlyMemory = library.decodeFirstListenMemory(
+        [
+            "code": 200,
+            "data": [
+                "data": [
+                    "musicFirstListenDto": [
+                        "date": "2023.12.11 23:58",
+                        "season": "初冬",
+                        "period": "深夜",
+                        "time": "23:58"
+                    ]
+                ]
+            ]
+        ],
+        now: Date(timeIntervalSince1970: 1_735_689_600)
+    )
     guard today.map(\.id) == [42],
           today.first?.playCount == 4,
           today.first?.durationSeconds == 720,
@@ -119,8 +135,10 @@ private func verifyListeningSuccessFixture() throws {
               .mood(month: 7, name: "Calm", genre: "Ambient")
           ],
           annual.sections.first(where: { $0.id == "keyword-firstKeyWord" })?.tracks.first?.song.artists.first?.id == 208,
-          memory.listenedAt == Date(timeIntervalSince1970: 1_704_067_200),
-          memory.text == "Found in a daily recommendation"
+          memory.listenedAt == Date(timeIntervalSince1970: 1_702_310_333.313),
+          memory.text == "初冬 · 深夜",
+          dateOnlyMemory.listenedAt != nil,
+          dateOnlyMemory.text == "初冬 · 深夜 · 23:58"
     else { throw ListeningReportCheckError.failed }
 }
 
@@ -278,6 +296,16 @@ private enum ListeningReportCheck {
 #elseif canImport(Testing)
 @Suite("Listening footprints")
 struct ListeningReportTests {
+    @Test("Report periods keep independent scroll offsets")
+    func reportPeriodScrollOffsets() {
+        let positions = TopTabScrollPositions(selection: FootprintPeriod.week)
+
+        #expect(positions.target(for: .month, currentOffset: 360) == 0)
+        #expect(positions.target(for: .week, currentOffset: 120) == 360)
+        #expect(positions.target(for: .month, currentOffset: 360) == 120)
+        #expect(positions.target(for: .year, currentOffset: 120) == 0)
+    }
+
     @Test("Success fixtures decode stable data")
     func successFixture() throws { try verifyListeningSuccessFixture() }
 

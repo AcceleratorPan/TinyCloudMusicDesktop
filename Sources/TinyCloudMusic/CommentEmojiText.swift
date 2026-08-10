@@ -2,7 +2,11 @@ import CryptoKit
 import Foundation
 
 #if !COMMENT_EMOJI_CHECK
+#if os(macOS)
 import AppKit
+#elseif os(iOS)
+import UIKit
+#endif
 import SwiftUI
 #endif
 
@@ -146,7 +150,12 @@ struct CommentEmojiText: View {
     let content: String
     private let parts: [CommentEmojiPart]
 
+    @Environment(\.displayScale) private var displayScale
+#if os(macOS)
     @State private var images: [String: NSImage] = [:]
+#elseif os(iOS)
+    @State private var images: [String: UIImage] = [:]
+#endif
 
     init(content: String, remotePictureIDs: [String: String]) {
         self.content = content
@@ -168,7 +177,11 @@ struct CommentEmojiText: View {
                 result + Text(text)
             case let .emoji(token, _):
                 if let image = images[token] {
+#if os(macOS)
                     result + Text(Image(nsImage: image)).baselineOffset(-3)
+#elseif os(iOS)
+                    result + Text(Image(uiImage: image)).baselineOffset(-3)
+#endif
                 } else {
                     result + Text(token)
                 }
@@ -178,17 +191,36 @@ struct CommentEmojiText: View {
 
     private func loadImages() async {
         images = [:]
+#if os(macOS)
         var loadedImages: [String: NSImage] = [:]
+#elseif os(iOS)
+        var loadedImages: [String: UIImage] = [:]
+#endif
         for case let .emoji(token, url) in parts where loadedImages[token] == nil {
-            guard let request = ArtworkPipeline.request(for: url, size: CGSize(width: 24, height: 24)) else {
+            guard let request = ArtworkPipeline.request(
+                for: url,
+                size: CGSize(width: 24, height: 24),
+                displayScale: displayScale
+            ) else {
                 continue
             }
             do {
                 let loadedImage = try await ArtworkPipeline.shared.loadImage(for: request)
                 try Task.checkCancellation()
+#if os(macOS)
                 let image = loadedImage.copy() as? NSImage ?? loadedImage
                 image.size = NSSize(width: 18, height: 18)
                 loadedImages[token] = image
+#elseif os(iOS)
+                let format = UIGraphicsImageRendererFormat()
+                format.scale = displayScale
+                loadedImages[token] = UIGraphicsImageRenderer(
+                    size: CGSize(width: 18, height: 18),
+                    format: format
+                ).image { _ in
+                    loadedImage.draw(in: CGRect(origin: .zero, size: CGSize(width: 18, height: 18)))
+                }
+#endif
             } catch is CancellationError {
                 return
             } catch {

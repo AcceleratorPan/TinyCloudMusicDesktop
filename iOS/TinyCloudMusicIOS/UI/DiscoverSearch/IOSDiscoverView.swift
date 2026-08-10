@@ -151,7 +151,7 @@ private struct IOSHomeItemButton: View {
         Button(action: open) {
             VStack(alignment: .leading, spacing: 7) {
                 IOSArtworkView(artwork: item.artwork)
-                    .frame(width: 152, height: 152)
+                    .frame(width: 121.6, height: 121.6)
                     .overlay(alignment: .bottomTrailing) {
                         if item.song != nil {
                             Image(systemName: "play.fill")
@@ -163,20 +163,22 @@ private struct IOSHomeItemButton: View {
                                 .accessibilityHidden(true)
                         }
                     }
+                    .frame(width: 132)
                 Text(item.title)
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.primary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
                     .multilineTextAlignment(.leading)
-                if !item.subtitle.isEmpty {
-                    Text(item.subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .multilineTextAlignment(.leading)
-                }
+                Text(item.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .multilineTextAlignment(.leading)
             }
-            .frame(width: 152, alignment: .leading)
+            .frame(width: 132, alignment: .leading)
+            .padding(.bottom, 4)
             .contentShape(Rectangle())
         }
         .buttonStyle(IOSPressedButtonStyle())

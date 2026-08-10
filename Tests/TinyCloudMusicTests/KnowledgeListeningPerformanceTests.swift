@@ -934,6 +934,10 @@ struct KnowledgeListeningPerformanceTests {
             YearListeningFootprint(year: 2024, playCount: 9, durationSeconds: 18)
         ]
         #expect(AnnualReportSelection.defaultYear(current: nil, footprints: footprints) == 2025)
+        #expect(AnnualReportSelection.defaultYear(
+            current: nil,
+            footprints: Array(footprints.reversed())
+        ) == 2025)
         #expect(!AnnualListeningReportDecoder.supportedYears.contains(2025))
 
         let counts = AnnualRequestCounts()

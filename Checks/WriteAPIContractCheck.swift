@@ -878,7 +878,7 @@ enum WriteAPIContractCheck {
             cookieMatches: originalCookieMatches,
             call: { _ = try await originalCookieLibrary.firstListenMemory(songID: 42) }
         ) {
-            $0.int64("songId") == 42
+            $0.int64("songId") == 42 && originalClientHeaderMatches($0)
         }
         count += 1
 

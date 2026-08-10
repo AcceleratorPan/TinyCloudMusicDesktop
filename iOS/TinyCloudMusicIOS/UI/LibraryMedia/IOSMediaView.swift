@@ -153,17 +153,23 @@ private enum IOSVideoSection: String, CaseIterable, Identifiable {
     var id: Self { self }
 }
 
+private struct IOSVideoSectionState {
+    let identity: String
+    var items: [VideoRecommendation] = []
+    var subscriptionPage: VideoSubscriptionPage?
+    var nextOffset = 0
+    var isLoading = false
+    var isLoadingMore = false
+    var hasLoaded = false
+    var errorMessage: String?
+    var generation = 0
+}
+
 private struct IOSVideoRecommendationsView: View {
     @Bindable var model: AppModel
     @Bindable var player: PlayerController
     @State private var section = IOSVideoSection.recommendations
-    @State private var items: [VideoRecommendation] = []
-    @State private var subscriptionPage: VideoSubscriptionPage?
-    @State private var nextOffset = 0
-    @State private var isLoading = true
-    @State private var isLoadingMore = false
-    @State private var errorMessage: String?
-    @State private var loadGeneration = 0
+    @State private var states: [IOSVideoSection: IOSVideoSectionState] = [:]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -173,16 +179,22 @@ private struct IOSVideoRecommendationsView: View {
             .pickerStyle(.segmented)
             .padding()
             Divider()
-            content
+            TabView(selection: $section) {
+                ForEach(IOSVideoSection.allCases) { section in
+                    content(for: section)
+                        .tag(section)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
         }
         .navigationTitle("MV 与视频")
         .navigationBarTitleDisplayMode(.inline)
-        .task(id: "\(section.rawValue):\(model.currentUserID ?? 0):\(revision)") { await load(force: false) }
+        .task(id: "\(section.rawValue):\(loadIdentity)") { await load(section, force: false) }
         .toolbar {
             ToolbarItem {
-                Button { Task { await load(force: true) } } label: { Image(systemName: "arrow.clockwise") }
+                Button { Task { await load(section, force: true) } } label: { Image(systemName: "arrow.clockwise") }
                     .accessibilityLabel("刷新视频")
-                    .disabled(isLoading || isLoadingMore)
+                    .disabled(selectedState?.isLoading == true || selectedState?.isLoadingMore == true)
             }
         }
     }
@@ -191,64 +203,80 @@ private struct IOSVideoRecommendationsView: View {
         model.videoLibrary?.transport.credentialSnapshotValue().revision ?? 0
     }
 
+    private var loadIdentity: String {
+        "\(model.currentUserID ?? 0):\(revision)"
+    }
+
+    private var selectedState: IOSVideoSectionState? {
+        states[section]
+    }
+
     @ViewBuilder
-    private var content: some View {
+    private func content(for section: IOSVideoSection) -> some View {
+        let state = states[section]
         if section == .subscriptions && model.currentUserID == nil {
             IOSLibraryEmptyState(title: "登录后查看收藏视频", symbol: "star")
-        } else if isLoading && items.isEmpty {
+        } else if state?.hasLoaded != true && state?.errorMessage == nil {
             IOSLibraryLoadingView(title: "正在载入视频")
-        } else if let errorMessage, items.isEmpty {
+        } else if let errorMessage = state?.errorMessage, state?.items.isEmpty != false {
             IOSLibraryFailureView(title: "无法载入视频", message: errorMessage) {
-                Task { await load(force: true) }
+                Task { await load(section, force: true) }
             }
-        } else if items.isEmpty {
+        } else if state?.items.isEmpty != false {
             IOSLibraryEmptyState(title: "暂无视频", symbol: "play.rectangle")
         } else {
             List {
-                ForEach(items) { item in
+                ForEach(state?.items ?? []) { item in
                     NavigationLink(value: item.route) {
                         IOSVideoRecommendationLabel(item: item)
                     }
                 }
-                if canLoadMore {
-                    Button("载入更多") { Task { await loadMore() } }
+                if canLoadMore(section, state: state) {
+                    Button("载入更多") { Task { await loadMore(section) } }
                         .frame(maxWidth: .infinity, minHeight: 44)
-                        .disabled(isLoadingMore)
+                        .disabled(state?.isLoadingMore == true)
                 }
-                if let errorMessage {
-                    IOSInlineRetry(message: errorMessage) { Task { await loadMore() } }
+                if let errorMessage = state?.errorMessage {
+                    IOSInlineRetry(message: errorMessage) { Task { await loadMore(section) } }
                 }
             }
             .listStyle(.plain)
-            .refreshable { await load(force: true) }
+            .refreshable { await load(section, force: true) }
         }
     }
 
-    private var canLoadMore: Bool {
+    private func canLoadMore(_ section: IOSVideoSection, state: IOSVideoSectionState?) -> Bool {
         switch section {
-        case .recommendations: !items.isEmpty
+        case .recommendations: state?.items.isEmpty == false
         case .mvs: false
-        case .subscriptions: subscriptionPage?.hasMore == true
+        case .subscriptions: state?.subscriptionPage?.hasMore == true
         }
     }
 
     @MainActor
-    private func load(force: Bool) async {
-        loadGeneration &+= 1
-        let generation = loadGeneration
-        let section = section
+    private func load(_ section: IOSVideoSection, force: Bool) async {
         let revision = revision
-        isLoadingMore = false
-        guard let library = model.videoLibrary else {
-            isLoading = false
-            errorMessage = "视频服务不可用"
+        let identity = loadIdentity
+        if states[section]?.identity != identity {
+            states[section] = IOSVideoSectionState(identity: identity)
+        } else if !force, states[section]?.hasLoaded == true {
             return
         }
-        isLoading = true
-        errorMessage = nil
-        items = []
-        subscriptionPage = nil
-        nextOffset = 0
+        states[section]?.generation &+= 1
+        let generation = states[section]?.generation ?? 0
+        states[section]?.isLoading = true
+        states[section]?.isLoadingMore = false
+        states[section]?.errorMessage = nil
+        defer {
+            if states[section]?.identity == identity,
+               states[section]?.generation == generation {
+                states[section]?.isLoading = false
+            }
+        }
+        guard let library = model.videoLibrary else {
+            states[section]?.errorMessage = "视频服务不可用"
+            return
+        }
         do {
             let loadedItems: [VideoRecommendation]
             let loadedPage: VideoSubscriptionPage?
@@ -274,85 +302,90 @@ private struct IOSVideoRecommendationsView: View {
                 loadedPage = page
             }
             try Task.checkCancellation()
-            guard loadGeneration == generation,
-                  self.section == section,
+            guard states[section]?.identity == identity,
+                  states[section]?.generation == generation,
+                  loadIdentity == identity,
                   self.revision == revision
             else { return }
-            items = loadedItems
-            subscriptionPage = loadedPage
-            nextOffset = section == .recommendations ? loadedItems.count : 0
+            states[section]?.items = loadedItems
+            states[section]?.subscriptionPage = loadedPage
+            states[section]?.nextOffset = section == .recommendations ? loadedItems.count : 0
+            states[section]?.hasLoaded = true
             if let loadedPage { model.recordVideoSubscriptions(loadedPage.items.map(\.resource)) }
-            isLoading = false
         } catch is CancellationError {
         } catch {
-            guard loadGeneration == generation,
-                  self.section == section,
+            guard states[section]?.identity == identity,
+                  states[section]?.generation == generation,
+                  loadIdentity == identity,
                   self.revision == revision
             else { return }
-            isLoading = false
-            errorMessage = error.localizedDescription
+            states[section]?.errorMessage = error.localizedDescription
         }
     }
 
     @MainActor
-    private func loadMore() async {
-        guard let library = model.videoLibrary, !isLoading, !isLoadingMore else { return }
-        let generation = loadGeneration
-        let section = section
+    private func loadMore(_ section: IOSVideoSection) async {
+        guard let library = model.videoLibrary,
+              let state = states[section],
+              !state.isLoading,
+              !state.isLoadingMore
+        else { return }
+        let generation = state.generation
+        let identity = state.identity
         let revision = revision
-        isLoadingMore = true
-        errorMessage = nil
+        states[section]?.isLoadingMore = true
+        states[section]?.errorMessage = nil
         defer {
-            if loadGeneration == generation,
-               self.section == section,
+            if states[section]?.identity == identity,
+               states[section]?.generation == generation,
                self.revision == revision {
-                isLoadingMore = false
+                states[section]?.isLoadingMore = false
             }
         }
         do {
             switch section {
             case .recommendations:
-                let offset = nextOffset
+                let offset = state.nextOffset
                 let next = try await library.recommendations(
                     offset: offset,
                     expectedCredentialRevision: revision
                 )
                 try Task.checkCancellation()
-                guard loadGeneration == generation,
-                      self.section == section,
+                guard states[section]?.identity == identity,
+                      states[section]?.generation == generation,
                       self.revision == revision,
-                      nextOffset == offset
+                      states[section]?.nextOffset == offset
                 else { return }
-                var seen = Set(items.map(\.id))
+                var seen = Set(states[section]?.items.map(\.id) ?? [])
                 let additions = next.filter { seen.insert($0.id).inserted }
-                items += additions
-                nextOffset += max(next.count, 1)
+                states[section]?.items += additions
+                states[section]?.nextOffset += max(next.count, 1)
             case .subscriptions:
-                guard let page = subscriptionPage else { break }
+                guard let page = state.subscriptionPage else { break }
                 let next = try await library.subscriptions(
                     offset: page.nextOffset,
                     expectedCredentialRevision: revision
                 )
                 try Task.checkCancellation()
-                guard loadGeneration == generation,
-                      self.section == section,
+                guard states[section]?.identity == identity,
+                      states[section]?.generation == generation,
                       self.revision == revision,
-                      subscriptionPage?.nextOffset == page.nextOffset
+                      states[section]?.subscriptionPage?.nextOffset == page.nextOffset
                 else { return }
                 let combined = page.appending(next)
-                subscriptionPage = combined
-                items = combined.items
+                states[section]?.subscriptionPage = combined
+                states[section]?.items = combined.items
                 model.recordVideoSubscriptions(next.items.map(\.resource))
             case .mvs:
                 break
             }
         } catch is CancellationError {
         } catch {
-            guard loadGeneration == generation,
-                  self.section == section,
+            guard states[section]?.identity == identity,
+                  states[section]?.generation == generation,
                   self.revision == revision
             else { return }
-            errorMessage = error.localizedDescription
+            states[section]?.errorMessage = error.localizedDescription
         }
     }
 }
@@ -494,14 +527,16 @@ private struct IOSVideoDetailView: View {
                         .disabled(model.currentUserID == nil || isWriting)
                         if let downloads = model.downloads {
                             Button {
-                                _ = downloads.enqueue(
+                                if downloads.enqueue(
                                     video: resource,
                                     title: detail.title,
                                     creator: detail.creator,
                                     availableResolutions: detail.availableResolutions,
                                     to: model.videoDownloadFolderURL,
                                     quality: model.settings.videoDownloadQuality
-                                )
+                                ) {
+                                    model.showToast("视频已加入下载队列")
+                                }
                             } label: {
                                 Label("下载视频", systemImage: "arrow.down.circle")
                             }
@@ -968,7 +1003,7 @@ private struct IOSVideoCommentsSection: View {
                 try await report(comment, reason: reason)
             }
         }
-        .confirmationDialog("删除评论？", isPresented: Binding(
+        .alert("删除评论？", isPresented: Binding(
             get: { deleting != nil },
             set: { if !$0 { deleting = nil } }
         )) {
@@ -1133,7 +1168,7 @@ private struct IOSVideoCommentRow: View {
                 Text(comment.nickname).font(.subheadline.weight(.semibold))
             }
             .buttonStyle(.plain)
-            IOSCommentEmojiText(content: comment.displayContent, remotePictureIDs: emojiPictureIDs)
+            CommentEmojiText(content: comment.displayContent, remotePictureIDs: emojiPictureIDs)
             HStack(spacing: 8) {
                 Text(comment.timeText).font(.caption).foregroundStyle(.secondary)
                 if comment.replyCount > 0 {
@@ -1181,7 +1216,7 @@ private struct IOSVideoCommentReplySheet: View {
         NavigationStack {
             Form {
                 Section("回复 \(comment.nickname)") {
-                    IOSCommentEmojiText(content: comment.displayContent, remotePictureIDs: [:])
+                    CommentEmojiText(content: comment.displayContent, remotePictureIDs: [:])
                     TextField("回复内容", text: $text, axis: .vertical).lineLimit(2...6)
                 }
                 if let errorMessage { Section { Text(errorMessage).foregroundStyle(.red) } }
@@ -1270,191 +1305,6 @@ private struct IOSVideoCommentReportSheet: View {
     }
 }
 
-private enum IOSCommentEmojiPart: Equatable {
-    case text(String)
-    case emoji(token: String, url: URL)
-}
-
-private enum IOSCommentEmojiCatalog {
-    static func parts(in text: String, remotePictureIDs: [String: String]) -> [IOSCommentEmojiPart] {
-        var parts: [IOSCommentEmojiPart] = []
-        var plainStart = text.startIndex
-        var searchStart = text.startIndex
-        while searchStart < text.endIndex,
-              let open = text[searchStart...].firstIndex(of: "["),
-              let close = text[open...].firstIndex(of: "]") {
-            let tokenEnd = text.index(after: close)
-            let token = String(text[open..<tokenEnd])
-            guard let url = imageURL(for: token, remotePictureIDs: remotePictureIDs) else {
-                searchStart = text.index(after: open)
-                continue
-            }
-            if plainStart < open { parts.append(.text(String(text[plainStart..<open]))) }
-            parts.append(.emoji(token: token, url: url))
-            plainStart = tokenEnd
-            searchStart = tokenEnd
-        }
-        if plainStart < text.endIndex { parts.append(.text(String(text[plainStart...]))) }
-        return parts
-    }
-
-    private static func imageURL(for token: String, remotePictureIDs: [String: String]) -> URL? {
-        guard let pictureID = remotePictureIDs[token] ?? fallbackPictureIDs[token] else { return nil }
-        let key = Array("3go8&$8*3*3h0k(2)2".utf8)
-        let bytes = pictureID.utf8.enumerated().map { $0.element ^ key[$0.offset % key.count] }
-        let encryptedID = Data(Insecure.MD5.hash(data: Data(bytes))).base64EncodedString()
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "+", with: "-")
-        return URL(string: "https://p1.music.126.net/\(encryptedID)/\(pictureID).jpg")
-    }
-
-    private static let fallbackPictureIDs = [
-        "[大笑]": "109951163626288227",
-        "[可爱]": "109951163626292590",
-        "[憨笑]": "109951163626287772",
-        "[色]": "109951163626282488",
-        "[亲亲]": "109951163626285344",
-        "[惊恐]": "109951163626283490",
-        "[流泪]": "109951163626284414",
-        "[亲]": "109951163626290631",
-        "[呆]": "109951163626287355",
-        "[哀伤]": "109951163626285834",
-        "[呲牙]": "109951163626292580",
-        "[吐舌]": "109951163626283909",
-        "[撇嘴]": "109951163626290628",
-        "[怒]": "109951163626282485",
-        "[奸笑]": "109951163626294536",
-        "[汗]": "109951163626295545",
-        "[痛苦]": "109951163626281966",
-        "[惶恐]": "109951163626285341",
-        "[生病]": "109951163626293558",
-        "[口罩]": "109951163626288731",
-        "[大哭]": "109951163626286820",
-        "[晕]": "109951163626293560",
-        "[发怒]": "109951163626288724",
-        "[开心]": "109951163626291598",
-        "[鬼脸]": "109951163626291602",
-        "[皱眉]": "109951163626281977",
-        "[流感]": "109951163626284872",
-        "[爱心]": "109951163626286814",
-        "[心碎]": "109951163626285338",
-        "[钟情]": "109951163626295031",
-        "[星星]": "109951163626284864",
-        "[生气]": "109951163626290124",
-        "[便便]": "109951163626287776",
-        "[强]": "109951163626289189",
-        "[弱]": "109951163626289199",
-        "[拜]": "109951163626288212",
-        "[牵手]": "109951163626289693",
-        "[跳舞]": "109951163626292089",
-        "[禁止]": "109951163626293561",
-        "[这边]": "109951163626291590",
-        "[爱意]": "109951163626292575",
-        "[示爱]": "109951163626284417",
-        "[嘴唇]": "109951163626283914",
-        "[狗]": "109951163626291126",
-        "[猫]": "109951163626283916",
-        "[猪]": "109951163626294532",
-        "[兔子]": "109951163626290633",
-        "[小鸡]": "109951163626294542",
-        "[公鸡]": "109951163626294064",
-        "[幽灵]": "109951163626294055",
-        "[圣诞]": "109951163626287360",
-        "[外星]": "109951163626285830",
-        "[钻石]": "109951163626295544",
-        "[礼物]": "109951163626289683",
-        "[男孩]": "109951163626290620",
-        "[女孩]": "109951163626294052",
-        "[蛋糕]": "109951163626292081",
-        "[18]": "109951163626287765",
-        "[圈]": "109951163626290623",
-        "[叉]": "109951163626286350",
-        "[多多大笑]": "109951163626285326",
-        "[多多耍酷]": "109951163626286808",
-        "[多多比耶]": "109951163626291112",
-        "[多多大哭]": "109951163626288209",
-        "[多多瞌睡]": "109951163626285332",
-        "[多多难过]": "109951163626282475",
-        "[多多笑哭]": "109951163626295026",
-        "[多多可怜]": "109951163626289680",
-        "[多多无语]": "109951163626291589",
-        "[多多捂脸]": "109951163626287335",
-        "[多多亲吻]": "109951163626285824",
-        "[多多调皮]": "109951163626288207",
-        "[西西心动]": "109951163626284860",
-        "[西西发怒]": "109951163626291586",
-        "[西西惊讶]": "109951163626290613",
-        "[西西奸笑]": "109951163626285329",
-        "[西西晕了]": "109951163626294527",
-        "[西西机智]": "109951163626295022",
-        "[西西惊吓]": "109951163626292571",
-        "[西西流汗]": "109951163626281959",
-        "[西西呕吐]": "109951163626287760",
-        "[西西再见]": "109951163626290116",
-        "[西西疑问]": "109951163626285827"
-    ]
-}
-
-@MainActor
-private struct IOSCommentEmojiText: View {
-    let content: String
-    private let parts: [IOSCommentEmojiPart]
-    @Environment(\.displayScale) private var displayScale
-    @State private var images: [String: UIImage] = [:]
-
-    init(content: String, remotePictureIDs: [String: String]) {
-        self.content = content
-        parts = IOSCommentEmojiCatalog.parts(in: content, remotePictureIDs: remotePictureIDs)
-    }
-
-    var body: some View {
-        renderedText
-            .fixedSize(horizontal: false, vertical: true)
-            .textSelection(.enabled)
-            .accessibilityLabel(Text(content))
-            .task(id: parts) { await loadImages() }
-    }
-
-    private var renderedText: Text {
-        parts.reduce(Text("")) { result, part in
-            switch part {
-            case let .text(text):
-                result + Text(text)
-            case let .emoji(token, _):
-                if let image = images[token] {
-                    result + Text(Image(uiImage: image)).baselineOffset(-3)
-                } else {
-                    result + Text(token)
-                }
-            }
-        }
-    }
-
-    private func loadImages() async {
-        var loaded: [String: UIImage] = [:]
-        for case let .emoji(token, url) in parts where loaded[token] == nil {
-            guard let request = ArtworkPipeline.request(
-                for: url,
-                size: CGSize(width: 20, height: 20),
-                displayScale: displayScale
-            ) else { continue }
-            do {
-                let source = try await ArtworkPipeline.shared.loadImage(for: request)
-                try Task.checkCancellation()
-                loaded[token] = UIGraphicsImageRenderer(size: CGSize(width: 18, height: 18)).image { _ in
-                    source.draw(in: CGRect(x: 0, y: 0, width: 18, height: 18))
-                }
-            } catch is CancellationError {
-                return
-            } catch {
-                continue
-            }
-        }
-        guard !Task.isCancelled else { return }
-        images = loaded
-    }
-}
-
 private enum IOSAudioSection: String, CaseIterable, Identifiable {
     case podcasts = "播客"
     case broadcasts = "广播"
@@ -1485,7 +1335,13 @@ private struct IOSAudioDiscoveryView: View {
             .pickerStyle(.segmented)
             .padding()
             Divider()
-            if section == .podcasts { podcastContent } else { broadcastContent }
+            TabView(selection: $section) {
+                podcastContent
+                    .tag(IOSAudioSection.podcasts)
+                broadcastContent
+                    .tag(IOSAudioSection.broadcasts)
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
         }
         .navigationTitle("播客与广播")
         .navigationBarTitleDisplayMode(.inline)
@@ -2419,16 +2275,11 @@ private struct IOSMusicStyleDetailView: View {
     @Bindable var player: PlayerController
     @State private var detail: MusicStyleDetail?
     @State private var kind = MusicStyleResourceKind.songs
-    @State private var page: MusicStylePage?
-    @State private var isLoading = true
-    @State private var isLoadingMore = false
-    @State private var errorMessage: String?
-    @State private var loadGeneration = 0
-    @State private var loadedStyleID: Int64?
+    @State private var pages: [MusicStyleResourceKind: MusicStylePage] = [:]
+    @State private var errors: [MusicStyleResourceKind: String] = [:]
+    @State private var loadingMore: Set<MusicStyleResourceKind> = []
 
     var body: some View {
-        let items = page?.items ?? []
-        let songs = items.compactMap { if case let .song(song) = $0 { song } else { nil } }
         VStack(spacing: 0) {
             Picker("内容类型", selection: $kind) {
                 ForEach(MusicStyleResourceKind.allCases, id: \.self) { Text($0.rawValue).tag($0) }
@@ -2436,36 +2287,53 @@ private struct IOSMusicStyleDetailView: View {
             .pickerStyle(.segmented)
             .padding()
             Divider()
-            if isLoading && page == nil {
-                IOSLibraryLoadingView(title: "正在载入\(kind.rawValue)")
-            } else if let errorMessage, page == nil {
-                IOSLibraryFailureView(title: "无法载入\(kind.rawValue)", message: errorMessage) { Task { await load() } }
-            } else if page?.items.isEmpty != false {
+            TabView(selection: $kind) {
+                ForEach(MusicStyleResourceKind.allCases, id: \.self) { kind in
+                    content(for: kind)
+                        .tag(kind)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+        }
+        .navigationTitle(detail?.name ?? styleName)
+        .navigationBarTitleDisplayMode(.inline)
+        .task(id: styleID) { await loadDetail() }
+        .task(id: "\(styleID):\(kind.rawValue)") { await load(kind) }
+    }
+
+    @ViewBuilder
+    private func content(for kind: MusicStyleResourceKind) -> some View {
+        if let page = pages[kind] {
+            if page.items.isEmpty {
                 IOSLibraryEmptyState(title: "暂无\(kind.rawValue)", symbol: kind.symbol)
             } else {
+                let songs = page.items.compactMap { if case let .song(song) = $0 { song } else { nil } }
                 List {
                     if let detail, !detail.description.isEmpty {
                         Section("曲风简介") { Text(detail.description).textSelection(.enabled) }
                     }
                     Section(kind.rawValue) {
-                        ForEach(items) { item in resourceRow(item, songs: songs) }
-                        if let errorMessage {
+                        ForEach(page.items) { item in resourceRow(item, songs: songs) }
+                        if let errorMessage = errors[kind] {
                             IOSInlineRetry(message: errorMessage) {
-                                Task { await loadMore() }
+                                Task { await loadMore(kind) }
                             }
-                        } else if page?.nextCursor != nil {
-                            Button("载入更多") { Task { await loadMore() } }
+                        } else if page.nextCursor != nil {
+                            Button("载入更多") { Task { await loadMore(kind) } }
                                 .frame(maxWidth: .infinity, minHeight: 44)
-                                .disabled(isLoadingMore)
+                                .disabled(loadingMore.contains(kind))
                         }
                     }
                 }
                 .listStyle(.insetGrouped)
             }
+        } else if let errorMessage = errors[kind] {
+            IOSLibraryFailureView(title: "无法载入\(kind.rawValue)", message: errorMessage) {
+                Task { await load(kind, force: true) }
+            }
+        } else {
+            IOSLibraryLoadingView(title: "正在载入\(kind.rawValue)")
         }
-        .navigationTitle(detail?.name ?? styleName)
-        .navigationBarTitleDisplayMode(.inline)
-        .task(id: "\(styleID):\(kind.rawValue)") { await load() }
     }
 
     @ViewBuilder
@@ -2494,93 +2362,65 @@ private struct IOSMusicStyleDetailView: View {
     }
 
     @MainActor
-    private func load() async {
-        loadGeneration &+= 1
-        let generation = loadGeneration
+    private func loadDetail() async {
         let requestedStyleID = styleID
-        let requestedKind = kind
+        guard let library = model.knowledgeLibrary else { return }
+        do {
+            let loadedDetail = try await library.styleDetail(id: requestedStyleID, name: styleName)
+            try Task.checkCancellation()
+            guard styleID == requestedStyleID else { return }
+            detail = loadedDetail
+        } catch is CancellationError {
+        } catch {}
+    }
+
+    @MainActor
+    private func load(_ kind: MusicStyleResourceKind, force: Bool = false) async {
+        guard force || pages[kind] == nil else { return }
         guard let library = model.knowledgeLibrary else {
-            isLoading = false
-            errorMessage = "曲风服务不可用"
+            errors[kind] = "曲风服务不可用"
             return
         }
-        isLoading = true
-        isLoadingMore = false
-        page = nil
-        errorMessage = nil
-        defer {
-            if loadGeneration == generation,
-               styleID == requestedStyleID,
-               kind == requestedKind {
-                isLoading = false
-            }
-        }
+        let requestedStyleID = styleID
+        errors[kind] = nil
         do {
-            async let loadedPage = library.stylePage(id: requestedStyleID, kind: requestedKind)
-            let loadedDetail = if loadedStyleID == requestedStyleID, let detail {
-                detail
-            } else {
-                try await library.styleDetail(id: requestedStyleID, name: styleName)
-            }
-            let nextPage = try await loadedPage
+            let page = try await library.stylePage(id: requestedStyleID, kind: kind)
             try Task.checkCancellation()
-            guard loadGeneration == generation,
-                  styleID == requestedStyleID,
-                  kind == requestedKind
-            else { return }
-            detail = loadedDetail
-            loadedStyleID = requestedStyleID
-            page = nextPage
+            guard styleID == requestedStyleID else { return }
+            pages[kind] = page
         } catch is CancellationError {
         } catch {
-            guard loadGeneration == generation,
-                  styleID == requestedStyleID,
-                  kind == requestedKind
-            else { return }
-            errorMessage = error.localizedDescription
+            guard styleID == requestedStyleID else { return }
+            errors[kind] = error.localizedDescription
         }
     }
 
     @MainActor
-    private func loadMore() async {
+    private func loadMore(_ kind: MusicStyleResourceKind) async {
         guard let library = model.knowledgeLibrary,
-              let page,
+              let page = pages[kind],
               let cursor = page.nextCursor,
-              !isLoading,
-              !isLoadingMore
+              !loadingMore.contains(kind)
         else { return }
-        let generation = loadGeneration
         let requestedStyleID = styleID
-        let requestedKind = kind
-        isLoadingMore = true
-        errorMessage = nil
-        defer {
-            if loadGeneration == generation,
-               styleID == requestedStyleID,
-               kind == requestedKind {
-                isLoadingMore = false
-            }
-        }
+        loadingMore.insert(kind)
+        errors[kind] = nil
+        defer { loadingMore.remove(kind) }
         do {
             let next = try await library.stylePage(
                 id: requestedStyleID,
-                kind: requestedKind,
+                kind: kind,
                 cursor: cursor
             )
             try Task.checkCancellation()
-            guard loadGeneration == generation,
-                  styleID == requestedStyleID,
-                  kind == requestedKind,
-                  self.page?.nextCursor == cursor
+            guard styleID == requestedStyleID,
+                  pages[kind]?.nextCursor == cursor
             else { return }
-            self.page = page.appending(next)
+            pages[kind] = page.appending(next)
         } catch is CancellationError {
         } catch {
-            guard loadGeneration == generation,
-                  styleID == requestedStyleID,
-                  kind == requestedKind
-            else { return }
-            errorMessage = error.localizedDescription
+            guard styleID == requestedStyleID else { return }
+            errors[kind] = error.localizedDescription
         }
     }
 }
@@ -2687,7 +2527,7 @@ private struct IOSKnowledgeImageBlock: View {
     }
 }
 
-private struct IOSMusicSheetsView: View {
+struct IOSMusicSheetsView: View {
     let song: Song
     @Bindable var model: AppModel
     @State private var sheets: [MusicSheetSummary] = []

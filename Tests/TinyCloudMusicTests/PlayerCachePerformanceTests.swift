@@ -37,10 +37,12 @@ struct PlayerCachePerformanceTests {
         #expect(text.contains("player.resolveQueueSongs(visibleAround: item.id)"))
         #expect(queueText.contains("LazyVStack"))
         #expect(!queueText.contains("List("))
-        #expect(playerText.components(separatedBy: "cache.cache(").count == 2)
+        #expect(playerText.components(separatedBy: "cache.cache(").count == 3)
+        let qualitySwitch = try #require(playerText.range(of: "func selectPlaybackQuality"))
         let cacheCall = try #require(playerText.range(of: "cache.cache("))
         let prefetch = try #require(playerText.range(of: "private func prefetchNext"))
-        #expect(cacheCall.lowerBound > prefetch.lowerBound)
+        #expect(cacheCall.lowerBound > qualitySwitch.lowerBound)
+        #expect(cacheCall.lowerBound < prefetch.lowerBound)
     }
 
     @MainActor
@@ -250,6 +252,21 @@ struct PlayerCachePerformanceTests {
         )
         player.play(song, in: [song])
         await waitUntil { player.hasCurrentPlayerItem && !player.isLoadingLyrics }
+
+        let systemPosition = ObservationChangeCounter()
+        let revision = player.playbackPositionRevision
+        withObservationTracking {
+            _ = player.playbackPositionRevision
+        } onChange: {
+            systemPosition.increment()
+        }
+        player.updatePosition(0.25)
+        #expect(player.playbackPositionRevision == revision)
+        #expect(systemPosition.value == 0)
+        player.seek(to: 0.5)
+        #expect(player.playbackPositionRevision == revision + 1)
+        #expect(systemPosition.value == 1)
+
         player.setPlayback(false)
         player.seek(to: 0)
 
@@ -282,6 +299,8 @@ struct PlayerCachePerformanceTests {
         #expect(controls.value == 0)
         #expect(progress.value == 100)
         player.seek(to: 1.25)
+        player.updatePosition(0.25)
+        #expect(player.position == 1.25)
         #expect(player.currentLyric?.text == "second")
     }
 
@@ -438,6 +457,93 @@ struct PlayerCachePerformanceTests {
         )
 
         try await player.clearCache()
+    }
+
+    @MainActor
+    @Test("A manually selected quality is cached for the next switch")
+    func selectedQualityCache() async throws {
+        let root = performanceCacheRoot()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "current.wav")
+        try performanceWAV().write(to: source)
+        let song = performanceSong(1)
+        let repository = PlayerPerformanceRepository(
+            songs: [song],
+            sourceURL: source,
+            levelSourceURL: URL(string: "tinycloudmusic-test://selected-quality")!
+        )
+        let cache = TrackCache(directory: root.appending(path: "StreamCache"), download: { request in
+            let downloaded = root.appending(path: "selected-quality.wav")
+            try performanceWAV().write(to: downloaded)
+            return (
+                downloaded,
+                HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "audio/wav"]
+                )!
+            )
+        })
+        let player = PlayerController(
+            repository: repository,
+            cacheRoot: root,
+            cache: cache,
+            crossfadeDuration: 0
+        )
+        let master = SongQualityDetail(
+            id: "jymaster",
+            bitrate: 24_000_000,
+            size: 1,
+            sampleRate: 192_000,
+            isAvailable: true
+        )
+
+        player.play(song, in: [song])
+        await waitUntil { player.hasCurrentPlayerItem }
+        player.selectPlaybackQuality(master)
+        await waitUntil { await cache.readyFile(for: song.id, quality: master.id) != nil }
+
+        #expect(await cache.readyFile(for: song.id, quality: master.id) != nil)
+        #expect(await repository.levelRequests() == [master.id])
+        player.selectPlaybackQuality(master)
+        await waitUntil { !player.isSwitchingPlaybackQuality }
+        #expect(await repository.levelRequests() == [master.id])
+    }
+
+    @MainActor
+    @Test("Playback controls fade only while the setting is enabled")
+    func playbackControlFadeToggle() async throws {
+        let root = performanceCacheRoot()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "fade.wav")
+        try performanceWAV().write(to: source)
+        let song = performanceSong(1)
+        let repository = PlayerPerformanceRepository(songs: [song], sourceURL: source)
+        let player = PlayerController(
+            repository: repository,
+            cacheRoot: root.appending(path: "cache"),
+            crossfadeDuration: 0.6,
+            playbackControlFadeEnabled: true
+        )
+
+        player.play(song, in: [song])
+        await waitUntil { player.isPlaying }
+        #expect(player.isPlaying)
+
+        player.togglePlayback()
+        #expect(player.hasPendingPlaybackFade)
+        try await Task.sleep(for: .milliseconds(100))
+        player.togglePlayback()
+        #expect(player.hasPendingPlaybackFade)
+
+        player.setPlaybackControlFadeEnabled(false)
+        #expect(!player.hasPendingPlaybackFade)
+        player.togglePlayback()
+        #expect(!player.isPlaybackRequested)
+        #expect(!player.hasPendingPlaybackFade)
     }
 
     @MainActor
@@ -949,12 +1055,14 @@ private actor PlayerPerformanceRepository: MusicRepository {
     private let songsByID: [Int64: Song]
     private let sourceFails: Bool
     private let sourceURL: URL
+    private let levelSourceURL: URL?
     private let delayedSongID: Int64?
     private let blocksStartReport: Bool
     private let reportGate: PlayerReportGate?
     private let prefetchGate: PlayerPrefetchGate?
     private var requestedSongIDs: [[Int64]] = []
     private var sourceRequests = 0
+    private var requestedLevels: [String] = []
     private var songResolutionCancellations = 0
     private var reportRevisions: [UInt64] = []
     private var startReportCancellations = 0
@@ -963,6 +1071,7 @@ private actor PlayerPerformanceRepository: MusicRepository {
         songs: [Song],
         sourceFails: Bool = false,
         sourceURL: URL = URL(fileURLWithPath: "/dev/null"),
+        levelSourceURL: URL? = nil,
         delayedSongID: Int64? = nil,
         blocksStartReport: Bool = false,
         reportGate: PlayerReportGate? = nil,
@@ -971,6 +1080,7 @@ private actor PlayerPerformanceRepository: MusicRepository {
         songsByID = Dictionary(uniqueKeysWithValues: songs.map { ($0.id, $0) })
         self.sourceFails = sourceFails
         self.sourceURL = sourceURL
+        self.levelSourceURL = levelSourceURL
         self.delayedSongID = delayedSongID
         self.blocksStartReport = blocksStartReport
         self.reportGate = reportGate
@@ -1003,12 +1113,19 @@ private actor PlayerPerformanceRepository: MusicRepository {
     }
 
     func playbackSource(for songID: Int64, level: String) async throws -> PlaybackSource {
-        try await playbackSource(for: songID, quality: .standard)
+        sourceRequests += 1
+        requestedLevels.append(level)
+        if sourceFails { throw URLError(.timedOut) }
+        return PlaybackSource(
+            url: levelSourceURL ?? sourceURL,
+            availability: .playable(level: level)
+        )
     }
 
     func songRequests() -> [[Int64]] { requestedSongIDs }
     func songResolutionCancellationCount() -> Int { songResolutionCancellations }
     func sourceRequestCount() -> Int { sourceRequests }
+    func levelRequests() -> [String] { requestedLevels }
     func startReportRevisions() -> [UInt64] { reportRevisions }
     func startReportCancellationCount() -> Int { startReportCancellations }
     func lyrics(for songID: Int64) async throws -> SongLyrics {

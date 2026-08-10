@@ -171,6 +171,7 @@ let settings = AppSettings(
     videoPlaybackQuality: .lowest,
     videoDownloadQuality: .highest,
     crossfadeDuration: 3,
+    playbackControlFadeEnabled: false,
     homeSectionIDs: ["home"],
     downloadBookmark: nil,
     videoDownloadBookmark: nil,
@@ -185,6 +186,7 @@ expect(
 )
 expect(settings.downloadConcurrency == 3, "Download concurrency must persist in app settings")
 expect(settings.crossfadeDuration == 3, "Crossfade duration must persist in app settings")
+expect(!settings.playbackControlFadeEnabled, "Playback control fades must remain independently configurable")
 expect(settings.imageBookmark == settings.downloadBookmark, "Images must follow the song folder by default")
 let lowResolutionArtworkURL = URL(string: "https://p1.music.126.net/cover.jpg?foo=bar&param=64y64")!
 let highResolutionArtworkURL = ArtworkURLPolicy.highResolutionURL(for: lowResolutionArtworkURL)

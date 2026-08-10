@@ -32,6 +32,9 @@
   },
   "first": {
     "code": 200,
-    "data": {"firstListenTime": "1", "text": "https://invalid.example/hidden"}
+    "data": {
+      "musicFirstListenDto": {"timestamp": "1", "desc": "https://invalid.example/hidden"},
+      "musicTotalPlayDto": {"text": "Must not leak into first-listen memory"}
+    }
   }
 }

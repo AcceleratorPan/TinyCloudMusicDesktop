@@ -16,6 +16,38 @@ private struct AppShellBootstrapError: Error {}
 
 @Suite("App shell performance", .serialized)
 struct AppShellPerformanceTests {
+    @MainActor
+    @Test("Main menu exposes About and standard playback shortcuts")
+    func mainMenuCommands() throws {
+        let application = NSApplication.shared
+        let previousMenu = application.mainMenu
+        defer { application.mainMenu = previousMenu }
+
+        let delegate = AppDelegate()
+        delegate.installMainMenu()
+        let mainMenu = try #require(application.mainMenu)
+        let menus = mainMenu.items.compactMap(\.submenu)
+        let appMenu = try #require(menus.first { $0.title == "小云音乐" })
+        let playbackMenu = try #require(menus.first { $0.title == "播放控制" })
+        #expect(appMenu.item(withTitle: "关于小云音乐") != nil)
+
+        let expected: [(String, String, NSEvent.ModifierFlags)] = [
+            ("播放/暂停", " ", []),
+            ("上一首", "\u{F702}", [.command]),
+            ("下一首", "\u{F703}", [.command]),
+            ("快退 10 秒", "\u{F702}", [.command, .shift]),
+            ("快进 10 秒", "\u{F703}", [.command, .shift]),
+            ("增大音量", "\u{F700}", [.command]),
+            ("减小音量", "\u{F701}", [.command]),
+            ("静音/取消静音", "\u{F701}", [.command, .shift])
+        ]
+        for (title, key, modifiers) in expected {
+            let item = try #require(playbackMenu.item(withTitle: title))
+            #expect(item.keyEquivalent == key)
+            #expect(item.keyEquivalentModifierMask == modifiers)
+        }
+    }
+
     @Test("Credential bootstrap owns one detached load and preserves read failure")
     func credentialBootstrap() async {
         let loadedCount = AppShellLockedCounter()
@@ -420,6 +452,9 @@ struct AppShellPerformanceTests {
         #expect(app.contains("observePositionChanges()"))
         #expect(app.contains("observeLyricChanges()"))
         #expect(app.contains("observeControlChanges()"))
+        #expect(app.contains("NSEvent.addLocalMonitorForEvents(matching: .keyDown)"))
+        #expect(app.contains("menu.performKeyEquivalent(with: event.value)"))
+        #expect(app.contains("NSApp.keyWindow?.firstResponder is NSTextView"))
         #expect(app.contains("statusItem.observe(\\.isVisible)"))
         #expect(app.contains("statusItemVisibilityObservation?.invalidate()"))
         #expect(menuPosition.contains("refreshPositionThreshold()"))

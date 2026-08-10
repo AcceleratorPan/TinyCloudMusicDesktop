@@ -458,9 +458,10 @@ struct LiveMusicLibrary: Sendable {
                 host: Self.eapiHost
             ),
             payload: ["songId": songID],
-            cache: .listeningHistory,
+            cache: .detail,
             refreshCache: forceRefresh,
-            expectedCredentialRevision: expectedCredentialRevision
+            expectedCredentialRevision: expectedCredentialRevision,
+            includesClientHeader: true
         )
         try requireSuccess(root)
         return decodeFirstListenMemory(root)

@@ -62,13 +62,13 @@ struct IOSAccountView: View {
         ) { result in
             handleFolderSelection(result)
         }
-        .confirmationDialog("确定退出登录？", isPresented: $confirmsLogout) {
+        .alert("确定退出登录？", isPresented: $confirmsLogout) {
             Button("退出登录", role: .destructive) { logout() }
             Button("取消", role: .cancel) {}
         } message: {
             Text("本地登录 Cookie 将被清除；单独验证的 MUSIC_U 保持不变。")
         }
-        .confirmationDialog("清除缓存？", isPresented: $confirmsCacheClear) {
+        .alert("清除缓存？", isPresented: $confirmsCacheClear) {
             Button("清除", role: .destructive) { clearCache() }
             Button("取消", role: .cancel) {}
         } message: {
@@ -174,6 +174,14 @@ struct IOSAccountView: View {
             )) {
                 ForEach(VideoQuality.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }
+
+            Toggle("播放控制淡入淡出", isOn: Binding(
+                get: { model.settings.playbackControlFadeEnabled },
+                set: {
+                    model.setPlaybackControlFadeEnabled($0)
+                    player.setPlaybackControlFadeEnabled($0)
+                }
+            ))
 
             VStack(alignment: .leading, spacing: 8) {
                 LabeledContent("歌曲过渡", value: displayedCrossfade == 0 ? "关闭" : "\(Int(displayedCrossfade)) 秒")
@@ -285,7 +293,7 @@ struct IOSAccountView: View {
                 Button(role: .destructive) {
                     if session.clearMusicU() {
                         musicU = ""
-                        message = "MUSIC_U 已清除。"
+                        model.showToast("MUSIC_U 已清除")
                     } else {
                         message = "MUSIC_U 清除失败，请重试。"
                     }
@@ -367,6 +375,7 @@ struct IOSAccountView: View {
             do {
                 if try await session.refresh() {
                     await sessionDidChange()
+                    model.showToast("登录已刷新")
                 } else {
                     message = "刷新后的会话未通过验证，原登录保持不变。"
                 }
@@ -383,7 +392,11 @@ struct IOSAccountView: View {
             let warning = await session.logout()
             await sessionDidChange()
             isLoggingOut = false
-            message = warning ?? "已退出登录。"
+            if let warning {
+                message = warning
+            } else {
+                model.showToast("已退出登录")
+            }
         }
     }
 
@@ -392,7 +405,7 @@ struct IOSAccountView: View {
         guard let session = model.session else { return }
         player.setAccountCredentialRevision(session.credentialRevision)
         await model.refreshAccountState()
-        if session.state == .authenticated { message = "登录成功。" }
+        if session.state == .authenticated { model.showToast("登录成功") }
     }
 
     private func verifyMusicU(_ session: SessionController) {
@@ -405,9 +418,11 @@ struct IOSAccountView: View {
                 isVerifyingMusicU = false
             }
             do {
-                message = try await session.verifyAndSaveMusicU(value)
-                    ? "MUSIC_U 已验证并保存。"
-                    : "MUSIC_U 无效或没有有效的音乐包权益。"
+                if try await session.verifyAndSaveMusicU(value) {
+                    model.showToast("MUSIC_U 已验证并保存")
+                } else {
+                    message = "MUSIC_U 无效或没有有效的音乐包权益。"
+                }
             } catch {
                 message = "验证失败：\(error.localizedDescription)"
             }
@@ -455,7 +470,11 @@ struct IOSAccountView: View {
             do { try await ArtworkPipeline.shared.clearCache() }
             catch { failures.append("封面缓存：\(error.localizedDescription)") }
             isClearingCache = false
-            message = failures.isEmpty ? "缓存已清除。" : "部分缓存清除失败：\n" + failures.joined(separator: "\n")
+            if failures.isEmpty {
+                model.showToast("缓存已清除")
+            } else {
+                message = "部分缓存清除失败：\n" + failures.joined(separator: "\n")
+            }
         }
     }
 }

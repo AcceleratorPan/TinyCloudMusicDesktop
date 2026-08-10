@@ -61,7 +61,37 @@ enum AppTerminationDeadline {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+private final class PlaybackMainMenu: NSMenu {
+    var playbackMenu: NSMenu? {
+        items.lazy.compactMap(\.submenu).first { $0.title == "播放控制" }
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .subtracting([.capsLock, .function, .numericPad])
+        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        let commandShortcutKeys = ["\u{F700}", "\u{F701}", "\u{F702}", "\u{F703}"]
+        let shiftedCommandShortcutKeys = ["\u{F701}", "\u{F702}", "\u{F703}"]
+        let isPlaybackShortcut = (key == " " && modifiers.isEmpty)
+            || (modifiers == [.command] && commandShortcutKeys.contains(key))
+            || (modifiers == [.command, .shift] && shiftedCommandShortcutKeys.contains(key))
+        let isEditingText = MainActor.assumeIsolated {
+            NSApp.keyWindow?.firstResponder is NSTextView
+        }
+        if isEditingText, isPlaybackShortcut {
+            return false
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+private struct MainThreadKeyEvent: @unchecked Sendable {
+    let value: NSEvent
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
     private var window: NSWindow?
     private var nowPlayingWindow: NSWindow?
     private var settingsWindow: NSWindow?
@@ -71,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var credentialObserver: NSObjectProtocol?
     private var sleepObserver: NSObjectProtocol?
     private var wakeObserver: NSObjectProtocol?
+    private var playbackKeyMonitor: Any?
     private var credentialBootstrapTask: Task<AppCredentialBootstrapResult, Never>?
     private var sheetCleanupTask: Task<Void, Never>?
     private var terminationConfirmed = false
@@ -79,6 +110,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     var hasNowPlayingWindow: Bool { nowPlayingWindow != nil }
     var hasSettingsWindow: Bool { settingsWindow != nil }
+
+    isolated deinit {
+        if let playbackKeyMonitor { NSEvent.removeMonitor(playbackKeyMonitor) }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
@@ -163,9 +198,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             repository: repository,
             playbackQuality: initialCacheConfiguration.playbackQuality,
             cacheRoot: initialCacheConfiguration.cacheRoot,
-            crossfadeDuration: model.settings.crossfadeDuration
+            crossfadeDuration: model.settings.crossfadeDuration,
+            playbackControlFadeEnabled: model.settings.playbackControlFadeEnabled
         )
         self.player = player
+        installPlaybackKeyMonitor()
         let listenTogether = ListenTogetherController(
             service: LiveListenTogetherService(transport: transport),
             player: player
@@ -214,7 +251,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 760),
+            contentRect: NSRect(x: 0, y: 0, width: 1_416, height: 912),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -281,6 +318,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let model, let player else { return }
         openSettings(model: model, player: player)
         NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func openAbout(_ sender: Any?) {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "开发版"
+        let credits = NSMutableAttributedString(
+            string: "由 AcceleratorPan 倾情复刻\n2026 Summer\nGitHub"
+        )
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        credits.addAttribute(
+            .paragraphStyle,
+            value: paragraph,
+            range: NSRange(location: 0, length: credits.length)
+        )
+        credits.addAttribute(
+            .link,
+            value: URL(string: "https://github.com/AcceleratorPan/TinyCloudMusicDesktop")!,
+            range: (credits.string as NSString).range(of: "GitHub")
+        )
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationName: "小云音乐",
+            .applicationVersion: version,
+            .credits: credits
+        ])
+    }
+
+    @objc private func togglePlayback(_ sender: Any?) { player?.togglePlayback() }
+    @objc private func previousTrack(_ sender: Any?) { player?.previous() }
+    @objc private func nextTrack(_ sender: Any?) { player?.next() }
+    @objc private func seekBackward(_ sender: Any?) {
+        if let player { player.seek(to: player.position - 10) }
+    }
+
+    @objc private func seekForward(_ sender: Any?) {
+        if let player { player.seek(to: player.position + 10) }
+    }
+
+    @objc private func volumeUp(_ sender: Any?) {
+        if let player { player.volume = min(1, player.volume + 0.1) }
+    }
+
+    @objc private func volumeDown(_ sender: Any?) {
+        if let player { player.volume = max(0, player.volume - 0.1) }
+    }
+
+    @objc private func toggleMute(_ sender: Any?) { player?.toggleMute() }
+
+    private func installPlaybackKeyMonitor() {
+        playbackKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let event = MainThreadKeyEvent(value: event)
+            let handled = MainActor.assumeIsolated {
+                guard !(NSApp.keyWindow?.firstResponder is NSTextView),
+                      let menu = (NSApp.mainMenu as? PlaybackMainMenu)?.playbackMenu
+                else { return false }
+                menu.update()
+                return menu.performKeyEquivalent(with: event.value)
+            }
+            return handled ? nil : event.value
+        }
     }
 
     @discardableResult
@@ -353,11 +450,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         alert.runModal()
     }
 
-    private func installMainMenu() {
-        let mainMenu = NSMenu()
+    func installMainMenu() {
+        let mainMenu = PlaybackMainMenu()
 
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu(title: "小云音乐")
+        let aboutItem = appMenu.addItem(
+            withTitle: "关于小云音乐",
+            action: #selector(openAbout(_:)),
+            keyEquivalent: ""
+        )
+        aboutItem.target = self
+        appMenu.addItem(.separator())
         let settingsItem = appMenu.addItem(
             withTitle: "设置…",
             action: #selector(openSettings(_:)),
@@ -386,7 +490,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
 
+        let playbackMenuItem = NSMenuItem()
+        let playbackMenu = NSMenu(title: "播放控制")
+        func addPlaybackItem(
+            _ title: String,
+            action: Selector,
+            keyEquivalent: String,
+            modifiers: NSEvent.ModifierFlags = [.command]
+        ) {
+            let item = playbackMenu.addItem(
+                withTitle: title,
+                action: action,
+                keyEquivalent: keyEquivalent
+            )
+            item.keyEquivalentModifierMask = modifiers
+            item.target = self
+        }
+        addPlaybackItem("播放/暂停", action: #selector(togglePlayback(_:)), keyEquivalent: " ", modifiers: [])
+        playbackMenu.addItem(.separator())
+        addPlaybackItem("上一首", action: #selector(previousTrack(_:)), keyEquivalent: "\u{F702}")
+        addPlaybackItem("下一首", action: #selector(nextTrack(_:)), keyEquivalent: "\u{F703}")
+        addPlaybackItem(
+            "快退 10 秒",
+            action: #selector(seekBackward(_:)),
+            keyEquivalent: "\u{F702}",
+            modifiers: [.command, .shift]
+        )
+        addPlaybackItem(
+            "快进 10 秒",
+            action: #selector(seekForward(_:)),
+            keyEquivalent: "\u{F703}",
+            modifiers: [.command, .shift]
+        )
+        playbackMenu.addItem(.separator())
+        addPlaybackItem("增大音量", action: #selector(volumeUp(_:)), keyEquivalent: "\u{F700}")
+        addPlaybackItem("减小音量", action: #selector(volumeDown(_:)), keyEquivalent: "\u{F701}")
+        addPlaybackItem(
+            "静音/取消静音",
+            action: #selector(toggleMute(_:)),
+            keyEquivalent: "\u{F701}",
+            modifiers: [.command, .shift]
+        )
+        playbackMenuItem.submenu = playbackMenu
+        mainMenu.addItem(playbackMenuItem)
+
         NSApplication.shared.mainMenu = mainMenu
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard let action = menuItem.action else { return true }
+        if action == #selector(togglePlayback(_:)) {
+            menuItem.title = player?.isPlaying == true ? "暂停" : "播放"
+            return player?.currentSong != nil
+        }
+        if action == #selector(previousTrack(_:)) { return player?.canGoPrevious == true }
+        if action == #selector(nextTrack(_:)) { return player?.canGoNext == true }
+        if action == #selector(seekBackward(_:)) || action == #selector(seekForward(_:)) {
+            return player?.currentSong != nil
+        }
+        return true
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

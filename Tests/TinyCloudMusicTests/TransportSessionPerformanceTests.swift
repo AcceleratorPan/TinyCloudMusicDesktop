@@ -1548,6 +1548,35 @@ struct TransportSessionPerformanceTests {
         #expect(TransportFixtureProtocol.requestCount(path: "/history-mutation") == 1)
     }
 
+    @Test("Playback history invalidation preserves cached first-listen detail")
+    func firstListenCacheIsolation() async throws {
+        let snapshot = CredentialSnapshot(.authenticated(try fakeCredentials("first-listen")))
+        TransportFixtureProtocol.reset { request, _ in
+            if request.url?.path == "/eapi/content/activity/music/first/listen/info" {
+                return .init(body: #"{"code":200,"data":{"musicFirstListenDto":{"timestamp":"1702310333313","season":"初冬","period":"深夜"}}}"#)
+            }
+            return .init(body: #"{"code":200}"#)
+        }
+        let transport = fixtureTransport(snapshot: snapshot)
+        let library = LiveMusicLibrary(transport: transport)
+        let revision = snapshot.load().revision
+
+        let first = try await library.firstListenMemory(songID: 42, expectedCredentialRevision: revision)
+        _ = try await transport.request(
+            endpoint("/history-mutation"),
+            json: compactJSON(["id": 42]),
+            expectedCredentialRevision: revision,
+            invalidatesGroups: [.listeningHistory],
+            retryable: false
+        )
+        let second = try await library.firstListenMemory(songID: 42, expectedCredentialRevision: revision)
+
+        #expect(first == second)
+        #expect(TransportFixtureProtocol.requestCount(
+            path: "/eapi/content/activity/music/first/listen/info"
+        ) == 1)
+    }
+
     @Test("A response after switching accounts cannot invalidate B cache")
     func sentMutationKeepsNewAccountCache() async throws {
         let snapshot = CredentialSnapshot(.authenticated(try fakeCredentials("account-a")))

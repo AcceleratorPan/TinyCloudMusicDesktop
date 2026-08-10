@@ -1,5 +1,36 @@
 import Observation
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
+
+final class TopTabScrollPositions<Selection: Hashable> {
+    private(set) var selection: Selection
+    private var offsets: [Selection: CGFloat] = [:]
+
+    init(selection: Selection) {
+        self.selection = selection
+    }
+
+    func record(_ currentOffset: CGFloat, for selection: Selection) {
+        offsets[selection] = max(0, currentOffset)
+    }
+
+    func offset(for selection: Selection) -> CGFloat {
+        offsets[selection] ?? 0
+    }
+
+    @discardableResult
+    func select(_ newSelection: Selection) -> CGFloat {
+        selection = newSelection
+        return offset(for: newSelection)
+    }
+
+    func target(for newSelection: Selection, currentOffset: CGFloat) -> CGFloat {
+        record(currentOffset, for: selection)
+        return select(newSelection)
+    }
+}
 
 struct ListeningFootprintsView: View {
     @Bindable var model: AppModel
@@ -16,6 +47,10 @@ struct ListeningFootprintsView: View {
     @State private var annualReportReload = 0
     @State private var loadedRootIdentity: FootprintRootTaskID?
     @State private var historyRefresh = FootprintHistoryRefreshState()
+#if os(macOS)
+    @State private var macScrollPositions = TopTabScrollPositions(selection: FootprintPeriod.week)
+#endif
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .largeTitle) private var annualKeywordFontSize = 56.0
 
     var body: some View {
@@ -42,6 +77,9 @@ struct ListeningFootprintsView: View {
                     periodPicker
                     Divider()
                     periodContent
+#if os(iOS)
+                        .modifier(IOSTopTabScrollPositionModifier(selection: selectedPeriod))
+#endif
                 }
             }
         }
@@ -86,7 +124,7 @@ struct ListeningFootprintsView: View {
         .pickerStyle(.segmented)
         .labelsHidden()
         .frame(maxWidth: 520)
-        .padding(.horizontal, 24)
+        .padding(.horizontal, periodPickerHorizontalPadding)
         .padding(.vertical, 14)
     }
 
@@ -106,9 +144,20 @@ struct ListeningFootprintsView: View {
                         rankList(page.ranks)
                     }
                 }
-                .padding(.horizontal, 28)
+                .padding(.horizontal, contentHorizontalPadding)
                 .padding(.vertical, 22)
+#if os(macOS)
+                .background {
+                    MacTopTabScrollPositionAccessor(
+                        selection: selectedPeriod,
+                        positions: macScrollPositions
+                    )
+                }
+#endif
             }
+#if os(iOS)
+            .refreshable { await waitForFootprintLoad(refresh()) }
+#endif
         } else if activeState.isLoading {
             VStack(spacing: 12) {
                 ProgressView()
@@ -129,16 +178,31 @@ struct ListeningFootprintsView: View {
     }
 
     private func reportHeader(_ page: FootprintPage) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(page.title)
-                    .font(.title2.weight(.semibold))
-                if page.cursor != nil {
-                    Text("历史周期")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+#if os(iOS)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                reportTitle(page)
+                Spacer()
+                if activeState.isLoading {
+                    ProgressView().controlSize(.small)
+                        .accessibilityLabel("正在加载")
                 }
             }
+            if page.cursor != nil || canLoadPrevious(page) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        reportNavigationButtons(page)
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        reportNavigationButtons(page)
+                    }
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+#else
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            reportTitle(page)
             Spacer()
             if page.cursor != nil {
                 Button {
@@ -162,10 +226,41 @@ struct ListeningFootprintsView: View {
                     .accessibilityLabel("正在加载")
             }
         }
+#endif
+    }
+
+    private func reportTitle(_ page: FootprintPage) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(page.title)
+                .font(.title2.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
+            if page.cursor != nil {
+                Text("历史周期")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func reportNavigationButtons(_ page: FootprintPage) -> some View {
+        if page.cursor != nil {
+            Button("返回当前期", systemImage: "arrow.uturn.backward") { returnToCurrent() }
+                .frame(minHeight: 44)
+                .disabled(activeState.isLoading)
+        }
+        if canLoadPrevious(page) {
+            Button("上一期", systemImage: "chevron.backward") {
+                guard let cursor = page.previousCursor else { return }
+                startLoad(selectedPeriod, cursor: cursor)
+            }
+            .frame(minHeight: 44)
+            .disabled(activeState.isLoading)
+        }
     }
 
     private func metrics(_ values: [ListeningMetric]) -> some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 132, maximum: 220), spacing: 12)], spacing: 12) {
+        LazyVGrid(columns: metricColumns(minimum: 132, maximum: 220), spacing: 12) {
             ForEach(values) { metric in
                 VStack(alignment: .leading, spacing: 5) {
                     Text(metric.kind.title)
@@ -205,24 +300,24 @@ struct ListeningFootprintsView: View {
     }
 
     private func annualYearControl(_ years: [Int]) -> some View {
-        HStack(spacing: 16) {
-            Label("年度报告", systemImage: "calendar")
-                .font(.headline)
-                .foregroundStyle(.primary)
-            Spacer(minLength: 16)
-            Text("报告年份")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Picker("报告年份", selection: $selectedAnnualYear) {
-                ForEach(years, id: \.self) { year in
-                    Text("\(year) 年").tag(Optional(year))
-                }
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 16) {
+                annualYearLabel
+                Spacer(minLength: 16)
+#if os(macOS)
+                Text("报告年份")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+#endif
+                annualYearPicker(years)
             }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .fixedSize()
+            VStack(alignment: .leading, spacing: 8) {
+                annualYearLabel
+                annualYearPicker(years)
+            }
         }
         .padding(.horizontal, 16)
+        .padding(.vertical, 4)
         .frame(minHeight: 52)
         .background(.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
         .overlay {
@@ -231,11 +326,29 @@ struct ListeningFootprintsView: View {
         }
     }
 
+    private var annualYearLabel: some View {
+        Label("年度报告", systemImage: "calendar")
+            .font(.headline)
+            .foregroundStyle(.primary)
+    }
+
+    private func annualYearPicker(_ years: [Int]) -> some View {
+        Picker("报告年份", selection: $selectedAnnualYear) {
+            ForEach(years, id: \.self) { year in
+                Text("\(year) 年").tag(Optional(year))
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .fixedSize()
+        .frame(minHeight: 44)
+    }
+
     private func annualHero(year: Int, metrics: [ListeningMetric]) -> some View {
         VStack(alignment: .leading, spacing: 18) {
             annualHeroTitle(year: year)
-            if let songCount = listeningMetric(.plays, in: metrics) {
-                Text("今年你一共听过 \(songCount.formatted()) 首歌")
+            if let playCount = listeningMetric(.plays, in: metrics) {
+                Text("今年你共播放 \(playCount.formatted()) 次")
                     .font(.title2.weight(.semibold))
             }
             if let seconds = listeningMetric(.duration, in: metrics) {
@@ -255,7 +368,7 @@ struct ListeningFootprintsView: View {
                 .foregroundStyle(Color.accentColor)
                 .symbolRenderingMode(.hierarchical)
             Text("\(year)")
-                .font(.system(size: 42, weight: .bold))
+                .font(annualYearFont)
                 .monospacedDigit()
             Text("年度听歌报告")
                 .font(.title3.weight(.medium))
@@ -273,21 +386,21 @@ struct ListeningFootprintsView: View {
                 description: Text("当前仅提供年度听歌足迹摘要。")
             )
             .frame(maxWidth: .infinity, minHeight: 180)
-        } else if annualLoader.state.isLoading {
+        } else if showsAnnualLoadingPlaceholder {
             HStack(spacing: 10) {
                 ProgressView().controlSize(.small)
                 Text("正在加载年度报告…").foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, minHeight: 120)
         } else if let annualReportError = annualLoader.state.error {
-            HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
                 Label("年度报告不可用", systemImage: "wifi.exclamationmark")
                 Text(annualReportError)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                Spacer()
+                    .fixedSize(horizontal: false, vertical: true)
                 Button("重试") { annualReportReload &+= 1 }
+                    .frame(minHeight: 44)
             }
             .padding(16)
             .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
@@ -315,14 +428,14 @@ struct ListeningFootprintsView: View {
                         }
                     }
                     if let annualEnrichmentError = annualLoader.state.enrichmentError {
-                        HStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 8) {
                             Label("部分歌曲信息未补全", systemImage: "info.circle")
                             Text(annualEnrichmentError)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                            Spacer()
+                                .fixedSize(horizontal: false, vertical: true)
                             Button("重试") { annualReportReload &+= 1 }
+                                .frame(minHeight: 44)
                         }
                         .padding(.vertical, 8)
                     }
@@ -331,12 +444,20 @@ struct ListeningFootprintsView: View {
         }
     }
 
+    private var showsAnnualLoadingPlaceholder: Bool {
+#if os(iOS)
+        annualLoader.state.isLoading && annualLoader.state.report?.year != selectedAnnualYear
+#else
+        annualLoader.state.isLoading
+#endif
+    }
+
     private func annualSection(_ section: AnnualReportSection) -> some View {
         VStack(alignment: .leading, spacing: 18) {
             annualSectionIdentity(section)
             if ["annual-song", "annual-singer", "favorite-album"].contains(section.id),
                let artworkURL = annualArtworkURL(section) {
-                ArtworkView(artwork: Artwork(symbol: "music.note", accent: .red, remoteURL: artworkURL))
+                footprintArtwork(Artwork(symbol: "music.note", accent: .red, remoteURL: artworkURL))
                     .frame(width: 152, height: 152)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .accessibilityLabel("\(section.title)封面")
@@ -418,7 +539,7 @@ struct ListeningFootprintsView: View {
             let days = elapsedDays(since: date)
             VStack(alignment: .leading, spacing: 5) {
                 Text(chineseDate(date))
-                    .font(.system(size: 32, weight: .bold))
+                    .font(annualDateFont)
                     .monospacedDigit()
                 Text("我们第一次相遇")
                     .font(.title3.weight(.semibold))
@@ -491,6 +612,28 @@ struct ListeningFootprintsView: View {
             if !shares.isEmpty {
                 VStack(alignment: .leading, spacing: 12) {
                     ForEach(Array(shares.enumerated()), id: \.element.id) { index, share in
+#if os(iOS)
+                        VStack(alignment: .leading, spacing: 7) {
+                            HStack(spacing: 12) {
+                                Text(share.name)
+                                    .font(.body.weight(.medium))
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Spacer(minLength: 8)
+                                Text("\(share.percent)%")
+                                    .font(.callout.weight(.semibold).monospacedDigit())
+                            }
+                            GeometryReader { proxy in
+                                ZStack(alignment: .leading) {
+                                    Capsule().fill(.quaternary)
+                                    Capsule()
+                                        .fill(annualGenreColors[index % annualGenreColors.count])
+                                        .frame(width: max(4, proxy.size.width * CGFloat(share.percent) / 100))
+                                }
+                            }
+                            .frame(height: 8)
+                        }
+                        .accessibilityElement(children: .combine)
+#else
                         HStack(spacing: 12) {
                             Text(share.name)
                                 .frame(width: 110, alignment: .leading)
@@ -513,6 +656,7 @@ struct ListeningFootprintsView: View {
                             .frame(height: 22)
                         }
                         .accessibilityElement(children: .combine)
+#endif
                     }
                 }
             }
@@ -536,7 +680,11 @@ struct ListeningFootprintsView: View {
             Button { model.open(.artist(id)) } label: {
                 annualArtistRowLabel(name: name, imageURL: imageURL, note: note, showsChevron: true)
             }
+#if os(iOS)
+            .buttonStyle(IOSPressedButtonStyle())
+#else
             .buttonStyle(.plain)
+#endif
             .accessibilityHint("打开歌手详情")
         } else {
             annualArtistRowLabel(name: name, imageURL: imageURL, note: note, showsChevron: false)
@@ -550,7 +698,7 @@ struct ListeningFootprintsView: View {
         showsChevron: Bool
     ) -> some View {
         HStack(spacing: 12) {
-            ArtworkView(artwork: Artwork(symbol: "music.mic", accent: .cyan, remoteURL: imageURL))
+            footprintArtwork(Artwork(symbol: "music.mic", accent: .cyan, remoteURL: imageURL))
                 .frame(width: 46, height: 46)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
             VStack(alignment: .leading, spacing: 3) {
@@ -602,7 +750,11 @@ struct ListeningFootprintsView: View {
                     showsChevron: true
                 )
             }
+#if os(iOS)
+            .buttonStyle(IOSPressedButtonStyle())
+#else
             .buttonStyle(.plain)
+#endif
             .accessibilityHint("打开歌手详情")
         } else {
             annualMonthRowLabel(
@@ -629,7 +781,7 @@ struct ListeningFootprintsView: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
                 .frame(width: 52, alignment: .trailing)
-            ArtworkView(artwork: Artwork(symbol: "music.mic", accent: .blue, remoteURL: imageURL))
+            footprintArtwork(Artwork(symbol: "music.mic", accent: .blue, remoteURL: imageURL))
                 .frame(width: 46, height: 46)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
             VStack(alignment: .leading, spacing: 3) {
@@ -828,7 +980,7 @@ struct ListeningFootprintsView: View {
     }
 
     private func annualMetrics(_ values: [AnnualReportMetric]) -> some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 142, maximum: 240), spacing: 12)], spacing: 12) {
+        LazyVGrid(columns: metricColumns(minimum: 142, maximum: 240), spacing: 12) {
             ForEach(values) { metric in
                 VStack(alignment: .leading, spacing: 5) {
                     Text(metric.label)
@@ -874,6 +1026,16 @@ struct ListeningFootprintsView: View {
         songs: [Song],
         season: (name: String, color: Color)?
     ) -> some View {
+#if os(iOS)
+        iosFootprintSongRow(
+            song: track.song,
+            songs: songs,
+            marker: season?.name ?? "\(number)",
+            markerColor: season?.color ?? (number <= 3 ? Color.accentColor : Color.secondary),
+            subtitle: track.caption ?? songMetadataText(track.song),
+            detail: track.playCount.map { "播放 \($0.formatted()) 次" }
+        )
+#else
         HStack(spacing: 12) {
             if let season {
                 Text(season.name)
@@ -886,12 +1048,12 @@ struct ListeningFootprintsView: View {
                     .foregroundStyle(number <= 3 ? Color.accentColor : Color.secondary)
                     .frame(width: 26, alignment: .trailing)
             }
-            ArtworkView(artwork: track.song.album.artwork)
+            footprintArtwork(track.song.album.artwork)
                 .frame(width: 46, height: 46)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .accessibilityLabel("\(track.song.name)封面")
             VStack(alignment: .leading, spacing: 3) {
-                SongTitleText(song: track.song).font(.body.weight(.medium)).lineLimit(1)
+                footprintSongTitle(track.song).font(.body.weight(.medium)).lineLimit(1)
                 if let caption = track.caption {
                     Text(caption)
                         .font(.caption)
@@ -927,8 +1089,9 @@ struct ListeningFootprintsView: View {
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { player.play(track.song, in: songs) }
         .contextMenu {
-            SongContextMenu(song: track.song, songs: songs, model: model, player: player)
+            footprintSongMenu(track.song, songs: songs)
         }
+#endif
     }
 
     private func annualSeasonMarker(
@@ -964,15 +1127,27 @@ struct ListeningFootprintsView: View {
     }
 
     private func rankRow(_ entry: ListeningRankEntry, number: Int, songs: [Song]) -> some View {
+#if os(iOS)
+        iosFootprintSongRow(
+            song: entry.song,
+            songs: songs,
+            marker: "\(number)",
+            markerColor: number <= 3 ? Color.accentColor : Color.secondary,
+            subtitle: songMetadataText(entry.song),
+            detail: (["播放 \(entry.playCount.formatted()) 次"] + (entry.durationSeconds.map {
+                [durationText($0)]
+            } ?? [])).joined(separator: " · ")
+        )
+#else
         HStack(spacing: 12) {
             Text("\(number)")
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(number <= 3 ? .primary : .secondary)
                 .frame(width: 26, alignment: .trailing)
-            ArtworkView(artwork: entry.song.album.artwork)
+            footprintArtwork(entry.song.album.artwork)
                 .frame(width: 46, height: 46)
             VStack(alignment: .leading, spacing: 3) {
-                SongTitleText(song: entry.song)
+                footprintSongTitle(entry.song)
                     .font(.body.weight(.medium))
                     .lineLimit(1)
                 songMetadata(entry.song)
@@ -1001,12 +1176,82 @@ struct ListeningFootprintsView: View {
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { player.play(entry.song, in: songs) }
         .contextMenu {
-            SongContextMenu(song: entry.song, songs: songs, model: model, player: player)
+            footprintSongMenu(entry.song, songs: songs)
         }
+#endif
     }
+
+#if os(iOS)
+    private func iosFootprintSongRow(
+        song: Song,
+        songs: [Song],
+        marker: String,
+        markerColor: Color,
+        subtitle: String,
+        detail: String?
+    ) -> some View {
+        HStack(spacing: 8) {
+            Button {
+                player.play(song, in: songs)
+            } label: {
+                HStack(spacing: 12) {
+                    Text(marker)
+                        .font(.callout.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(markerColor)
+                        .frame(width: 32, alignment: .trailing)
+                    if !dynamicTypeSize.isAccessibilitySize {
+                        IOSArtworkView(artwork: song.album.artwork, cornerRadius: 6)
+                            .frame(width: 46, height: 46)
+                            .accessibilityHidden(true)
+                    }
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(song.name)
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(.primary)
+                            .lineLimit(2)
+                        if !subtitle.isEmpty {
+                            Text(subtitle)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                        if let detail {
+                            Text(detail)
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(IOSPressedButtonStyle())
+            .accessibilityLabel("播放 \(song.name)，\(song.artistsDisplay)")
+            .accessibilityHint([subtitle, detail].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "，"))
+
+            Menu {
+                footprintSongMenu(song, songs: songs)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("\(song.name)的更多操作")
+        }
+        .frame(maxWidth: .infinity, minHeight: 68, alignment: .leading)
+        .contextMenu { footprintSongMenu(song, songs: songs) }
+    }
+#endif
 
     @ViewBuilder
     private func songMetadata(_ song: Song) -> some View {
+#if os(iOS)
+        Text(songMetadataText(song))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+#else
         if !song.artists.isEmpty, song.album.id > 0 {
             SongMetadataLinks(song: song, onOpenRoute: model.open)
         } else {
@@ -1015,15 +1260,51 @@ struct ListeningFootprintsView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
+#endif
+    }
+
+    private func songMetadataText(_ song: Song) -> String {
+        [song.artistsDisplay, song.album.name].filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
+    @ViewBuilder
+    private func footprintArtwork(_ artwork: Artwork) -> some View {
+#if os(iOS)
+        IOSArtworkView(artwork: artwork, cornerRadius: 6)
+#else
+        ArtworkView(artwork: artwork)
+#endif
+    }
+
+    @ViewBuilder
+    private func footprintSongTitle(_ song: Song) -> some View {
+#if os(iOS)
+        Text(song.name)
+#else
+        SongTitleText(song: song)
+#endif
+    }
+
+    @ViewBuilder
+    private func footprintSongMenu(_ song: Song, songs: [Song]) -> some View {
+#if os(iOS)
+        IOSSongActionsMenu(song: song, songs: songs, model: model, player: player)
+#else
+        SongContextMenu(song: song, songs: songs, model: model, player: player)
+#endif
     }
 
     private func inlineError(_ message: String, cursor: ListeningReportCursor?) -> some View {
-        HStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             Label("刷新失败", systemImage: "wifi.exclamationmark")
-            Text(message).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-            Spacer()
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             Button("重试") { startLoad(selectedPeriod, cursor: cursor, force: true) }
+                .frame(minHeight: 44)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 8)
     }
 
@@ -1108,11 +1389,12 @@ struct ListeningFootprintsView: View {
     }
 
     @MainActor
-    private func refresh() {
+    @discardableResult
+    private func refresh() -> Task<Void, Never>? {
         if selectedPeriod == .year, activeState.pages.last?.cursor == nil {
             annualReportReload &+= 1
         }
-        startLoad(selectedPeriod, cursor: activeState.pages.last?.cursor, force: true)
+        return startLoad(selectedPeriod, cursor: activeState.pages.last?.cursor, force: true)
     }
 
     @MainActor
@@ -1424,6 +1706,44 @@ struct ListeningFootprintsView: View {
         ]
     }
 
+    private var contentHorizontalPadding: CGFloat {
+#if os(iOS)
+        16
+#else
+        28
+#endif
+    }
+
+    private var periodPickerHorizontalPadding: CGFloat {
+#if os(iOS)
+        16
+#else
+        24
+#endif
+    }
+
+    private var annualYearFont: Font {
+#if os(iOS)
+        .largeTitle.bold()
+#else
+        .system(size: 42, weight: .bold)
+#endif
+    }
+
+    private var annualDateFont: Font {
+#if os(iOS)
+        .largeTitle.bold()
+#else
+        .system(size: 32, weight: .bold)
+#endif
+    }
+
+    private func metricColumns(minimum: CGFloat, maximum: CGFloat) -> [GridItem] {
+        dynamicTypeSize.isAccessibilitySize
+            ? [GridItem(.flexible())]
+            : [GridItem(.adaptive(minimum: minimum, maximum: maximum), spacing: 12)]
+    }
+
     private var annualMoodColors: [Color] {
         [.pink, .orange, .teal, .indigo, .purple, .cyan]
     }
@@ -1507,6 +1827,93 @@ struct ListeningFootprintsView: View {
         return remainder == 0 ? "\(hours) 小时" : "\(hours) 小时 \(remainder) 分钟"
     }
 }
+
+#if os(macOS)
+private struct MacTopTabScrollPositionAccessor<Selection: Hashable>: NSViewRepresentable {
+    let selection: Selection
+    let positions: TopTabScrollPositions<Selection>
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> MacScrollPositionMarkerView {
+        let view = MacScrollPositionMarkerView()
+        view.onLayout = { [weak coordinator = context.coordinator] view in
+            coordinator?.restoreIfNeeded(from: view)
+        }
+        return view
+    }
+
+    func updateNSView(_ view: MacScrollPositionMarkerView, context: Context) {
+        context.coordinator.update(selection: selection, positions: positions, from: view)
+        view.needsLayout = true
+    }
+
+    static func dismantleNSView(_ view: MacScrollPositionMarkerView, coordinator: Coordinator) {
+        coordinator.save()
+        view.onLayout = nil
+    }
+
+    @MainActor
+    final class Coordinator {
+        private var selection: Selection?
+        private var positions: TopTabScrollPositions<Selection>?
+        private weak var scrollView: NSScrollView?
+        private var needsRestore = true
+
+        func update(
+            selection: Selection,
+            positions: TopTabScrollPositions<Selection>,
+            from view: NSView
+        ) {
+            if let previous = self.selection, previous != selection { save() }
+            if self.selection != selection || self.positions !== positions { needsRestore = true }
+            self.selection = selection
+            self.positions = positions
+            positions.select(selection)
+            connect(to: view)
+        }
+
+        func restoreIfNeeded(from view: NSView) {
+            connect(to: view)
+            guard needsRestore,
+                  let selection,
+                  let positions,
+                  let scrollView
+            else { return }
+            let clipView = scrollView.contentView
+            clipView.scroll(to: NSPoint(x: clipView.bounds.origin.x, y: positions.offset(for: selection)))
+            scrollView.reflectScrolledClipView(clipView)
+            needsRestore = false
+        }
+
+        func save() {
+            guard let selection, let positions, let scrollView else { return }
+            positions.record(scrollView.contentView.bounds.origin.y, for: selection)
+        }
+
+        private func connect(to view: NSView) {
+            guard let enclosingScrollView = view.enclosingScrollView else { return }
+            if scrollView !== enclosingScrollView {
+                save()
+                scrollView = enclosingScrollView
+                needsRestore = true
+            }
+        }
+    }
+}
+
+@MainActor
+private final class MacScrollPositionMarkerView: NSView {
+    var onLayout: ((NSView) -> Void)?
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func layout() {
+        super.layout()
+        onLayout?(self)
+    }
+}
+#endif
 
 private struct AnnualGenreShare: Identifiable {
     let name: String
@@ -1772,8 +2179,7 @@ struct AnnualReportSelection {
     ) -> Int? {
         let years = sortedYears ?? footprints.map(\.year).sorted(by: >)
         if current.map({ years.contains($0) }) == true { return current }
-        return footprints.first?.year
-            ?? years.first(where: AnnualListeningReportDecoder.supportedYears.contains)
+        return years.first
     }
 }
 

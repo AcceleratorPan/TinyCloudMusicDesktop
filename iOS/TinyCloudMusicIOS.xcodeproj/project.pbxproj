@@ -56,6 +56,8 @@
 		C4849C05435523B2E3B1CBB6 /* TinyCloudMusicIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 817A82FA72F351D7EF4B0327 /* TinyCloudMusicIOSApp.swift */; };
 		CB4D6FE6B826DE5224023ABF /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C063509456ACD12606D4E83A /* AppModel.swift */; };
 		CE15CAB30F8D89559C9D3CD5 /* CachedAsyncImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = B55A20B7602A4008DA10D22B /* CachedAsyncImage.swift */; };
+		C0DE00000000000000000002 /* CommentEmojiText.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000001 /* CommentEmojiText.swift */; };
+		C0DE00000000000000000004 /* ListeningFootprintsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000003 /* ListeningFootprintsView.swift */; };
 		D1D559ED90A4AC4DB09A3EF6 /* Repository.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE2DEF9F908A37745703032 /* Repository.swift */; };
 		D35BF6A6857164E915A0F884 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF467F899931BC25B9E30526 /* Models.swift */; };
 		D838C02B0D48321368D2197B /* AudioUploadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64F3B089CD0A00C67557DB59 /* AudioUploadManager.swift */; };
@@ -133,6 +135,8 @@
 		ADAAEF4C7444BE7B5DDF6F12 /* LiveListenTogetherService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveListenTogetherService.swift; sourceTree = "<group>"; };
 		AF254F5238DC5B751A6FC972 /* IOSAppContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSAppContainer.swift; sourceTree = "<group>"; };
 		B55A20B7602A4008DA10D22B /* CachedAsyncImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CachedAsyncImage.swift; sourceTree = "<group>"; };
+		C0DE00000000000000000001 /* CommentEmojiText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommentEmojiText.swift; sourceTree = "<group>"; };
+		C0DE00000000000000000003 /* ListeningFootprintsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListeningFootprintsView.swift; sourceTree = "<group>"; };
 		BAC83F4BBCE8A966F2F5E7DF /* MusicKnowledgeModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicKnowledgeModels.swift; sourceTree = "<group>"; };
 		BB7B3FF213685661E49A6430 /* IOSMediaView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSMediaView.swift; sourceTree = "<group>"; };
 		BD0C10A69517178261C50ABB /* LiveVideoLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveVideoLibrary.swift; sourceTree = "<group>"; };
@@ -235,11 +239,13 @@
 				9BF4BF0FEE0DA85EB4FE55EF /* AudioUploadAPI.swift */,
 				64F3B089CD0A00C67557DB59 /* AudioUploadManager.swift */,
 				B55A20B7602A4008DA10D22B /* CachedAsyncImage.swift */,
+				C0DE00000000000000000001 /* CommentEmojiText.swift */,
 				7CD4FB58B5B9526984D1B6E9 /* CloudMusicModels.swift */,
 				7F5E4BE3212DD8BCFAFD63F4 /* CredentialSnapshot.swift */,
 				3E77773A594A0ABC6DA160CD /* CredentialStore.swift */,
 				A4D96D716B47E3003D0C8C4D /* EAPITransport.swift */,
 				79F46CEA114070817ADA5BF7 /* ListeningReportModels.swift */,
+				C0DE00000000000000000003 /* ListeningFootprintsView.swift */,
 				131754CA788F84A1CC9CEB58 /* ListenTogetherController.swift */,
 				75CC1222F7DA1CFA4769B308 /* ListenTogetherModels.swift */,
 				2CF166DB64A3EDA4503C3CAC /* LiveAudioContentLibrary.swift */,
@@ -547,6 +553,7 @@
 				D838C02B0D48321368D2197B /* AudioUploadManager.swift in Sources */,
 				2216036393CD11182A2CBA1F /* AudioUploadModels.swift in Sources */,
 				CE15CAB30F8D89559C9D3CD5 /* CachedAsyncImage.swift in Sources */,
+				C0DE00000000000000000002 /* CommentEmojiText.swift in Sources */,
 				E2DD81D07999535C9E79D3E8 /* CloudMusicModels.swift in Sources */,
 				AAF1BB879D5A079E7C501239 /* CredentialSnapshot.swift in Sources */,
 				69EC769172362D506AA45894 /* CredentialStore.swift in Sources */,
@@ -569,6 +576,7 @@
 				581E055FD05DB72267AE1B19 /* ListenTogetherController.swift in Sources */,
 				06741B1BD4AE9E4E13F409A1 /* ListenTogetherModels.swift in Sources */,
 				4D040245E33729C171924120 /* ListeningReportModels.swift in Sources */,
+				C0DE00000000000000000004 /* ListeningFootprintsView.swift in Sources */,
 				13E887B4D6474F719741AA3C /* LiveAudioContentLibrary.swift in Sources */,
 				0BE724755778EB1EAADDBD90 /* LiveListenTogetherService.swift in Sources */,
 				763DE3E174D0573ADFE3FDA2 /* LiveMusicExtras.swift in Sources */,

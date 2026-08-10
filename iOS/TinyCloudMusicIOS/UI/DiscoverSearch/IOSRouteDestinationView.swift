@@ -73,15 +73,28 @@ private struct IOSDetailContentView: View {
     let detail: DetailContent
     @Bindable var model: AppModel
     @Bindable var player: PlayerController
+    @State private var selectedTopTab = ""
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 24) {
                 switch detail {
                 case let .artist(artist, songs):
-                    IOSArtistDetail(artist: artist, songs: songs, model: model, player: player)
+                    IOSArtistDetail(
+                        artist: artist,
+                        songs: songs,
+                        model: model,
+                        player: player,
+                        selectedTopTab: $selectedTopTab
+                    )
                 case let .album(album, songs):
-                    IOSAlbumDetail(album: album, songs: songs, model: model, player: player)
+                    IOSAlbumDetail(
+                        album: album,
+                        songs: songs,
+                        model: model,
+                        player: player,
+                        selectedTopTab: $selectedTopTab
+                    )
                 case let .playlist(playlist, songs, trackIDs, loadedTrackCount):
                     IOSPlaylistDetail(
                         playlist: playlist,
@@ -89,20 +102,48 @@ private struct IOSDetailContentView: View {
                         trackIDs: trackIDs,
                         loadedTrackCount: loadedTrackCount,
                         model: model,
-                        player: player
+                        player: player,
+                        selectedTopTab: $selectedTopTab
                     )
                 case let .user(user, playlists, hasMore):
                     IOSUserDetail(
                         user: user,
                         playlists: playlists,
                         initialPlaylistsHaveMore: hasMore,
-                        model: model
+                        model: model,
+                        selectedTopTab: $selectedTopTab
                     )
                 }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 20)
         }
+        .modifier(IOSTopTabScrollPositionModifier(selection: selectedTopTab))
+    }
+}
+
+struct IOSTopTabScrollPositionModifier<Selection: Hashable>: ViewModifier {
+    let selection: Selection
+    @State private var position = ScrollPosition(edge: .top)
+    @State private var positions: TopTabScrollPositions<Selection>
+    @State private var currentOffset: CGFloat = 0
+
+    init(selection: Selection) {
+        self.selection = selection
+        _positions = State(initialValue: TopTabScrollPositions(selection: selection))
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .scrollPosition($position)
+            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                max(0, geometry.contentOffset.y + geometry.contentInsets.top)
+            } action: { _, offset in
+                currentOffset = offset
+            }
+            .onChange(of: selection) { _, selection in
+                position.scrollTo(y: positions.target(for: selection, currentOffset: currentOffset))
+            }
     }
 }
 
@@ -124,6 +165,7 @@ private struct IOSArtistDetail: View {
     let songs: [Song]
     @Bindable var model: AppModel
     @Bindable var player: PlayerController
+    @Binding var selectedTopTab: String
     @State private var section = IOSArtistDetailSection.songs
     @State private var albumsPhase: IOSDetailPhase<[MusicArtistAlbum]> = .loading
     @State private var albumsPage: MusicArtistAlbumPage?
@@ -181,6 +223,9 @@ private struct IOSArtistDetail: View {
             sectionContent
         }
         .task(id: selectedLoadID) { await loadSelectedSection() }
+        .onChange(of: section, initial: true) { _, section in
+            selectedTopTab = "artist:\(section.rawValue)"
+        }
     }
 
     @ViewBuilder
@@ -388,6 +433,7 @@ private struct IOSAlbumDetail: View {
     let songs: [Song]
     @Bindable var model: AppModel
     @Bindable var player: PlayerController
+    @Binding var selectedTopTab: String
     @State private var section = IOSAlbumDetailSection.songs
 
     var body: some View {
@@ -399,6 +445,8 @@ private struct IOSAlbumDetail: View {
                 description: album.description,
                 metadata: albumMetadata,
                 artwork: album.artwork,
+                creator: album.artist.name,
+                openCreator: { model.open(.artist(album.artist.id)) },
                 saveArtwork: saveArtwork
             )
             LazyVGrid(
@@ -406,7 +454,11 @@ private struct IOSAlbumDetail: View {
                 spacing: 8
             ) {
                 if let first = songs.first {
-                    IOSDetailActionButton(title: "播放", symbol: "play.fill", prominent: true) {
+                    IOSDetailActionButton(
+                        title: "全部播放（\(songs.count.formatted())）",
+                        symbol: "play.fill",
+                        prominent: true
+                    ) {
                         player.play(first, in: songs)
                     }
                 }
@@ -430,7 +482,7 @@ private struct IOSAlbumDetail: View {
 
             switch section {
             case .songs:
-                IOSDetailSectionHeader(title: "歌曲", count: songs.count)
+                IOSDetailSectionHeader(title: "歌曲")
                 if songs.isEmpty {
                     IOSDetailEmptyState(title: "专辑暂无歌曲", symbol: "music.note")
                 } else {
@@ -450,6 +502,9 @@ private struct IOSAlbumDetail: View {
                 )
             }
         }
+        .onChange(of: section, initial: true) { _, section in
+            selectedTopTab = "album:\(section.rawValue)"
+        }
     }
 
     private var saveArtwork: (() -> Void)? {
@@ -459,15 +514,19 @@ private struct IOSAlbumDetail: View {
     }
 
     private var albumMetadata: [String] {
-        var values = [album.artist.name, "\(songs.count.formatted()) 首歌曲"]
+        var values: [String] = []
         if album.subscriberCount > 0 { values.append("\(album.subscriberCount.formatted()) 人收藏") }
         return values
     }
 }
 
-private enum IOSPlaylistDetailSection: String, CaseIterable {
+enum IOSPlaylistDetailSection: String, CaseIterable {
     case songs = "歌曲"
     case similarPlaylists = "相似歌单"
+
+    static func visible(hasSimilarPlaylists: Bool) -> [Self] {
+        hasSimilarPlaylists ? allCases : [.songs]
+    }
 }
 
 private struct IOSPlaylistDetail: View {
@@ -477,10 +536,10 @@ private struct IOSPlaylistDetail: View {
     let loadedTrackCount: Int
     @Bindable var model: AppModel
     @Bindable var player: PlayerController
+    @Binding var selectedTopTab: String
     @State private var section = IOSPlaylistDetailSection.songs
     @State private var similarPlaylistsPhase: IOSDetailPhase<[MusicLibraryPlaylist]> = .loading
     @State private var similarPlaylistsRetryID = 0
-    @State private var loadedPlaylistID: Int64?
     @State private var removingSong: Song?
     @State private var showsDownloadOptions = false
     @State private var downloadQuality = AudioQuality.standard
@@ -517,16 +576,16 @@ private struct IOSPlaylistDetail: View {
             )
             actions
 
-            if model.library != nil {
+            if visibleSections.count > 1 {
                 Picker("歌单详情", selection: $section) {
-                    ForEach(IOSPlaylistDetailSection.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    ForEach(visibleSections, id: \.self) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
             }
 
             switch section {
             case .songs:
-                IOSDetailSectionHeader(title: "歌曲", count: trackIDs.count)
+                IOSDetailSectionHeader(title: "歌曲")
                 if songs.isEmpty && trackIDs.isEmpty {
                     IOSDetailEmptyState(title: "歌单暂无歌曲", symbol: "music.note.list")
                 } else {
@@ -561,8 +620,11 @@ private struct IOSPlaylistDetail: View {
                 }
             }
         }
-        .task(id: "\(playlist.id):\(section.rawValue):\(similarPlaylistsRetryID)") {
-            await loadSimilarPlaylistsIfNeeded()
+        .task(id: "\(playlist.id):\(similarPlaylistsRetryID)") {
+            await loadSimilarPlaylists()
+        }
+        .onChange(of: section, initial: true) { _, section in
+            selectedTopTab = "playlist:\(section.rawValue)"
         }
         .sheet(isPresented: $showsDownloadOptions) { downloadOptions }
         .sheet(isPresented: $showsMetadataEditor) {
@@ -603,7 +665,7 @@ private struct IOSPlaylistDetail: View {
             allowsMultipleSelection: false,
             onCompletion: prepareCover
         )
-        .confirmationDialog("从歌单移除歌曲？", isPresented: Binding(
+        .alert("从歌单移除歌曲？", isPresented: Binding(
             get: { removingSong != nil },
             set: { if !$0 { removingSong = nil } }
         )) {
@@ -620,13 +682,13 @@ private struct IOSPlaylistDetail: View {
         } message: {
             Text(removingSong.map { "将“\($0.primaryName)”从此歌单移除。" } ?? "")
         }
-        .confirmationDialog("收藏全部歌曲？", isPresented: $confirmsFavoriteAll) {
+        .alert("收藏全部歌曲？", isPresented: $confirmsFavoriteAll) {
             Button("全部收藏", action: favoriteAll)
             Button("取消", role: .cancel) {}
         } message: {
             Text("将收藏尚未收藏的 \(unlikedSongCount) 首歌曲。")
         }
-        .confirmationDialog("将歌单设为公开？", isPresented: $confirmsPublish) {
+        .alert("将歌单设为公开？", isPresented: $confirmsPublish) {
             Button("设为公开", role: .destructive, action: makePublic)
             Button("取消", role: .cancel) {}
         } message: {
@@ -654,7 +716,11 @@ private struct IOSPlaylistDetail: View {
             spacing: 8
         ) {
             if let first = songs.first {
-                IOSDetailActionButton(title: "播放全部", symbol: "play.fill", prominent: true) {
+                IOSDetailActionButton(
+                    title: "全部播放（\(songCount.formatted())）",
+                    symbol: "play.fill",
+                    prominent: true
+                ) {
                     player.play(first, in: songs, allSongIDs: trackIDs, playlistID: playlist.id)
                 }
             }
@@ -764,6 +830,19 @@ private struct IOSPlaylistDetail: View {
         trackIDs.filter { !model.likedSongIDs.contains($0) }.count
     }
 
+    private var songCount: Int {
+        max(playlist.trackCount, trackIDs.count)
+    }
+
+    private var visibleSections: [IOSPlaylistDetailSection] {
+        let hasSimilarPlaylists = switch similarPlaylistsPhase {
+        case let .loaded(playlists): !playlists.isEmpty
+        case .failed: true
+        case .loading: false
+        }
+        return IOSPlaylistDetailSection.visible(hasSimilarPlaylists: hasSimilarPlaylists)
+    }
+
     private var saveArtwork: (() -> Void)? {
         playlist.artwork.remoteURL.map { url in
             { model.saveArtwork(from: ArtworkURLPolicy.highResolutionURL(for: url), title: playlist.name) }
@@ -771,7 +850,7 @@ private struct IOSPlaylistDetail: View {
     }
 
     private var playlistMetadata: [String] {
-        var values = ["\(trackIDs.count.formatted()) 首歌曲"]
+        var values: [String] = []
         if playlist.isPrivate { values.append("私密歌单") }
         if !playlist.tags.isEmpty { values.append(playlist.tags.joined(separator: " · ")) }
         if playlist.subscriberCount > 0 { values.append("\(playlist.subscriberCount.formatted()) 人收藏") }
@@ -779,18 +858,10 @@ private struct IOSPlaylistDetail: View {
     }
 
     @MainActor
-    private func loadSimilarPlaylistsIfNeeded() async {
-        if loadedPlaylistID != playlist.id {
-            loadedPlaylistID = playlist.id
-            similarPlaylistsPhase = .loading
-        }
-        guard section == .similarPlaylists else { return }
-        if case .loaded = similarPlaylistsPhase { return }
-        guard let library = model.library else {
-            similarPlaylistsPhase = .failed("相似歌单服务不可用")
-            return
-        }
+    private func loadSimilarPlaylists() async {
+        section = .songs
         similarPlaylistsPhase = .loading
+        guard let library = model.library else { return }
         let revision = library.transport.credentialSnapshotValue().revision
         do {
             let values = try await library.similarPlaylists(to: playlist.id)
@@ -952,6 +1023,7 @@ private struct IOSUserDetail: View {
     let playlists: [Playlist]
     let initialPlaylistsHaveMore: Bool
     @Bindable var model: AppModel
+    @Binding var selectedTopTab: String
     @State private var section = IOSUserDetailSection.playlists
     @State private var displayedPlaylists: [Playlist]
     @State private var playlistsHaveMore: Bool
@@ -969,12 +1041,14 @@ private struct IOSUserDetail: View {
         user: UserProfile,
         playlists: [Playlist],
         initialPlaylistsHaveMore: Bool,
-        model: AppModel
+        model: AppModel,
+        selectedTopTab: Binding<String>
     ) {
         self.user = user
         self.playlists = playlists
         self.initialPlaylistsHaveMore = initialPlaylistsHaveMore
         self.model = model
+        _selectedTopTab = selectedTopTab
         _displayedPlaylists = State(initialValue: playlists)
         _playlistsHaveMore = State(initialValue: initialPlaylistsHaveMore)
         _playlistOffset = State(initialValue: playlists.count)
@@ -1017,6 +1091,9 @@ private struct IOSUserDetail: View {
         .task(id: selectedLoadID) { await loadSelectedSection() }
         .onChange(of: playlists) { _, _ in resetPlaylists() }
         .onChange(of: initialPlaylistsHaveMore) { _, _ in resetPlaylists() }
+        .onChange(of: section, initial: true) { _, section in
+            selectedTopTab = "user:\(section.rawValue)"
+        }
     }
 
     @ViewBuilder
@@ -1249,6 +1326,9 @@ private struct IOSDetailHeader: View {
     var saveArtwork: (() -> Void)? = nil
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .body) private var horizontalCoverSize: CGFloat = 128
+    @State private var informationHeight: CGFloat = 0
+
+    private var artworkSize: CGFloat { max(horizontalCoverSize, informationHeight) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1268,66 +1348,59 @@ private struct IOSDetailHeader: View {
 
     private var horizontalHeader: some View {
         HStack(alignment: .top, spacing: 12) {
-            cover(size: horizontalCoverSize)
-            identity(compact: true)
+            cover(size: artworkSize)
+            identity
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .frame(height: horizontalCoverSize, alignment: .top)
-                .clipped()
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                    informationHeight = $0
+                }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var stackedHeader: some View {
         VStack(alignment: .leading, spacing: 14) {
             cover(size: 176)
-            identity(compact: false)
+            identity
         }
     }
 
-    private func identity(compact: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+    private var identity: some View {
+        VStack(alignment: .leading, spacing: 2) {
             Label(category, systemImage: symbol)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.red)
-            Text(title)
-                .font(.title2.bold())
-                .lineLimit(compact ? 2 : nil)
-                .truncationMode(.tail)
-                .fixedSize(horizontal: false, vertical: !compact)
+            IOSGreedyTitle(text: title)
+                .frame(maxWidth: .infinity, alignment: .leading)
             if !creator.isEmpty {
-                HStack(alignment: .firstTextBaseline, spacing: 0) {
+                Group {
                     if let openCreator {
                         Button(action: openCreator) {
                             Text(creator)
                                 .lineLimit(1)
                                 .truncationMode(.tail)
+                                .padding(.vertical, 13)
                                 .frame(minWidth: 44, minHeight: 44, alignment: .leading)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(IOSPressedButtonStyle())
+                        .padding(.vertical, -13)
                         .foregroundStyle(.red)
-                        .layoutPriority(1)
                         .accessibilityLabel("查看创建者 \(creator)")
                         .accessibilityHint("打开创建者主页")
                     } else {
                         Text(creator)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                    if !metadata.isEmpty {
-                        Text(" · \(metadata.joined(separator: " · "))")
-                            .lineLimit(compact ? 1 : nil)
-                            .truncationMode(.tail)
                     }
                 }
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            } else if !metadata.isEmpty {
+            }
+            if !metadata.isEmpty {
                 Text(metadata.joined(separator: " · "))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .lineLimit(compact ? 2 : nil)
-                    .truncationMode(.tail)
-                    .fixedSize(horizontal: false, vertical: !compact)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1359,6 +1432,50 @@ private struct IOSDetailHeader: View {
     }
 }
 
+struct IOSGreedyTitle: UIViewRepresentable {
+    let text: String
+
+    func makeUIView(context: Context) -> UILabel {
+        Self.makeLabel()
+    }
+
+    func updateUIView(_ label: UILabel, context: Context) {
+        Self.configure(label, text: text)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UILabel, context: Context) -> CGSize? {
+        guard let width = proposal.width, width.isFinite else { return nil }
+        return Self.fittingSize(of: uiView, width: width)
+    }
+
+    static func makeLabel() -> UILabel {
+        let label = UILabel()
+        label.numberOfLines = 0
+        label.lineBreakMode = .byWordWrapping
+        label.lineBreakStrategy = []
+        label.adjustsFontForContentSizeCategory = true
+        label.textColor = .label
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return label
+    }
+
+    static func configure(_ label: UILabel, text: String) {
+        label.text = text
+        label.font = UIFontMetrics(forTextStyle: .title2).scaledFont(
+            for: .systemFont(ofSize: 22, weight: .bold)
+        )
+        label.accessibilityLabel = text
+    }
+
+    static func fittingSize(of label: UILabel, width: CGFloat) -> CGSize {
+        label.preferredMaxLayoutWidth = width
+        let height = label.sizeThatFits(
+            CGSize(width: width, height: .greatestFiniteMagnitude)
+        ).height
+        return CGSize(width: width, height: ceil(height))
+    }
+}
+
 private struct IOSExpandableDescription: View {
     let text: String
 
@@ -1386,6 +1503,8 @@ private struct IOSExpandableDescription: View {
                         if !isExpanded { collapsedHeight = $0 }
                     }
                 if isExpanded || fullHeight > collapsedHeight + 1 {
+                    Divider()
+                        .padding(.top, 8)
                     Button {
                         withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
                             isExpanded.toggle()
@@ -1396,7 +1515,7 @@ private struct IOSExpandableDescription: View {
                             systemImage: isExpanded ? "chevron.up" : "chevron.down"
                         )
                         .font(.caption.weight(.medium))
-                        .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(IOSPressedButtonStyle())
@@ -1406,21 +1525,35 @@ private struct IOSExpandableDescription: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+            .padding(.bottom, showsDisclosure ? 4 : 12)
+            .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
+            }
         }
+    }
+
+    private var showsDisclosure: Bool {
+        isExpanded || fullHeight > collapsedHeight + 1
     }
 }
 
 private struct IOSDetailSectionHeader: View {
     let title: String
-    let count: Int
+    var count: Int? = nil
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
             Text(title).font(.headline)
             Spacer()
-            Text(count.formatted())
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+            if let count {
+                Text(count.formatted())
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }
@@ -1941,7 +2074,7 @@ private struct IOSPlaylistMetadataSheet: View {
                     .accessibilityLabel(isSaving ? "正在保存歌单信息" : "保存歌单信息")
                 }
             }
-            .confirmationDialog("放弃未保存的修改？", isPresented: $confirmsDiscard) {
+            .alert("放弃未保存的修改？", isPresented: $confirmsDiscard) {
                 Button("放弃修改", role: .destructive) { dismiss() }
                 Button("继续编辑", role: .cancel) {}
             }
@@ -2165,7 +2298,7 @@ private struct IOSPlaylistSongOrderSheet: View {
                         .background(.bar)
                 }
             }
-            .confirmationDialog("放弃未保存的排序？", isPresented: $confirmsDiscard) {
+            .alert("放弃未保存的排序？", isPresented: $confirmsDiscard) {
                 Button("放弃排序", role: .destructive) { dismiss() }
                 Button("继续排序", role: .cancel) {}
             }

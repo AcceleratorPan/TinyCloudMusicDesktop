@@ -129,6 +129,10 @@ struct AnnualReportTrack: Identifiable, Equatable, Sendable {
 struct FirstListenMemory: Equatable, Sendable {
     let listenedAt: Date?
     let text: String?
+
+    var isEmpty: Bool {
+        listenedAt == nil && (text?.isEmpty ?? true)
+    }
 }
 
 enum ListeningReportDecoder {
@@ -223,17 +227,21 @@ enum ListeningReportDecoder {
 
     static func firstListenMemory(_ root: [String: Any], now: Date = Date()) -> FirstListenMemory {
         let data = root.object("data").isEmpty ? root : root.object("data")
+        let nestedData = data.object("data")
+        let directInfo = data.object("musicFirstListenDto")
+        let info = directInfo.isEmpty ? nestedData.object("musicFirstListenDto") : directInfo
+        let rawDate = info["date"]
         let listenedAt = timestamp(
-            value(
-                in: data,
-                keys: ["firstListenTime", "firstListenTimestamp", "listenTime", "listenedAt", "time"]
-            ),
+            firstValue(in: info, keys: ["timestamp", "listenTime", "firstListenTime"]),
             now: now
-        )
-        let text = memoryText(value(
-            in: data,
-            keys: ["firstListenText", "sceneText", "listenDesc", "text", "desc", "description"]
-        ))
+        ) ?? formattedDate(rawDate, now: now)
+        let context = ["season", "period", "time"]
+            .compactMap { shortText(info[$0]) }
+            .joined(separator: " · ")
+        let text = memoryText(firstValue(
+            in: info,
+            keys: ["sceneText", "meetDurationDesc", "desc", "subTitle"]
+        )) ?? memoryText(context.isEmpty && listenedAt == nil ? rawDate : context)
         return FirstListenMemory(listenedAt: listenedAt, text: text)
     }
 
@@ -350,6 +358,22 @@ enum ListeningReportDecoder {
         let oldest = Date(timeIntervalSince1970: 946_684_800)
         guard date >= oldest, date <= now.addingTimeInterval(24 * 60 * 60) else { return nil }
         return date
+    }
+
+    private static func formattedDate(_ raw: Any?, now: Date) -> Date? {
+        guard let value = shortText(raw) else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.isLenient = false
+        for format in ["yyyy.MM.dd HH:mm", "yyyy.MM.dd"] {
+            formatter.dateFormat = format
+            guard let date = formatter.date(from: value) else { continue }
+            let oldest = Date(timeIntervalSince1970: 946_684_800)
+            guard date >= oldest, date <= now.addingTimeInterval(24 * 60 * 60) else { return nil }
+            return date
+        }
+        return nil
     }
 
     private static func scanReport(

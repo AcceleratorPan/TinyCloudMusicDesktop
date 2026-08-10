@@ -107,9 +107,9 @@ final class IOSAudioSessionCoordinator {
         guard let player else { return }
         withObservationTracking {
             _ = player.currentSong
-            _ = player.position
             _ = player.duration
-            _ = player.isPlaybackRequested
+            _ = player.state
+            _ = player.playbackPositionRevision
             _ = player.canGoPrevious
             _ = player.canGoNext
         } onChange: { [weak self] in
@@ -138,9 +138,9 @@ final class IOSAudioSessionCoordinator {
         ]
         info[MPMediaItemPropertyPlaybackDuration] = player.duration
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = player.position
-        info[MPNowPlayingInfoPropertyPlaybackRate] = player.isPlaybackRequested ? 1 : 0
+        info[MPNowPlayingInfoPropertyPlaybackRate] = player.isPlaying ? 1 : 0
         center.nowPlayingInfo = info
-        center.playbackState = player.isPlaybackRequested ? .playing : .paused
+        center.playbackState = player.isPlaying ? .playing : .paused
 
         let commands = MPRemoteCommandCenter.shared()
         commands.playCommand.isEnabled = !player.isPlaybackRequested
