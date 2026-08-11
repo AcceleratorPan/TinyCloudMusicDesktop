@@ -62,6 +62,14 @@ private func verifyListeningSuccessFixture() throws {
         ],
         now: Date(timeIntervalSince1970: 1_735_689_600)
     )
+    let fallbackMemory = library.decodeFirstListenMemory([
+        "code": 200,
+        "data": [
+            "firstListenText": " ",
+            "sceneText": "https://invalid.example/hidden",
+            "listenDesc": "来自候选字段"
+        ]
+    ])
     guard today.map(\.id) == [42],
           today.first?.playCount == 4,
           today.first?.durationSeconds == 720,
@@ -136,9 +144,10 @@ private func verifyListeningSuccessFixture() throws {
           ],
           annual.sections.first(where: { $0.id == "keyword-firstKeyWord" })?.tracks.first?.song.artists.first?.id == 208,
           memory.listenedAt == Date(timeIntervalSince1970: 1_702_310_333.313),
-          memory.text == "初冬 · 深夜",
+          memory.text == "Found in a daily recommendation",
           dateOnlyMemory.listenedAt != nil,
-          dateOnlyMemory.text == "初冬 · 深夜 · 23:58"
+          dateOnlyMemory.text == nil,
+          fallbackMemory.text == "来自候选字段"
     else { throw ListeningReportCheckError.failed }
 }
 

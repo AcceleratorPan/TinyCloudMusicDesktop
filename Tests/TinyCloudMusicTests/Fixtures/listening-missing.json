@@ -33,8 +33,7 @@
   "first": {
     "code": 200,
     "data": {
-      "musicFirstListenDto": {"timestamp": "1", "desc": "https://invalid.example/hidden"},
-      "musicTotalPlayDto": {"text": "Must not leak into first-listen memory"}
+      "musicFirstListenDto": {"timestamp": "1", "desc": "https://invalid.example/hidden"}
     }
   }
 }

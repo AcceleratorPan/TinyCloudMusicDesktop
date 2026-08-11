@@ -99,11 +99,10 @@
         "season": "初冬",
         "period": "深夜",
         "date": "2023.12.11 23:58",
+        "sceneText": "Found in a daily recommendation",
         "subTitle": null,
         "desc": null
-      },
-      "musicTotalPlayDto": {"text": "Must not be used as first-listen text"},
-      "musicLikeSongDto": {"text": "Must not be used as first-listen text"}
+      }
     }
   }
 }

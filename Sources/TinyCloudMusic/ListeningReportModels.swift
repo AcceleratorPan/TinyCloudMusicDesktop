@@ -235,13 +235,10 @@ enum ListeningReportDecoder {
             firstValue(in: info, keys: ["timestamp", "listenTime", "firstListenTime"]),
             now: now
         ) ?? formattedDate(rawDate, now: now)
-        let context = ["season", "period", "time"]
-            .compactMap { shortText(info[$0]) }
-            .joined(separator: " · ")
-        let text = memoryText(firstValue(
-            in: info,
-            keys: ["sceneText", "meetDurationDesc", "desc", "subTitle"]
-        )) ?? memoryText(context.isEmpty && listenedAt == nil ? rawDate : context)
+        let text = firstMemoryText(
+            in: data,
+            keys: ["firstListenText", "sceneText", "listenDesc", "text", "desc", "description"]
+        )
         return FirstListenMemory(listenedAt: listenedAt, text: text)
     }
 
@@ -511,6 +508,28 @@ enum ListeningReportDecoder {
               !lowered.contains("music_u")
         else { return nil }
         return text
+    }
+
+    private static func firstMemoryText(
+        in raw: Any,
+        keys: [String],
+        depth: Int = 0
+    ) -> String? {
+        guard depth < 5 else { return nil }
+        if let object = raw as? [String: Any] {
+            guard !isRankEntry(object) else { return nil }
+            for key in keys {
+                if let text = memoryText(object[key]) { return text }
+            }
+            for (key, child) in object where !rankContainerKeys.contains(key) {
+                if let text = firstMemoryText(in: child, keys: keys, depth: depth + 1) { return text }
+            }
+        } else if let array = raw as? [Any] {
+            for child in array {
+                if let text = firstMemoryText(in: child, keys: keys, depth: depth + 1) { return text }
+            }
+        }
+        return nil
     }
 }
 
