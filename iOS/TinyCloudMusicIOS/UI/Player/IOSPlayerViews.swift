@@ -107,7 +107,6 @@ struct IOSNowPlayingView: View {
 
                         IOSPlaybackControls(player: player)
                             .padding(.horizontal, 20)
-                            .padding(.top, 10)
                             .padding(.bottom, 14)
                     }
                 } else {
@@ -213,40 +212,42 @@ private struct IOSNowPlayingArtworkPage: View {
                         .accessibilityLabel("\(song.primaryName) 专辑封面")
 
                     VStack(spacing: 5) {
-                        IOSMarqueeText(
-                            song.primaryName,
-                            width: max(0, proxy.size.width - 40)
-                        )
-                            .font(.title2.weight(.bold))
-                            .id(song.id)
-                        Text(song.artistsDisplay)
-                            .font(.headline)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .lineLimit(2)
-                        Text(song.album.name)
-                            .font(.subheadline)
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(2)
-                        if !knowledgeMetadata.isEmpty {
-                            Text(knowledgeMetadata.joined(separator: " · "))
-                                .font(.caption.weight(.medium))
+                        VStack(spacing: 5) {
+                            IOSMarqueeText(
+                                song.primaryName,
+                                width: max(0, proxy.size.width - 40)
+                            )
+                                .font(.title2.weight(.bold))
+                                .id(song.id)
+                            Text(song.artistsDisplay)
+                                .font(.headline)
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center)
                                 .lineLimit(2)
-                                .accessibilityLabel("歌曲百科，\(knowledgeMetadata.joined(separator: "，"))")
+                            Text(song.album.name)
+                                .font(.subheadline)
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(2)
+                            if !knowledgeMetadata.isEmpty {
+                                Text(knowledgeMetadata.joined(separator: " · "))
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .lineLimit(2)
+                                    .accessibilityLabel("歌曲百科，\(knowledgeMetadata.joined(separator: "，"))")
+                            }
                         }
-                    }
-                    .accessibilityElement(children: .combine)
+                        .accessibilityElement(children: .combine)
 
-                    if let userID = model.currentUserID, let library = model.library {
-                        IOSFirstListenMemoryView(
-                            songID: song.id,
-                            userID: userID,
-                            credentialRevision: model.session?.credentialRevision
-                                ?? library.transport.credentialSnapshotValue().revision,
-                            library: library
-                        )
+                        if let userID = model.currentUserID, let library = model.library {
+                            IOSFirstListenMemoryView(
+                                songID: song.id,
+                                userID: userID,
+                                credentialRevision: model.session?.credentialRevision
+                                    ?? library.transport.credentialSnapshotValue().revision,
+                                library: library
+                            )
+                        }
                     }
 
                     playbackStatus
@@ -259,7 +260,7 @@ private struct IOSNowPlayingArtworkPage: View {
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 actionControls
                     .padding(.horizontal, 20)
-                    .padding(.vertical, 8)
+                    .padding(.vertical, 4)
             }
         }
         .sheet(isPresented: $showingQuality) {
@@ -508,7 +509,7 @@ struct IOSPlaybackControls: View {
     @Bindable var player: PlayerController
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 0) {
             IOSPlaybackProgress(player: player)
 
             HStack(spacing: 12) {
@@ -576,7 +577,7 @@ private struct IOSPlaybackProgress: View {
     @State private var scrubPosition: TimeInterval = 0
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 0) {
             Slider(
                 value: Binding(
                     get: { isScrubbing ? scrubPosition : player.position },
@@ -698,7 +699,7 @@ private struct IOSFirstListenMemoryView: View {
     @State private var memory: FirstListenMemory?
 
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
             if let memory, !memory.isEmpty {
                 VStack(spacing: 3) {
                     if let date = memory.listenedAt {

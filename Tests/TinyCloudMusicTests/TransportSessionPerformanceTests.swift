@@ -1572,9 +1572,12 @@ struct TransportSessionPerformanceTests {
         let second = try await library.firstListenMemory(songID: 42, expectedCredentialRevision: revision)
 
         #expect(first == second)
-        #expect(TransportFixtureProtocol.requestCount(
+        let requests = TransportFixtureProtocol.requests(
             path: "/eapi/content/activity/music/first/listen/info"
-        ) == 1)
+        )
+        #expect(requests.count == 1)
+        #expect(requests.first?.url?.host == "interfacepc.music.163.com")
+        #expect(requests.first.flatMap(eapiPayload)?["songId"] as? String == "42")
     }
 
     @Test("A response after switching accounts cannot invalidate B cache")

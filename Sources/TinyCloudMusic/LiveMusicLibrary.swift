@@ -457,7 +457,7 @@ struct LiveMusicLibrary: Sendable {
                 signing: "/api/content/activity/music/first/listen/info",
                 host: Self.eapiHost
             ),
-            payload: ["songId": songID],
+            payload: ["songId": String(songID)],
             cache: .detail,
             refreshCache: forceRefresh,
             expectedCredentialRevision: expectedCredentialRevision,
