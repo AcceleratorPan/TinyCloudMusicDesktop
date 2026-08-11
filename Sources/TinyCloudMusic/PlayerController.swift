@@ -89,6 +89,7 @@ final class PlayerController {
     private(set) var selectedPlaybackLevel: String?
     private(set) var isSwitchingPlaybackQuality = false
     private(set) var playbackQualityErrorMessage: String?
+    private(set) var playbackQualityConfirmationMessage: String?
     var volume: Double = 0.78 {
         didSet {
             if volume > 0 { lastAudibleVolume = min(volume, 1) }
@@ -762,6 +763,7 @@ final class PlayerController {
               avPlayer.currentItem != nil
         else { return }
 
+        playbackQualityConfirmationMessage = nil
         finishCrossfade()
         if wantsPlayback { avPlayer.play() }
         qualitySwitchTask?.cancel()
@@ -1774,14 +1776,10 @@ final class PlayerController {
             standbyStatusObservation?.invalidate()
             standbyStatusObservation = nil
             if let fallbackSeekPosition = standbySeekPosition {
-                // Freeze the outgoing clock while the replacement stream seeks and prerolls.
-                if wantsPlayback { avPlayer.pause() }
                 let currentPosition = avPlayer.currentTime().seconds
                 let seekPosition = currentPosition.isFinite && currentPosition >= 0
                     ? currentPosition
                     : fallbackSeekPosition
-                position = seekPosition
-                updateCurrentLyricIndex()
                 standbyPlayer.seek(
                     to: CMTime(seconds: seekPosition, preferredTimescale: 600),
                     toleranceBefore: .zero,
@@ -1847,12 +1845,21 @@ final class PlayerController {
                       qualityRevision == nil || qualityRevision == self.qualitySwitchRevision
                 else { return }
                 if ready {
-                    self.promoteStandby(
-                        item,
-                        generation: generation,
-                        songID: songID,
-                        qualityRevision: qualityRevision
-                    )
+                    if qualityRevision == nil {
+                        self.promoteStandby(
+                            item,
+                            generation: generation,
+                            songID: songID,
+                            qualityRevision: nil
+                        )
+                    } else {
+                        self.alignQualitySwitch(
+                            item,
+                            generation: generation,
+                            songID: songID,
+                            qualityRevision: qualityRevision
+                        )
+                    }
                 } else {
                     let message = item.error?.localizedDescription ?? "音频流预缓冲失败"
                     if self.standbyTransitionDuration != nil {
@@ -1867,6 +1874,42 @@ final class PlayerController {
                         self.failAndAdvance(generation: generation, songID: songID, message: message)
                     }
                 }
+            }
+        }
+    }
+
+    private func alignQualitySwitch(
+        _ item: AVPlayerItem,
+        generation: Int,
+        songID: Int64,
+        qualityRevision: Int?
+    ) {
+        if wantsPlayback { avPlayer.pause() }
+        let currentPosition = avPlayer.currentTime().seconds
+        let seekPosition = currentPosition.isFinite && currentPosition >= 0 ? currentPosition : position
+        position = seekPosition
+        updateCurrentLyricIndex()
+        let tolerance = CMTime(seconds: 0.05, preferredTimescale: 600)
+        standbyPlayer.seek(
+            to: CMTime(seconds: seekPosition, preferredTimescale: 600),
+            toleranceBefore: tolerance,
+            toleranceAfter: tolerance
+        ) { [weak self] finished in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.isCurrent(generation: generation, songID: songID),
+                      qualityRevision == self.qualitySwitchRevision
+                else { return }
+                guard finished else {
+                    self.failQualitySwitch("无法对齐新的音频流")
+                    return
+                }
+                self.promoteStandby(
+                    item,
+                    generation: generation,
+                    songID: songID,
+                    qualityRevision: qualityRevision
+                )
             }
         }
     }
@@ -1900,6 +1943,9 @@ final class PlayerController {
             isSwitchingPlaybackQuality = false
             playbackQualityErrorMessage = nil
             qualityBeforeSwitch = nil
+            playbackQualityConfirmationMessage = currentPlaybackLevel.map {
+                "已切换为\(SongQualityDetail.displayName(for: $0))音质"
+            }
         }
 
         guard wantsPlayback else {

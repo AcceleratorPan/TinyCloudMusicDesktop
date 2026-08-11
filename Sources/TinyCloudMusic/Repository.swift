@@ -39,7 +39,7 @@ struct SongQualityDetail: Identifiable, Equatable, Sendable {
             .id
     }
 
-    var name: String {
+    static func displayName(for id: String) -> String {
         switch id {
         case "standard": "标准"
         case "higher": "较高"
@@ -53,6 +53,8 @@ struct SongQualityDetail: Identifiable, Equatable, Sendable {
         default: id
         }
     }
+
+    var name: String { Self.displayName(for: id) }
 }
 
 struct PlaybackUnavailableError: LocalizedError, Equatable, Sendable {

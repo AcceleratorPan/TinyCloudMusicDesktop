@@ -147,6 +147,11 @@ struct IOSRootView: View {
             guard let message else { return }
             UIAccessibility.post(notification: .announcement, argument: message)
         }
+        .onChange(of: player.playbackQualityConfirmationMessage) { _, message in
+            guard let message else { return }
+            model.showToast(message)
+            UIAccessibility.post(notification: .announcement, argument: message)
+        }
         .alert("启动失败", isPresented: startupErrorPresented) {
             if container.canRetryAudioSession {
                 Button("重试音频") { container.retryAudioSession() }

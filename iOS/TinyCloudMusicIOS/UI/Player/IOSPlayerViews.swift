@@ -373,12 +373,13 @@ private struct IOSNowPlayingArtworkPage: View {
 
             Button { showingQuality = true } label: {
                 Image(systemName: "waveform.badge.magnifyingglass")
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(player.isSwitchingPlaybackQuality ? Color.red : Color.primary)
                     .frame(width: 44, height: 44)
             }
             .buttonStyle(IOSPressedButtonStyle())
             .disabled(player.isControlInteractionLocked)
-            .accessibilityLabel("音质")
+            .accessibilityLabel(player.isSwitchingPlaybackQuality ? "正在切换音质" : "音质")
+            .accessibilityValue(player.isSwitchingPlaybackQuality ? "处理中" : "")
             .accessibilityHint(player.isControlInteractionLocked ? "一起听控制已锁定" : "")
 
             Button { showingMoreActions = true } label: {

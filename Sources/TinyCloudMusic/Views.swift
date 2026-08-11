@@ -270,6 +270,18 @@ struct RootView: View {
                 ]
             )
         }
+        .onChange(of: player.playbackQualityConfirmationMessage) { _, message in
+            guard let message else { return }
+            model.showToast(message)
+            NSAccessibility.post(
+                element: NSApplication.shared,
+                notification: .announcementRequested,
+                userInfo: [
+                    .announcement: message,
+                    .priority: NSAccessibilityPriorityLevel.medium.rawValue
+                ]
+            )
+        }
         .overlay(alignment: .top) {
             InteractionToast(message: model.interactionMessage)
                 .padding(.top, 12)

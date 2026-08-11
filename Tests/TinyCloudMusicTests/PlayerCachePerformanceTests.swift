@@ -513,6 +513,42 @@ struct PlayerCachePerformanceTests {
     }
 
     @MainActor
+    @Test("Quality switch confirms only after standby promotion")
+    func qualitySwitchConfirmation() async throws {
+        let root = performanceCacheRoot()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "quality-switch.wav")
+        try performanceWAV().write(to: source)
+        let song = performanceSong(1)
+        let player = PlayerController(
+            repository: PlayerPerformanceRepository(
+                songs: [song],
+                sourceURL: source,
+                levelSourceURL: source
+            ),
+            cacheRoot: root.appending(path: "cache"),
+            crossfadeDuration: 0
+        )
+        let lossless = SongQualityDetail(
+            id: "lossless",
+            bitrate: 999_000,
+            size: 1,
+            sampleRate: 44_100,
+            isAvailable: true
+        )
+
+        player.play(song, in: [song])
+        await waitUntil { player.isPlaying }
+        player.selectPlaybackQuality(lossless)
+        #expect(player.playbackQualityConfirmationMessage == nil)
+        await waitUntil { player.playbackQualityConfirmationMessage != nil }
+
+        #expect(player.currentPlaybackLevel == lossless.id)
+        #expect(player.playbackQualityConfirmationMessage == "已切换为无损音质")
+    }
+
+    @MainActor
     @Test("Playback controls fade only while the setting is enabled")
     func playbackControlFadeToggle() async throws {
         let root = performanceCacheRoot()
