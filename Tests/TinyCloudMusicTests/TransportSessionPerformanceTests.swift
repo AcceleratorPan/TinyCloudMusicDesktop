@@ -112,17 +112,78 @@ private final class TransportFixtureProtocol: URLProtocol, @unchecked Sendable {
     }
 }
 
-private final class LocalHTTPFixture: @unchecked Sendable {
+final class LocalHTTPFixture: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "TinyCloudMusicTests.LocalHTTPFixture")
-    private let response: Data
+    private let response: @Sendable (Data) -> Data
     private let lock = NSLock()
     private var startContinuation: CheckedContinuation<UInt16, Error>?
     private var capturedRequests: [String] = []
 
-    init(response: Data) throws {
+    private init(response: @escaping @Sendable (Data) -> Data) throws {
         listener = try NWListener(using: .tcp, on: .any)
         self.response = response
+    }
+
+    convenience init(response: Data) throws {
+        try self.init { _ in response }
+    }
+
+    convenience init(rangedBody: Data, contentType: String) throws {
+        try self.init { request in
+            let text = String(decoding: request, as: UTF8.self)
+            guard let header = text
+                .components(separatedBy: "\r\n")
+                .first(where: { $0.lowercased().hasPrefix("range:") })
+            else {
+                return fixtureHTTPResponse(
+                    "200 OK",
+                    headers: ["Accept-Ranges": "bytes", "Content-Type": contentType],
+                    body: rangedBody
+                )
+            }
+            let value = header.dropFirst("range:".count).trimmingCharacters(in: .whitespacesAndNewlines)
+            let bounds = value.dropFirst("bytes=".count).split(
+                separator: "-",
+                maxSplits: 1,
+                omittingEmptySubsequences: false
+            )
+            guard value.hasPrefix("bytes="),
+                  bounds.count == 2
+            else {
+                return fixtureHTTPResponse(
+                    "416 Range Not Satisfiable",
+                    headers: ["Content-Range": "bytes */\(rangedBody.count)"]
+                )
+            }
+            let lower: Int
+            let upper: Int
+            if bounds[0].isEmpty, let suffixLength = Int(bounds[1]), suffixLength > 0 {
+                lower = max(0, rangedBody.count - suffixLength)
+                upper = rangedBody.count - 1
+            } else if let start = Int(bounds[0]), start >= 0, start < rangedBody.count {
+                lower = start
+                upper = min(Int(bounds[1]) ?? rangedBody.count - 1, rangedBody.count - 1)
+            } else {
+                lower = -1
+                upper = -1
+            }
+            guard lower >= 0, upper >= lower else {
+                return fixtureHTTPResponse(
+                    "416 Range Not Satisfiable",
+                    headers: ["Content-Range": "bytes */\(rangedBody.count)"]
+                )
+            }
+            return fixtureHTTPResponse(
+                "206 Partial Content",
+                headers: [
+                    "Accept-Ranges": "bytes",
+                    "Content-Range": "bytes \(lower)-\(upper)/\(rangedBody.count)",
+                    "Content-Type": contentType,
+                ],
+                body: rangedBody.subdata(in: lower..<(upper + 1))
+            )
+        }
     }
 
     func start() async throws -> UInt16 {
@@ -179,7 +240,7 @@ private final class LocalHTTPFixture: @unchecked Sendable {
                 self.lock.withLock {
                     self.capturedRequests.append(String(decoding: request, as: UTF8.self))
                 }
-                connection.send(content: self.response, completion: .contentProcessed { _ in connection.cancel() })
+                connection.send(content: self.response(request), completion: .contentProcessed { _ in connection.cancel() })
             } else if error == nil, request.count < 64 * 1_024 {
                 self.receiveNext(on: connection, accumulated: request)
             } else {
@@ -189,7 +250,7 @@ private final class LocalHTTPFixture: @unchecked Sendable {
     }
 }
 
-private func fixtureHTTPResponse(
+func fixtureHTTPResponse(
     _ status: String,
     headers: [String: String] = [:],
     body: Data = Data()
@@ -200,7 +261,7 @@ private func fixtureHTTPResponse(
     return Data(head.utf8) + body
 }
 
-private actor AsyncGate {
+actor AsyncGate {
     private var entered = false
     private var released = false
     private var continuations: [CheckedContinuation<Void, Never>] = []

@@ -12,6 +12,14 @@ struct PlaybackAvailabilityTests {
             requestedLevel: "standard"
         )
         #expect(playable.availability == .playable(level: "exhigh"))
+        #expect(playable.format == "mp3")
+
+        let extensionlessFLAC = try LiveMusicRepository.decodePlaybackSource(
+            Data(#"{"code":200,"data":[{"id":4,"url":"https://m1.music.126.net/audio","code":200,"level":"lossless","type":"FLAC"}]}"#.utf8),
+            expectedSongID: 4,
+            requestedLevel: "lossless"
+        )
+        #expect(extensionlessFLAC.format == "flac")
 
         do {
             _ = try LiveMusicRepository.decodePlaybackSource(

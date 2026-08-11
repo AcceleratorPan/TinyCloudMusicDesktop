@@ -16,6 +16,13 @@ enum PlaybackAvailability: Equatable, Sendable {
 struct PlaybackSource: Equatable, Sendable {
     let url: URL
     let availability: PlaybackAvailability
+    let format: String?
+
+    init(url: URL, availability: PlaybackAvailability, format: String? = nil) {
+        self.url = url
+        self.availability = availability
+        self.format = format
+    }
 }
 
 struct SongQualityDetail: Identifiable, Equatable, Sendable {

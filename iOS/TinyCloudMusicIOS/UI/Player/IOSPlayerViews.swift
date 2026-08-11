@@ -97,7 +97,8 @@ struct IOSNowPlayingView: View {
                                 model: model,
                                 player: player,
                                 song: song,
-                                openRoute: openRoute
+                                openRoute: openRoute,
+                                openListenTogether: { showingTogether = true }
                             )
                                 .tag(Page.artwork)
                             IOSLyricsView(player: player, isVisible: page == .lyrics)
@@ -147,14 +148,7 @@ struct IOSNowPlayingView: View {
                         .accessibilityElement(children: .combine)
                     }
                 }
-                ToolbarItemGroup(placement: .primaryAction) {
-                    Button { showingTogether = true } label: {
-                        Image(systemName: model.listenTogether?.room == nil ? "person.2" : "person.2.fill")
-                            .foregroundStyle(model.listenTogether?.room == nil ? Color.primary : Color.red)
-                    }
-                        .accessibilityLabel("一起听")
-                        .accessibilityValue(model.listenTogether?.room == nil ? "" : "已连接")
-                        .disabled(model.currentUserID == nil || model.listenTogether == nil)
+                ToolbarItem(placement: .primaryAction) {
                     Button("播放队列", systemImage: "music.note.list") { showingQueue = true }
                         .accessibilityValue(queuePositionText)
                 }
@@ -195,6 +189,7 @@ private struct IOSNowPlayingArtworkPage: View {
     @Bindable var player: PlayerController
     let song: Song
     let openRoute: (Route) -> Void
+    let openListenTogether: () -> Void
     @State private var showingQuality = false
     @State private var showingSheets = false
     @State private var showingMoreActions = false
@@ -273,6 +268,14 @@ private struct IOSNowPlayingArtworkPage: View {
             }
         }
         .confirmationDialog("更多操作", isPresented: $showingMoreActions) {
+            Button(action: openListenTogether) {
+                Label(
+                    "一起听",
+                    systemImage: model.listenTogether?.room == nil ? "person.2" : "person.2.fill"
+                )
+            }
+            .accessibilityValue(model.listenTogether?.room == nil ? "" : "已连接")
+            .disabled(model.currentUserID == nil || model.listenTogether == nil)
             if !song.isPodcastEpisode {
                 Button {
                     player.toggleHeartMode()

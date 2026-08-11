@@ -370,7 +370,7 @@ struct LiveMusicRepository: MusicRepository {
         let value = item.string("url")
         let code = item.int("code")
         let level = item.string("level").isEmpty ? requestedLevel : item.string("level")
-        _ = item.string("type")
+        let format = item.string("type").lowercased()
         let fee = item.int("fee")
         let payed = item.int("payed")
         let message = safePlaybackMessage(item.string("message"))
@@ -387,7 +387,11 @@ struct LiveMusicRepository: MusicRepository {
             let availability: PlaybackAvailability = trial == nil
                 ? .playable(level: level)
                 : .trial(level: level, endSeconds: end > 0 ? end : nil)
-            return PlaybackSource(url: url, availability: availability)
+            return PlaybackSource(
+                url: url,
+                availability: availability,
+                format: format.isEmpty ? nil : format
+            )
         }
 
         let cannotListenReason = item.object("freeTrialPrivilege").int("cannotListenReason")

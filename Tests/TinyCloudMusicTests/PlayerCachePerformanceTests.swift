@@ -41,8 +41,26 @@ struct PlayerCachePerformanceTests {
         let qualitySwitch = try #require(playerText.range(of: "func selectPlaybackQuality"))
         let cacheCall = try #require(playerText.range(of: "cache.cache("))
         let prefetch = try #require(playerText.range(of: "private func prefetchNext"))
+        let synchronization = try #require(playerText.range(of: "private func startSynchronizedStandbyPlayback"))
+        let pausedSynchronization = try #require(playerText.range(of: "private func promotePausedQualitySwitch"))
+        #expect(prefetch.lowerBound > qualitySwitch.lowerBound)
         #expect(cacheCall.lowerBound > qualitySwitch.lowerBound)
         #expect(cacheCall.lowerBound < prefetch.lowerBound)
+        #expect(!playerText.contains("pendingCacheFill"))
+        #expect(playerText.contains("AVURLAssetPreferPreciseDurationAndTimingKey"))
+        #expect(playerText.contains("format?.lowercased() == \"flac\""))
+        #expect(playerText.contains("CMSyncConvertTime(hostTime, from: hostClock, to: $0)"))
+        #expect(playerText.contains("standbyPlayer.setRate(1, time: itemTime, atHostTime: hostTime)"))
+        #expect(playerText.contains("standbyPlayer.automaticallyWaitsToMinimizeStalling = false"))
+        #expect(playerText.contains("if self.wantsPlayback, !self.startSynchronizedStandbyPlayback()"))
+        #expect(playerText.contains("if wantsPlayback, avPlayer.timeControlStatus != .playing { avPlayer.play() }"))
+        #expect(!playerText.contains("新的音频流无法保持同步"))
+        #expect(playerText.components(separatedBy: "self.avPlayer.currentItem === item").count >= 3)
+        #expect(playerText.contains("self.avPlayer === seekingPlayer"))
+        #expect(playerText.contains("seekingPlayer.currentItem === seekingItem"))
+        #expect(playerText.contains("self.avPlayer === observedPlayer"))
+        #expect(playerText.contains("self.avPlayer === player"))
+        #expect(!playerText[synchronization.lowerBound..<pausedSynchronization.lowerBound].contains("avPlayer.pause()"))
     }
 
     @MainActor
@@ -460,22 +478,32 @@ struct PlayerCachePerformanceTests {
     }
 
     @MainActor
-    @Test("A manually selected quality is cached for the next switch")
-    func selectedQualityCache() async throws {
+    @Test("A quality switch streams immediately and caches for the next switch")
+    func selectedQualityCachesAfterPromotion() async throws {
         let root = performanceCacheRoot()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        let audio = performanceWAV()
         let source = root.appending(path: "current.wav")
-        try performanceWAV().write(to: source)
+        try audio.write(to: source)
+        let server = try LocalHTTPFixture(rangedBody: audio, contentType: "audio/wav")
+        let port = try await server.start()
+        defer { server.stop() }
         let song = performanceSong(1)
         let repository = PlayerPerformanceRepository(
             songs: [song],
             sourceURL: source,
-            levelSourceURL: URL(string: "tinycloudmusic-test://selected-quality")!
+            levelSourceURL: URL(string: "http://127.0.0.1:\(port)/selected-quality.wav")!
         )
+        let downloadGate = AsyncGate()
+        defer { Task { await downloadGate.release() } }
+        let downloads = ObservationChangeCounter()
         let cache = TrackCache(directory: root.appending(path: "StreamCache"), download: { request in
-            let downloaded = root.appending(path: "selected-quality.wav")
-            try performanceWAV().write(to: downloaded)
+            downloads.increment()
+            await downloadGate.wait()
+            try Task.checkCancellation()
+            let downloaded = root.appending(path: "selected-quality-\(UUID().uuidString).wav")
+            try audio.write(to: downloaded)
             return (
                 downloaded,
                 HTTPURLResponse(
@@ -486,12 +514,70 @@ struct PlayerCachePerformanceTests {
                 )!
             )
         })
+        let standard = SongQualityDetail(
+            id: "standard",
+            bitrate: 128_000,
+            size: Int64(audio.count),
+            sampleRate: 44_100,
+            isAvailable: true
+        )
+        let master = SongQualityDetail(
+            id: "jymaster",
+            bitrate: 24_000_000,
+            size: Int64(audio.count),
+            sampleRate: 192_000,
+            isAvailable: true
+        )
+        _ = try await cache.storeCopy(
+            of: source,
+            for: song.id,
+            quality: standard.id,
+            fileExtension: "wav"
+        )
         let player = PlayerController(
             repository: repository,
             cacheRoot: root,
             cache: cache,
             crossfadeDuration: 0
         )
+
+        player.play(song, in: [song])
+        await waitUntil { player.isPlaying }
+        player.selectPlaybackQuality(master)
+        await waitUntil { await downloadGate.hasEntered() }
+
+        #expect(player.currentPlaybackLevel == master.id)
+        #expect(!player.isSwitchingPlaybackQuality)
+        #expect(await cache.readyFile(for: song.id, quality: master.id) == nil)
+        #expect(downloads.value == 1)
+
+        await downloadGate.release()
+        await waitUntil { await cache.readyFile(for: song.id, quality: master.id) != nil }
+        player.selectPlaybackQuality(standard)
+        await waitUntil { player.currentPlaybackLevel == standard.id && !player.isSwitchingPlaybackQuality }
+        player.selectPlaybackQuality(master)
+        await waitUntil { player.currentPlaybackLevel == master.id && !player.isSwitchingPlaybackQuality }
+
+        #expect(await repository.levelRequests() == [master.id])
+        #expect(downloads.value == 1)
+    }
+
+    @MainActor
+    @Test("Clearing cache fences a pending quality promotion")
+    func clearCacheCancelsPendingQualitySwitch() async throws {
+        let root = performanceCacheRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "pending-quality.wav")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try performanceWAV().write(to: source)
+        let song = performanceSong(1)
+        let qualityGate = PlayerPrefetchGate(songID: song.id)
+        let repository = PlayerPerformanceRepository(
+            songs: [song],
+            sourceURL: source,
+            qualityGate: qualityGate
+        )
+        let player = PlayerController(repository: repository, cacheRoot: root, crossfadeDuration: 0)
         let master = SongQualityDetail(
             id: "jymaster",
             bitrate: 24_000_000,
@@ -501,14 +587,18 @@ struct PlayerCachePerformanceTests {
         )
 
         player.play(song, in: [song])
-        await waitUntil { player.hasCurrentPlayerItem }
+        await waitUntil { player.isPlaying }
         player.selectPlaybackQuality(master)
-        await waitUntil { await cache.readyFile(for: song.id, quality: master.id) != nil }
+        await waitUntil { await qualityGate.invocationCount == 1 }
+        try await player.clearCache()
+        await qualityGate.release(
+            1,
+            with: .success(PlaybackSource(url: source, availability: .playable(level: master.id)))
+        )
+        await waitUntil { await qualityGate.wasCancelled(1) == true }
 
-        #expect(await cache.readyFile(for: song.id, quality: master.id) != nil)
-        #expect(await repository.levelRequests() == [master.id])
-        player.selectPlaybackQuality(master)
-        await waitUntil { !player.isSwitchingPlaybackQuality }
+        #expect(player.currentPlaybackLevel == "standard")
+        #expect(!player.isSwitchingPlaybackQuality)
         #expect(await repository.levelRequests() == [master.id])
     }
 
@@ -546,6 +636,87 @@ struct PlayerCachePerformanceTests {
 
         #expect(player.currentPlaybackLevel == lossless.id)
         #expect(player.playbackQualityConfirmationMessage == "已切换为无损音质")
+        #expect(player.isPlaying)
+
+        player.setPlayback(false)
+        let pausedPosition = player.position
+        let standard = SongQualityDetail(
+            id: "standard",
+            bitrate: 128_000,
+            size: 1,
+            sampleRate: 44_100,
+            isAvailable: true
+        )
+        player.selectPlaybackQuality(standard)
+        await waitUntil { player.currentPlaybackLevel == standard.id }
+
+        #expect(!player.isPlaybackRequested)
+        #expect(player.playbackQualityErrorMessage == nil)
+        #expect(abs(player.position - pausedPosition) < 0.1)
+    }
+
+    @MainActor
+    @Test("Only the latest rapid quality selection can be promoted")
+    func latestQualitySwitchWins() async throws {
+        let root = performanceCacheRoot()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "rapid-quality-switch.wav")
+        try performanceWAV().write(to: source)
+        let song = performanceSong(1)
+        let repository = PlayerPerformanceRepository(
+            songs: [song],
+            sourceURL: source,
+            levelSourceURL: source
+        )
+        let player = PlayerController(
+            repository: repository,
+            cacheRoot: root.appending(path: "cache"),
+            crossfadeDuration: 0
+        )
+        let lossless = SongQualityDetail(
+            id: "lossless",
+            bitrate: 999_000,
+            size: 1,
+            sampleRate: 44_100,
+            isAvailable: true
+        )
+        let master = SongQualityDetail(
+            id: "jymaster",
+            bitrate: 24_000_000,
+            size: 1,
+            sampleRate: 192_000,
+            isAvailable: true
+        )
+        let standard = SongQualityDetail(
+            id: "standard",
+            bitrate: 128_000,
+            size: 1,
+            sampleRate: 44_100,
+            isAvailable: true
+        )
+
+        player.play(song, in: [song])
+        await waitUntil { player.isPlaying }
+        player.selectPlaybackQuality(lossless)
+        player.selectPlaybackQuality(standard)
+        #expect(!player.isSwitchingPlaybackQuality)
+        #expect(player.currentPlaybackLevel == standard.id)
+        #expect(player.selectedPlaybackLevel == standard.id)
+
+        player.selectPlaybackQuality(lossless)
+        player.seek(to: 0.5)
+        #expect(!player.isSwitchingPlaybackQuality)
+        #expect(player.selectedPlaybackLevel == standard.id)
+
+        player.selectPlaybackQuality(lossless)
+        player.selectPlaybackQuality(master)
+        await waitUntil { player.playbackQualityConfirmationMessage != nil }
+
+        #expect(player.currentPlaybackLevel == master.id)
+        #expect(player.selectedPlaybackLevel == master.id)
+        #expect(player.playbackQualityConfirmationMessage == "已切换为超清母带音质")
+        #expect(await repository.levelRequests() == [master.id])
     }
 
     @MainActor
@@ -1096,6 +1267,7 @@ private actor PlayerPerformanceRepository: MusicRepository {
     private let blocksStartReport: Bool
     private let reportGate: PlayerReportGate?
     private let prefetchGate: PlayerPrefetchGate?
+    private let qualityGate: PlayerPrefetchGate?
     private var requestedSongIDs: [[Int64]] = []
     private var sourceRequests = 0
     private var requestedLevels: [String] = []
@@ -1111,7 +1283,8 @@ private actor PlayerPerformanceRepository: MusicRepository {
         delayedSongID: Int64? = nil,
         blocksStartReport: Bool = false,
         reportGate: PlayerReportGate? = nil,
-        prefetchGate: PlayerPrefetchGate? = nil
+        prefetchGate: PlayerPrefetchGate? = nil,
+        qualityGate: PlayerPrefetchGate? = nil
     ) {
         songsByID = Dictionary(uniqueKeysWithValues: songs.map { ($0.id, $0) })
         self.sourceFails = sourceFails
@@ -1121,6 +1294,7 @@ private actor PlayerPerformanceRepository: MusicRepository {
         self.blocksStartReport = blocksStartReport
         self.reportGate = reportGate
         self.prefetchGate = prefetchGate
+        self.qualityGate = qualityGate
     }
 
     func songs(ids: [Int64]) async throws -> [Song] {
@@ -1151,6 +1325,7 @@ private actor PlayerPerformanceRepository: MusicRepository {
     func playbackSource(for songID: Int64, level: String) async throws -> PlaybackSource {
         sourceRequests += 1
         requestedLevels.append(level)
+        if let qualityGate { return try await qualityGate.source() }
         if sourceFails { throw URLError(.timedOut) }
         return PlaybackSource(
             url: levelSourceURL ?? sourceURL,
