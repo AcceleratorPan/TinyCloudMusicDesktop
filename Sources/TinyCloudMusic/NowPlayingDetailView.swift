@@ -158,7 +158,7 @@ private struct PlaybackProgress: View {
     }
 
     private var displayedPosition: TimeInterval {
-        isScrubbing ? scrubPosition : player.position
+        isScrubbing ? scrubPosition : player.displayedPosition
     }
 
     private var positionBinding: Binding<Double> {
@@ -173,7 +173,7 @@ private struct PlaybackProgress: View {
 
     private func updateScrubbing(_ editing: Bool) {
         if editing {
-            scrubPosition = player.position
+            scrubPosition = player.displayedPosition
             isScrubbing = true
         } else {
             player.seek(to: scrubPosition)

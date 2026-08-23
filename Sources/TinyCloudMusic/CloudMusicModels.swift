@@ -140,14 +140,7 @@ enum CloudMusicDecoder {
     }
 
     static func isAllowedDownloadURL(_ url: URL) -> Bool {
-        guard url.scheme?.lowercased() == "https",
-              url.user == nil,
-              url.password == nil,
-              url.port == nil || url.port == 443,
-              let host = url.host?.lowercased()
-        else { return false }
-        return host == "music.163.com" || host.hasSuffix(".music.163.com")
-            || host == "126.net" || host.hasSuffix(".126.net")
+        PlaybackSourceURLPolicy.isAllowedRemote(url)
     }
 
     private static func date(milliseconds: Int64) -> Date? {

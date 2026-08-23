@@ -13,15 +13,51 @@ enum PlaybackAvailability: Equatable, Sendable {
     }
 }
 
+struct PlaybackRepresentation: Equatable, Sendable {
+    let contentLength: Int64
+    let contentMD5: String
+
+    init?(contentLength: Int64, contentMD5: String) {
+        guard contentLength > 0,
+              contentMD5.utf8.count == 32,
+              contentMD5.utf8.allSatisfy({
+                  (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
+              })
+        else { return nil }
+        self.contentLength = contentLength
+        self.contentMD5 = contentMD5.lowercased()
+    }
+}
+
 struct PlaybackSource: Equatable, Sendable {
     let url: URL
     let availability: PlaybackAvailability
     let format: String?
+    let representation: PlaybackRepresentation?
 
-    init(url: URL, availability: PlaybackAvailability, format: String? = nil) {
+    init(
+        url: URL,
+        availability: PlaybackAvailability,
+        format: String? = nil,
+        representation: PlaybackRepresentation? = nil
+    ) {
         self.url = url
         self.availability = availability
         self.format = format
+        self.representation = representation
+    }
+}
+
+enum PlaybackSourceURLPolicy {
+    static func isAllowedRemote(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "https",
+              url.user == nil,
+              url.password == nil,
+              url.port == nil || url.port == 443,
+              let host = url.host?.lowercased()
+        else { return false }
+        return host == "music.163.com" || host.hasSuffix(".music.163.com")
+            || host == "126.net" || host.hasSuffix(".126.net")
     }
 }
 

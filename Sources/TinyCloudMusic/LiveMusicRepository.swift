@@ -1,3 +1,4 @@
+import CoreFoundation
 import Foundation
 
 struct LiveMusicRepository: MusicRepository {
@@ -387,10 +388,23 @@ struct LiveMusicRepository: MusicRepository {
             let availability: PlaybackAvailability = trial == nil
                 ? .playable(level: level)
                 : .trial(level: level, endSeconds: end > 0 ? end : nil)
+            let representation: PlaybackRepresentation?
+            if case .playable = availability,
+               let contentLength = exactPositiveInt64(item["size"]),
+               let contentMD5 = item["md5"] as? String
+            {
+                representation = PlaybackRepresentation(
+                    contentLength: contentLength,
+                    contentMD5: contentMD5
+                )
+            } else {
+                representation = nil
+            }
             return PlaybackSource(
                 url: url,
                 availability: availability,
-                format: format.isEmpty ? nil : format
+                format: format.isEmpty ? nil : format,
+                representation: representation
             )
         }
 
@@ -408,6 +422,18 @@ struct LiveMusicRepository: MusicRepository {
             reason = "这首歌暂时无法播放"
         }
         throw PlaybackUnavailableError(reason: reason, alternatives: [])
+    }
+
+    private static func exactPositiveInt64(_ value: Any?) -> Int64? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.doubleValue.isFinite
+        else { return nil }
+        let integer = number.int64Value
+        guard integer > 0,
+              number.compare(NSNumber(value: integer)) == .orderedSame
+        else { return nil }
+        return integer
     }
 
     private static func safePlaybackMessage(_ value: String) -> String? {

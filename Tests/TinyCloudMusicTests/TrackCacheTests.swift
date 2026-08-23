@@ -7,6 +7,7 @@ import Testing
 
 private enum TrackCacheCheckError: Error {
     case failed
+    case failedAt(String)
 }
 
 private actor TrackCacheDownloadCounter {
@@ -82,6 +83,7 @@ private actor TrackCacheDownloadGate {
     private var started = false
     private var released = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var completedURL: URL?
     let root: URL
 
     init(root: URL) {
@@ -95,6 +97,7 @@ private actor TrackCacheDownloadGate {
         }
         let url = root.appending(path: UUID().uuidString)
         try Data("ID3".utf8).write(to: url)
+        completedURL = url
         return (
             url,
             HTTPURLResponse(
@@ -122,6 +125,44 @@ private func waitUntil(_ predicate: () async -> Bool) async throws {
         try await Task.sleep(for: .milliseconds(10))
     }
     throw TrackCacheCheckError.failed
+}
+
+private func allocatedSize(of url: URL) throws -> Int64 {
+    let values = try URL(fileURLWithPath: url.path)
+        .resourceValues(forKeys: [.fileAllocatedSizeKey, .fileSizeKey])
+    guard let size = values.fileAllocatedSize ?? values.fileSize else {
+        throw TrackCacheCheckError.failed
+    }
+    return Int64(size)
+}
+
+private func verifyCanonicalOwnership(
+    cache: TrackCache,
+    root: URL,
+    finalURL: URL
+) async throws {
+    let lateDownload = root.appending(path: "late-download.tmp")
+    try Data("ID3-late".utf8).write(to: lateDownload)
+    guard try await cache.finalize(lateDownload, for: 42, quality: "standard") == finalURL,
+          try Data(contentsOf: finalURL) == Data("ID3".utf8),
+          !FileManager.default.fileExists(atPath: lateDownload.path)
+    else { throw TrackCacheCheckError.failedAt("existing canonical file is immutable") }
+
+    let lateRoot = root.appending(path: "late-completion", directoryHint: .isDirectory)
+    let lateGate = TrackCacheDownloadGate(root: lateRoot)
+    let lateCache = TrackCache(directory: lateRoot, download: { try await lateGate.download($0) })
+    let lateWrite = Task {
+        try await lateCache.cache(songID: 126, from: URL(string: "https://example.com/126.mp3")!)
+    }
+    try await waitUntil { await lateGate.hasStarted() }
+    let canonicalSource = root.appending(path: "canonical-before-completion.tmp")
+    let canonicalBody = Data("ID3-canonical".utf8)
+    try canonicalBody.write(to: canonicalSource)
+    let canonicalURL = try await lateCache.finalize(canonicalSource, for: 126)
+    await lateGate.release()
+    guard try await lateWrite.value == canonicalURL,
+          try Data(contentsOf: canonicalURL) == canonicalBody
+    else { throw TrackCacheCheckError.failedAt("late completion preserves canonical file") }
 }
 
 private func verifyTrackCache() async throws {
@@ -152,6 +193,8 @@ private func verifyTrackCache() async throws {
           await cache.readyFile(for: 42, quality: "standard") == finalURL,
           !FileManager.default.fileExists(atPath: finalURL.appendingPathExtension("part").path)
     else { throw TrackCacheCheckError.failed }
+
+    try await verifyCanonicalOwnership(cache: cache, root: root, finalURL: finalURL)
 
     try Data("ID3-corrupted-size".utf8).write(to: finalURL)
     guard await cache.readyFile(for: 42, quality: "standard") == nil else { throw TrackCacheCheckError.failed }
@@ -442,6 +485,177 @@ private func verifyTrackCache() async throws {
           await copyCache.readyFile(for: 111) != nil
     else { throw TrackCacheCheckError.failed }
 
+    try await verifyPartialAccounting(root: root)
+    try await verifyTrackCacheLifecycle(root: root)
+}
+
+private func verifyPartialAccounting(root: URL) async throws {
+    let rangeMissRoot = root.appending(path: "partial-miss", directoryHint: .isDirectory)
+    let rangeMissCache = TrackCache(directory: rangeMissRoot)
+    let disguisedRange = rangeMissRoot
+        .appending(path: "standard", directoryHint: .isDirectory)
+        .appending(path: "130.range")
+    try FileManager.default.createDirectory(
+        at: disguisedRange.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try Data("fLaC".utf8).write(to: disguisedRange)
+    guard await rangeMissCache.readyFile(for: 130) == nil,
+          FileManager.default.fileExists(atPath: disguisedRange.path)
+    else { throw TrackCacheCheckError.failedAt("partial ready-file miss") }
+
+    let partialTrimRoot = root.appending(path: "partial-trim", directoryHint: .isDirectory)
+    let partialTrimDirectory = partialTrimRoot
+        .appending(path: "RangeCache", directoryHint: .isDirectory)
+        .appending(path: "standard", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: partialTrimDirectory, withIntermediateDirectories: true)
+    let olderPartial = partialTrimDirectory.appending(path: "older.range")
+    let newerPartial = partialTrimDirectory.appending(path: "newer.range")
+    try Data(repeating: 0xa5, count: 4_096).write(to: olderPartial)
+    try await Task.sleep(for: .milliseconds(20))
+    try Data(repeating: 0x5a, count: 4_096).write(to: newerPartial)
+    let olderPartialSize = try allocatedSize(of: olderPartial)
+    let newerPartialSize = try allocatedSize(of: newerPartial)
+    let partialTrimLimit = max(olderPartialSize, newerPartialSize)
+    guard olderPartialSize > 0,
+          newerPartialSize > 0,
+          olderPartialSize + newerPartialSize > partialTrimLimit
+    else { throw TrackCacheCheckError.failedAt("partial trim precondition") }
+    let partialTrimCache = TrackCache(
+        directory: partialTrimRoot,
+        byteLimit: partialTrimLimit,
+        minimumTrimInterval: 0
+    )
+    await partialTrimCache.recordPartialFileAccess(newerPartial)
+    guard !FileManager.default.fileExists(atPath: olderPartial.path),
+          FileManager.default.fileExists(atPath: newerPartial.path)
+    else { throw TrackCacheCheckError.failedAt("partial trim result") }
+
+    let sparseRoot = root.appending(path: "partial-sparse", directoryHint: .isDirectory)
+    let sparseDirectory = sparseRoot
+        .appending(path: "RangeCache", directoryHint: .isDirectory)
+        .appending(path: "standard", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: sparseDirectory, withIntermediateDirectories: true)
+    let sparsePartial = sparseDirectory.appending(path: "tail-only.range")
+    let sparseTrigger = sparseDirectory.appending(path: "trigger.range")
+    try Data().write(to: sparsePartial)
+    let logicalSize: UInt64 = 64 * 1_024 * 1_024
+    let sparseHandle = try FileHandle(forWritingTo: sparsePartial)
+    try sparseHandle.seek(toOffset: logicalSize - 4)
+    try sparseHandle.write(contentsOf: Data([1, 2, 3, 4]))
+    try sparseHandle.close()
+    try Data([5]).write(to: sparseTrigger)
+    let sparseLogicalSize = Int64(
+        try sparsePartial.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+    )
+    let sparseAllocatedSize = try allocatedSize(of: sparsePartial)
+    let sparseTriggerSize = try allocatedSize(of: sparseTrigger)
+    let initialAllocatedSize = sparseAllocatedSize + sparseTriggerSize
+    guard sparseLogicalSize == Int64(logicalSize),
+          sparseLogicalSize > initialAllocatedSize + 16_384
+    else { throw TrackCacheCheckError.failedAt("sparse allocation precondition") }
+    let sparseLimit = initialAllocatedSize + 8_192
+    let sparseCache = TrackCache(
+        directory: sparseRoot,
+        byteLimit: sparseLimit,
+        minimumTrimInterval: 0
+    )
+    await sparseCache.recordPartialFileAccess(sparseTrigger)
+    guard FileManager.default.fileExists(atPath: sparsePartial.path),
+          FileManager.default.fileExists(atPath: sparseTrigger.path)
+    else { throw TrackCacheCheckError.failedAt("sparse below-limit result") }
+    try Data(repeating: 0x3c, count: Int(sparseLimit + 8_192)).write(to: sparseTrigger)
+    let expandedTriggerSize = try allocatedSize(of: sparseTrigger)
+    guard sparseAllocatedSize + expandedTriggerSize > sparseLimit else {
+        throw TrackCacheCheckError.failedAt("sparse expansion precondition")
+    }
+    await sparseCache.recordPartialFileAccess(sparseTrigger)
+    guard !FileManager.default.fileExists(atPath: sparsePartial.path),
+          FileManager.default.fileExists(atPath: sparseTrigger.path)
+    else { throw TrackCacheCheckError.failedAt("sparse over-limit result") }
+
+    let partialPinRoot = root.appending(path: "partial-pin-trim", directoryHint: .isDirectory)
+    let partialPinDirectory = partialPinRoot
+        .appending(path: "RangeCache", directoryHint: .isDirectory)
+        .appending(path: "standard", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: partialPinDirectory, withIntermediateDirectories: true)
+    let pinnedPartial = partialPinDirectory.appending(path: "pinned.range")
+    let pinTrimTrigger = partialPinDirectory.appending(path: "trigger.range")
+    try Data(repeating: 0x17, count: 4_096).write(to: pinnedPartial)
+    try Data(repeating: 0x71, count: 4_096).write(to: pinTrimTrigger)
+    let pinnedPartialSize = try allocatedSize(of: pinnedPartial)
+    let pinTrimTriggerSize = try allocatedSize(of: pinTrimTrigger)
+    let partialPinLimit = max(pinnedPartialSize, pinTrimTriggerSize)
+    guard pinnedPartialSize > 0,
+          pinTrimTriggerSize > 0,
+          pinnedPartialSize + pinTrimTriggerSize > partialPinLimit
+    else { throw TrackCacheCheckError.failedAt("partial pin precondition") }
+    let partialPinCache = TrackCache(
+        directory: partialPinRoot,
+        byteLimit: partialPinLimit,
+        minimumTrimInterval: 0
+    )
+    guard await partialPinCache.pin(pinnedPartial) else {
+        throw TrackCacheCheckError.failedAt("partial pin")
+    }
+    await partialPinCache.recordPartialFileAccess(pinTrimTrigger)
+    guard FileManager.default.fileExists(atPath: pinnedPartial.path),
+          FileManager.default.fileExists(atPath: pinTrimTrigger.path)
+    else { throw TrackCacheCheckError.failedAt("partial pinned trim result") }
+    await partialPinCache.unpin(pinnedPartial)
+
+    let partialClearRoot = root.appending(path: "partial-clear", directoryHint: .isDirectory)
+    let partialClearBody = partialClearRoot
+        .appending(path: "RangeCache", directoryHint: .isDirectory)
+        .appending(path: "standard", directoryHint: .isDirectory)
+        .appending(path: "clear.range")
+    let partialClearMetadata = partialClearBody.appendingPathExtension("metadata.plist")
+    try FileManager.default.createDirectory(
+        at: partialClearBody.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try Data([1]).write(to: partialClearBody)
+    try Data([2]).write(to: partialClearMetadata)
+    let partialClearCache = TrackCache(directory: partialClearRoot, minimumTrimInterval: 0)
+    guard await partialClearCache.pin(partialClearBody) else {
+        throw TrackCacheCheckError.failedAt("partial clear pin")
+    }
+    try await partialClearCache.clear()
+    guard FileManager.default.fileExists(atPath: partialClearBody.path),
+          !FileManager.default.fileExists(atPath: partialClearMetadata.path)
+    else { throw TrackCacheCheckError.failedAt("partial pinned clear result") }
+    let trimCountAfterClear = await partialClearCache.trimRunCount
+    await partialClearCache.recordPartialFileAccess(partialClearBody)
+    guard await partialClearCache.trimRunCount == trimCountAfterClear else {
+        throw TrackCacheCheckError.failedAt("partial pending-delete access")
+    }
+    await partialClearCache.unpin(partialClearBody)
+    guard !FileManager.default.fileExists(atPath: partialClearBody.path),
+          !FileManager.default.fileExists(atPath: partialClearMetadata.path)
+    else { throw TrackCacheCheckError.failedAt("partial clear unpin result") }
+
+    let partialValidationRoot = root.appending(path: "partial-validation", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: partialValidationRoot, withIntermediateDirectories: true)
+    let partialValidationCache = TrackCache(directory: partialValidationRoot, minimumTrimInterval: 0)
+    let outsidePartial = root.appending(path: "outside.range")
+    let nonRangeFile = partialValidationRoot.appending(path: "inside.mp3")
+    let missingPartial = partialValidationRoot.appending(path: "missing.range")
+    let directoryPartial = partialValidationRoot.appending(path: "directory.range", directoryHint: .isDirectory)
+    try Data([1]).write(to: outsidePartial)
+    try Data([1]).write(to: nonRangeFile)
+    try FileManager.default.createDirectory(at: directoryPartial, withIntermediateDirectories: true)
+    await partialValidationCache.recordPartialFileAccess(outsidePartial)
+    await partialValidationCache.recordPartialFileAccess(nonRangeFile)
+    await partialValidationCache.recordPartialFileAccess(missingPartial)
+    await partialValidationCache.recordPartialFileAccess(directoryPartial)
+    guard await partialValidationCache.trimRunCount == 0,
+          FileManager.default.fileExists(atPath: outsidePartial.path),
+          FileManager.default.fileExists(atPath: nonRangeFile.path),
+          !FileManager.default.fileExists(atPath: missingPartial.path)
+    else { throw TrackCacheCheckError.failedAt("partial access validation") }
+}
+
+private func verifyTrackCacheLifecycle(root: URL) async throws {
     let pinRoot = root.appending(path: "pin", directoryHint: .isDirectory)
     let pinCache = TrackCache(directory: pinRoot)
     let pinSource = root.appending(path: "pin.tmp")
@@ -460,6 +674,75 @@ private func verifyTrackCache() async throws {
           !FileManager.default.fileExists(atPath: pinned.appendingPathExtension("metadata.plist").path)
     else { throw TrackCacheCheckError.failed }
 
+    try await verifyInvalidation(root: root)
+    try await verifyTrackCacheRaces(root: root)
+}
+
+private func verifyInvalidation(root: URL) async throws {
+    let invalidateRoot = root.appending(path: "invalidate", directoryHint: .isDirectory)
+    let invalidateCache = TrackCache(directory: invalidateRoot)
+    let unpinnedSource = root.appending(path: "invalidate-unpinned.tmp")
+    try Data("ID3-unpinned".utf8).write(to: unpinnedSource)
+    let unpinnedURL = try await invalidateCache.finalize(unpinnedSource, for: 127)
+    await invalidateCache.invalidateCachedFile(unpinnedURL)
+    guard await invalidateCache.readyFile(for: 127) == nil,
+          !FileManager.default.fileExists(atPath: unpinnedURL.path)
+    else { throw TrackCacheCheckError.failedAt("invalidate unpinned full") }
+
+    let pinnedSource = root.appending(path: "invalidate-pinned.tmp")
+    try Data("ID3-pinned".utf8).write(to: pinnedSource)
+    _ = try await invalidateCache.finalize(pinnedSource, for: 128)
+    guard let invalidatedPinned = await invalidateCache.readyPinnedFile(for: 128) else {
+        throw TrackCacheCheckError.failedAt("invalidate full pin")
+    }
+    await invalidateCache.invalidateCachedFile(invalidatedPinned)
+    guard await invalidateCache.readyFile(for: 128) == nil,
+          FileManager.default.fileExists(atPath: invalidatedPinned.path)
+    else { throw TrackCacheCheckError.failedAt("invalidate pinned full") }
+    await invalidateCache.unpin(invalidatedPinned)
+    guard !FileManager.default.fileExists(atPath: invalidatedPinned.path) else {
+        throw TrackCacheCheckError.failedAt("invalidate pinned full unpin")
+    }
+
+    let invalidatedDownloadRoot = root.appending(
+        path: "invalidate-late-download",
+        directoryHint: .isDirectory
+    )
+    let invalidatedDownloadGate = TrackCacheDownloadGate(root: invalidatedDownloadRoot)
+    let invalidatedDownloadCache = TrackCache(
+        directory: invalidatedDownloadRoot,
+        download: { try await invalidatedDownloadGate.download($0) }
+    )
+    let invalidatedDownload = Task {
+        try await invalidatedDownloadCache.cache(
+            songID: 129,
+            from: URL(string: "https://example.com/129.mp3")!
+        )
+    }
+    try await waitUntil { await invalidatedDownloadGate.hasStarted() }
+    let invalidatedCanonicalSource = root.appending(path: "invalidate-late-canonical.tmp")
+    try Data("ID3-canonical".utf8).write(to: invalidatedCanonicalSource)
+    let invalidatedCanonical = try await invalidatedDownloadCache.finalize(
+        invalidatedCanonicalSource,
+        for: 129
+    )
+    await invalidatedDownloadCache.invalidateCachedFile(invalidatedCanonical)
+    do {
+        _ = try await invalidatedDownload.value
+        throw TrackCacheCheckError.failedAt("invalidate in-flight cancellation")
+    } catch is CancellationError {
+    }
+    await invalidatedDownloadGate.release()
+    try await waitUntil {
+        guard let completedURL = await invalidatedDownloadGate.completedURL else { return false }
+        return !FileManager.default.fileExists(atPath: completedURL.path)
+    }
+    guard await invalidatedDownloadCache.readyFile(for: 129) == nil,
+          !FileManager.default.fileExists(atPath: invalidatedCanonical.path)
+    else { throw TrackCacheCheckError.failedAt("invalidate late completion fence") }
+}
+
+private func verifyTrackCacheRaces(root: URL) async throws {
     let raceRoot = root.appending(path: "lookup-clear-race", directoryHint: .isDirectory)
     let lookupGate = TrackCacheLookupGate()
     let raceCache = TrackCache(directory: raceRoot, beforeReadyLookup: { await lookupGate.wait() })
@@ -636,6 +919,8 @@ struct TrackCacheTests {
         #expect(lookup.contains("await audioCache.readyCachedFile"))
         #expect(!lookup.contains("Data(contentsOf:"))
         #expect(!lookup.contains("resourceValues"))
+        #expect(downloads.contains("await audioCache.invalidateCachedFile(stored.url)"))
+        #expect(!downloads.contains("removeItem(at: stored.url)"))
     }
 
     @MainActor

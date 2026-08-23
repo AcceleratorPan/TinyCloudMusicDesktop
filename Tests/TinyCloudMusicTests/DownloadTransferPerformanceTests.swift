@@ -459,6 +459,173 @@ struct DownloadTransferPerformanceTests {
     }
 
     @MainActor
+    @Test("Partial cache quota never replaces an accepted full audio download")
+    func partialQuotaPreservesAcceptedFullAudio() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cacheRoot = root.appending(path: "cache")
+        let cacheDirectory = cacheRoot.appending(path: "StreamCache", directoryHint: .isDirectory)
+        let destination = root.appending(path: "downloads")
+        let songID: Int64 = 604
+        let sourceBytes = Data("ID3-full-cache".utf8)
+        let source = root.appending(path: "source.mp3")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try sourceBytes.write(to: source)
+        let setupCache = TrackCache(directory: cacheDirectory)
+        let cached = try await setupCache.storeCopy(
+            of: source,
+            for: songID,
+            quality: "standard",
+            fileExtension: "mp3"
+        )
+
+        let partialDirectory = cacheDirectory
+            .appending(path: "RangeCache", directoryHint: .isDirectory)
+            .appending(path: "standard", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: partialDirectory, withIntermediateDirectories: true)
+        let olderPartial = partialDirectory.appending(path: "604-old.range")
+        let newerPartial = partialDirectory.appending(path: "604-new.range")
+        let partialBytes = Data(repeating: 0x5a, count: 4_096)
+        try partialBytes.write(to: olderPartial)
+        try partialBytes.write(to: newerPartial)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 1)],
+            ofItemAtPath: olderPartial.path
+        )
+        let allocated = try newerPartial.resourceValues(
+            forKeys: [.fileAllocatedSizeKey, .fileSizeKey]
+        )
+        let partialSize = Int64(allocated.fileAllocatedSize ?? allocated.fileSize ?? 0)
+        #expect(partialSize > 0)
+        let cache = TrackCache(
+            directory: cacheDirectory,
+            byteLimit: cached.size + partialSize,
+            minimumTrimInterval: 0
+        )
+        #expect(await cache.readyCachedFile(for: 999, quality: "standard") == nil)
+
+        DeferredLyricsProtocol.reset()
+        let network = deferredLyricsNetwork()
+        defer {
+            DeferredLyricsProtocol.release()
+            network.session.invalidateAndCancel()
+        }
+        let manager = MusicDownloadManager(
+            transport: network.transport,
+            session: network.session,
+            maximumConcurrentDownloads: 1,
+            resumeStore: MusicDownloadResumeStore(directory: root.appending(path: "resume")),
+            targetAllocator: MusicDownloadTargetAllocator(),
+            cacheRoot: cacheRoot,
+            audioCache: cache
+        )
+        #expect(manager.enqueue(
+            song: song(Int(songID)),
+            to: destination,
+            quality: .standard,
+            includeLyrics: true
+        ))
+        for _ in 0..<200 where DeferredLyricsProtocol.requestCount == 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(DeferredLyricsProtocol.requestCount > 0)
+
+        await cache.recordPartialFileAccess(newerPartial)
+        #expect(!FileManager.default.fileExists(atPath: olderPartial.path))
+        #expect(FileManager.default.fileExists(atPath: newerPartial.path))
+        #expect(FileManager.default.fileExists(atPath: cached.url.path))
+
+        DeferredLyricsProtocol.release()
+        try await waitForMusic(manager, songID: songID)
+        guard case let .completed(audioURL, _)? = manager.states[songID] else {
+            Issue.record("full cache download did not complete")
+            return
+        }
+        #expect(audioURL.pathExtension == "mp3")
+        #expect(try Data(contentsOf: audioURL) == sourceBytes)
+        #expect(audioURL.pathExtension != "range")
+    }
+
+    @MainActor
+    @Test("Clear fences a final cache store without exposing partial audio")
+    func clearFencesFinalCacheStore() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cacheRoot = root.appending(path: "cache")
+        let cacheDirectory = cacheRoot.appending(path: "StreamCache", directoryHint: .isDirectory)
+        let destination = root.appending(path: "downloads")
+        let songID: Int64 = 605
+        let partial = cacheDirectory
+            .appending(path: "RangeCache", directoryHint: .isDirectory)
+            .appending(path: "standard", directoryHint: .isDirectory)
+            .appending(path: "605.range")
+        try FileManager.default.createDirectory(
+            at: partial.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("fLaC-partial".utf8).write(to: partial)
+
+        let gate = CacheLookupGate(blockingInvocation: 3)
+        let cache = TrackCache(directory: cacheDirectory, beforeReadyLookup: { await gate.wait() })
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FinalStoreFenceProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let manager = MusicDownloadManager(
+            transport: EAPITransport(session: session, cookie: "", musicU: ""),
+            session: session,
+            maximumConcurrentDownloads: 1,
+            retryPolicy: MusicDownloadRetryPolicy(maximumAttempts: 1, baseDelay: 0, maximumDelay: 0),
+            resumeStore: MusicDownloadResumeStore(directory: root.appending(path: "resume")),
+            targetAllocator: MusicDownloadTargetAllocator(),
+            cacheRoot: cacheRoot,
+            audioCache: cache
+        )
+        #expect(manager.enqueue(
+            song: song(Int(songID)),
+            to: destination,
+            quality: .standard,
+            includeLyrics: false
+        ))
+        try await waitForLookup(gate, count: 3)
+
+        let clearFinished = LockedCounter()
+        let clearing = Task { @MainActor in
+            defer { clearFinished.increment() }
+            try await manager.clearCache()
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(clearFinished.value == 0)
+        await gate.release()
+        try await clearing.value
+
+        for _ in 0..<200 {
+            switch manager.states[songID] {
+            case .completed?, .cancelled?, .failed?: break
+            default:
+                try await Task.sleep(for: .milliseconds(5))
+                continue
+            }
+            break
+        }
+        switch manager.states[songID] {
+        case let .completed(audioURL, _)?:
+            #expect(audioURL.pathExtension == "mp3")
+            #expect(try Data(contentsOf: audioURL) == Data("ID3-final-store".utf8))
+        case .cancelled?:
+            let files = (try? FileManager.default.contentsOfDirectory(
+                at: destination,
+                includingPropertiesForKeys: nil
+            )) ?? []
+            #expect(!files.contains { $0.pathExtension == "range" })
+        default:
+            Issue.record("final store did not settle as completed or cancelled")
+        }
+        #expect(await cache.readyFile(for: songID, quality: "standard") == nil)
+        #expect(await cache.readyCachedFile(for: songID, quality: "standard") == nil)
+    }
+
+    @MainActor
     @Test("Cache root switch preserves an accepted cached source download")
     func cacheRootSwitchPreservesFinalDownload() async throws {
         let root = temporaryDirectory()
@@ -946,12 +1113,18 @@ private final class BlockingFileValidator: @unchecked Sendable {
 }
 
 private actor CacheLookupGate {
+    private let blockingInvocation: Int
     private var continuation: CheckedContinuation<Void, Never>?
     private(set) var starts = 0
     private(set) var wasCancelled: Bool?
 
+    init(blockingInvocation: Int = 1) {
+        self.blockingInvocation = blockingInvocation
+    }
+
     func wait() async {
         starts += 1
+        guard starts == blockingInvocation else { return }
         await withCheckedContinuation { continuation = $0 }
         wasCancelled = Task.isCancelled
     }
@@ -960,6 +1133,47 @@ private actor CacheLookupGate {
         continuation?.resume()
         continuation = nil
     }
+}
+
+private final class FinalStoreFenceProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let status: Int
+        let body: Data
+        let contentType: String
+        switch request.url?.path {
+        case "/eapi/song/enhance/player/url/v1":
+            status = 200
+            body = Data(
+                #"{"code":200,"data":[{"id":605,"code":200,"url":"https://m1.music.126.net/final-store-audio","type":"mp3","level":"standard","size":15}]}"#.utf8
+            )
+            contentType = "application/json"
+        case "/final-store-audio":
+            status = 200
+            body = Data("ID3-final-store".utf8)
+            contentType = "audio/mpeg"
+        default:
+            status = 404
+            body = Data(#"{"code":404}"#.utf8)
+            contentType = "application/json"
+        }
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: status,
+            httpVersion: "HTTP/1.1",
+            headerFields: [
+                "Content-Type": contentType,
+                "Content-Length": String(body.count)
+            ]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 
 private final class BlockedDownloadProtocol: URLProtocol, @unchecked Sendable {
@@ -1091,9 +1305,9 @@ private func gatedCache(root: URL, songID: Int64, gate: CacheLookupGate) async t
     return TrackCache(directory: directory, beforeReadyLookup: { await gate.wait() })
 }
 
-private func waitForLookup(_ gate: CacheLookupGate) async throws {
+private func waitForLookup(_ gate: CacheLookupGate, count: Int = 1) async throws {
     for _ in 0..<200 {
-        if await gate.starts > 0 { return }
+        if await gate.starts >= count { return }
         try await Task.sleep(for: .milliseconds(5))
     }
     Issue.record("cache lookup did not start")

@@ -58,6 +58,9 @@ swiftc -parse-as-library -warnings-as-errors \
   Sources/TinyCloudMusic/Models.swift \
   Sources/TinyCloudMusic/Repository.swift \
   Sources/TinyCloudMusic/TrackCache.swift \
+  Sources/TinyCloudMusic/StreamingByteRange.swift \
+  Sources/TinyCloudMusic/TrackRangeCache.swift \
+  Sources/TinyCloudMusic/AudioRangeResourceLoader.swift \
   Sources/TinyCloudMusic/PlayerController.swift \
   Checks/PersonalFMQueueCheck.swift \
   -o /tmp/tinycloudmusic-personal-fm-queue-check

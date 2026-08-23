@@ -116,13 +116,30 @@ final class LocalHTTPFixture: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "TinyCloudMusicTests.LocalHTTPFixture")
     private let response: @Sendable (Data) -> Data
+    private let initialResponseDelay: Duration
+    private let sendChunkSize: Int
+    private let sendChunkDelay: Duration
     private let lock = NSLock()
     private var startContinuation: CheckedContinuation<UInt16, Error>?
     private var capturedRequests: [String] = []
+    private var capturedResponseCount = 0
+    private var capturedResponsePayloadBytes = 0
 
-    private init(response: @escaping @Sendable (Data) -> Data) throws {
+    init(
+        response: @escaping @Sendable (Data) -> Data,
+        initialResponseDelay: Duration = .zero,
+        sendChunkSize: Int = .max,
+        sendChunkDelay: Duration = .zero
+    ) throws {
+        guard sendChunkSize > 0,
+              initialResponseDelay >= .zero,
+              sendChunkDelay >= .zero
+        else { throw POSIXError(.EINVAL) }
         listener = try NWListener(using: .tcp, on: .any)
         self.response = response
+        self.initialResponseDelay = initialResponseDelay
+        self.sendChunkSize = sendChunkSize
+        self.sendChunkDelay = sendChunkDelay
     }
 
     convenience init(response: Data) throws {
@@ -214,8 +231,16 @@ final class LocalHTTPFixture: @unchecked Sendable {
     }
 
     func stop() { listener.cancel() }
-    func resetRequests() { lock.withLock { capturedRequests = [] } }
+    func resetRequests() {
+        lock.withLock {
+            capturedRequests = []
+            capturedResponseCount = 0
+            capturedResponsePayloadBytes = 0
+        }
+    }
     var requests: [String] { lock.withLock { capturedRequests } }
+    var responseCount: Int { lock.withLock { capturedResponseCount } }
+    var responsePayloadBytes: Int { lock.withLock { capturedResponsePayloadBytes } }
 
     private func finishStart(_ result: Result<UInt16, Error>) {
         let continuation = lock.withLock {
@@ -240,13 +265,70 @@ final class LocalHTTPFixture: @unchecked Sendable {
                 self.lock.withLock {
                     self.capturedRequests.append(String(decoding: request, as: UTF8.self))
                 }
-                connection.send(content: self.response(request), completion: .contentProcessed { _ in connection.cancel() })
+                self.send(self.response(request), on: connection)
             } else if error == nil, request.count < 64 * 1_024 {
                 self.receiveNext(on: connection, accumulated: request)
             } else {
                 connection.cancel()
             }
         }
+    }
+
+    private func send(_ response: Data, on connection: NWConnection) {
+        let separator = Data("\r\n\r\n".utf8)
+        let bodyStart = response.range(of: separator)?.upperBound ?? response.endIndex
+        schedule(after: initialResponseDelay) { [weak self] in
+            guard let self else {
+                connection.cancel()
+                return
+            }
+            self.sendChunk(response, from: response.startIndex, bodyStart: bodyStart, on: connection)
+        }
+    }
+
+    private func sendChunk(
+        _ response: Data,
+        from offset: Data.Index,
+        bodyStart: Data.Index,
+        on connection: NWConnection
+    ) {
+        let count = min(sendChunkSize, response.distance(from: offset, to: response.endIndex))
+        let end = response.index(offset, offsetBy: count)
+        let payloadBytes = max(0, end - max(offset, bodyStart))
+        connection.send(
+            content: response.subdata(in: offset..<end),
+            completion: .contentProcessed { [weak self] error in
+                guard let self, error == nil else {
+                    connection.cancel()
+                    return
+                }
+                self.lock.withLock {
+                    if offset == response.startIndex { self.capturedResponseCount += 1 }
+                    self.capturedResponsePayloadBytes += payloadBytes
+                }
+                guard end < response.endIndex else {
+                    connection.cancel()
+                    return
+                }
+                self.schedule(after: self.sendChunkDelay) { [weak self] in
+                    guard let self else {
+                        connection.cancel()
+                        return
+                    }
+                    self.sendChunk(response, from: end, bodyStart: bodyStart, on: connection)
+                }
+            }
+        )
+    }
+
+    private func schedule(after delay: Duration, action: @escaping @Sendable () -> Void) {
+        guard delay > .zero else {
+            action()
+            return
+        }
+        let components = delay.components
+        let seconds = Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000
+        queue.asyncAfter(deadline: .now() + seconds, execute: action)
     }
 }
 
@@ -2120,6 +2202,169 @@ struct TransportSessionPerformanceTests {
         var upload = URLRequest(url: original)
         upload.setValue("fixture-token", forHTTPHeaderField: "x-nos-token")
         #expect(SensitiveHeaderRedirectPolicy.requiresProtection(upload))
+    }
+
+    @Test("Local HTTP fixture validates shaping parameters")
+    func localHTTPFixtureRejectsInvalidShaping() {
+        #expect(throws: POSIXError.self) {
+            try LocalHTTPFixture(response: { _ in Data() }, sendChunkSize: 0)
+        }
+        #expect(throws: POSIXError.self) {
+            try LocalHTTPFixture(response: { _ in Data() }, initialResponseDelay: .milliseconds(-1))
+        }
+        #expect(throws: POSIXError.self) {
+            try LocalHTTPFixture(response: { _ in Data() }, sendChunkDelay: .milliseconds(-1))
+        }
+    }
+
+    @Test("Local HTTP fixture tracks scripted payload bytes and resets all metrics")
+    func localHTTPFixtureTracksScriptedPayloadAndReset() async throws {
+        let calls = LockedCounter()
+        let fixture = try LocalHTTPFixture(response: { _ in
+            calls.increment()
+            let body = calls.count == 1 ? Data("abc".utf8) : Data("12345".utf8)
+            return fixtureHTTPResponse("200 OK", body: body)
+        })
+        let port = try await fixture.start()
+        defer { fixture.stop() }
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let url = URL(string: "http://127.0.0.1:\(port)/metrics")!
+
+        let first = try await session.data(from: url.appendingPathComponent("first")).0
+        let second = try await session.data(from: url.appendingPathComponent("second")).0
+
+        #expect(first == Data("abc".utf8))
+        #expect(second == Data("12345".utf8))
+        #expect(fixture.requests.count == 2)
+        #expect(fixture.responseCount == 2)
+        #expect(fixture.responsePayloadBytes == 8)
+
+        fixture.resetRequests()
+        #expect(fixture.requests.isEmpty)
+        #expect(fixture.responseCount == 0)
+        #expect(fixture.responsePayloadBytes == 0)
+    }
+
+    @Test("Local HTTP fixture preserves short partial responses")
+    func localHTTPFixturePreservesShortPartialResponses() async throws {
+        let calls = LockedCounter()
+        let fixture = try LocalHTTPFixture(response: { _ in
+            calls.increment()
+            if calls.count == 1 {
+                return fixtureHTTPResponse(
+                    "206 Partial Content",
+                    headers: ["Content-Range": "bytes 2-3/10"],
+                    body: Data("cd".utf8)
+                )
+            }
+            return fixtureHTTPResponse(
+                "206 Partial Content",
+                headers: ["Content-Range": "bytes 7-9/10"],
+                body: Data("789".utf8)
+            )
+        })
+        let port = try await fixture.start()
+        defer { fixture.stop() }
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let url = URL(string: "http://127.0.0.1:\(port)/partial")!
+
+        var firstRequest = URLRequest(url: url.appendingPathComponent("first"))
+        firstRequest.setValue("bytes=2-3", forHTTPHeaderField: "Range")
+        let (firstData, firstResponse) = try await session.data(for: firstRequest)
+        let firstHTTP = try #require(firstResponse as? HTTPURLResponse)
+        var secondRequest = URLRequest(url: url.appendingPathComponent("second"))
+        secondRequest.setValue("bytes=7-9", forHTTPHeaderField: "Range")
+        let (secondData, secondResponse) = try await session.data(for: secondRequest)
+        let secondHTTP = try #require(secondResponse as? HTTPURLResponse)
+
+        #expect(firstHTTP.statusCode == 206)
+        #expect(firstHTTP.value(forHTTPHeaderField: "Content-Range") == "bytes 2-3/10")
+        #expect(firstData == Data("cd".utf8))
+        #expect(secondHTTP.statusCode == 206)
+        #expect(secondHTTP.value(forHTTPHeaderField: "Content-Range") == "bytes 7-9/10")
+        #expect(secondData == Data("789".utf8))
+        #expect(fixture.requests.count == 2)
+        #expect(fixture.responseCount == 2)
+        #expect(fixture.responsePayloadBytes == 5)
+    }
+
+    @Test("Local HTTP fixture sends shaped chunks without duplicating completion or metrics")
+    func localHTTPFixtureSendsShapedChunksOnce() async throws {
+        let body = Data("chunked-body".utf8)
+        let fixture = try LocalHTTPFixture(
+            response: { _ in fixtureHTTPResponse("200 OK", body: body) },
+            initialResponseDelay: .milliseconds(1),
+            sendChunkSize: 2,
+            sendChunkDelay: .milliseconds(1)
+        )
+        let port = try await fixture.start()
+        defer { fixture.stop() }
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let completions = LockedCounter()
+        let url = URL(string: "http://127.0.0.1:\(port)/chunks")!
+
+        let received = try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Data, Error>) in
+            session.dataTask(with: url) { data, _, error in
+                completions.increment()
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: data ?? Data())
+                }
+            }.resume()
+        }
+
+        #expect(received == body)
+        #expect(completions.count == 1)
+        #expect(fixture.responseCount == 1)
+        #expect(fixture.responsePayloadBytes == body.count)
+    }
+
+    @Test("Local HTTP fixture stops counting unprocessed payload after cancellation")
+    func localHTTPFixtureStopsMetricsAfterCancellation() async throws {
+        let body = Data(repeating: 0x78, count: 64 * 1_024)
+        let fixture = try LocalHTTPFixture(
+            response: { _ in fixtureHTTPResponse("200 OK", body: body) },
+            sendChunkSize: 128,
+            sendChunkDelay: .milliseconds(10)
+        )
+        let port = try await fixture.start()
+        defer { fixture.stop() }
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let url = URL(string: "http://127.0.0.1:\(port)/cancel")!
+        let transfer = Task { try await session.data(from: url) }
+
+        let started = await eventually { fixture.responsePayloadBytes > 0 }
+        #expect(started)
+        transfer.cancel()
+        _ = try? await transfer.value
+
+        var lastPayloadBytes = fixture.responsePayloadBytes
+        var stableSamples = 0
+        for _ in 0..<40 {
+            try await Task.sleep(for: .milliseconds(25))
+            let currentPayloadBytes = fixture.responsePayloadBytes
+            if currentPayloadBytes == lastPayloadBytes {
+                stableSamples += 1
+                if stableSamples == 3 { break }
+            } else {
+                lastPayloadBytes = currentPayloadBytes
+                stableSamples = 0
+            }
+        }
+        let stoppedPayloadBytes = fixture.responsePayloadBytes
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(stableSamples == 3)
+        #expect(stoppedPayloadBytes > 0)
+        #expect(stoppedPayloadBytes < body.count)
+        #expect(fixture.responsePayloadBytes == stoppedPayloadBytes)
+        #expect(fixture.responseCount == 1)
     }
 
     @Test("URLSession control follows redirect but sensitive headers never cross origin")

@@ -123,6 +123,7 @@ final actor TrackCache {
     }
 
     private static let supportedExtensions = ["mp3", "flac", "ogg", "wav", "m4a"]
+    private static let quotaExtensions = Set(supportedExtensions + ["range"])
     private nonisolated static let registry = TrackCacheRegistry()
 
     nonisolated let directory: URL
@@ -238,6 +239,7 @@ final actor TrackCache {
         if let ready = await readyFile(for: songID, quality: quality) {
             return ready
         }
+        try Task.checkCancellation()
         guard clearDepth == 0, generation == cacheGeneration else { throw CancellationError() }
         let key = Key(songID: songID, quality: Self.cacheComponent(quality))
 
@@ -301,6 +303,12 @@ final actor TrackCache {
         storedExtension: String? = nil
     ) throws -> URL {
         guard clearDepth == 0 else { throw CancellationError() }
+        if let cached = try existingCachedFile(for: songID, quality: quality) {
+            if downloadedFile.standardizedFileURL != cached.url.standardizedFileURL {
+                try? FileManager.default.removeItem(at: downloadedFile)
+            }
+            return cached.url
+        }
         let url = try Self.finalize(
             downloadedFile,
             for: songID,
@@ -318,13 +326,21 @@ final actor TrackCache {
         quality: String,
         fileExtension: String
     ) async throws -> CachedFile {
+        try Task.checkCancellation()
         let generation = cacheGeneration
         if let cached = await readyCachedFile(for: songID, quality: quality) { return cached }
+        try Task.checkCancellation()
         guard clearDepth == 0, generation == cacheGeneration else { throw CancellationError() }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let staged = directory.appending(path: "\(UUID().uuidString).cache-part")
         defer { try? FileManager.default.removeItem(at: staged) }
         try FileManager.default.copyItem(at: source, to: staged)
+        try Task.checkCancellation()
+        if let cached = try existingCachedFile(
+            for: songID,
+            quality: quality,
+            returningProtected: source.pathExtension.lowercased() == "range"
+        ) { return cached }
         _ = try Self.finalize(
             staged,
             for: songID,
@@ -332,11 +348,48 @@ final actor TrackCache {
             storedExtension: fileExtension,
             directory: directory
         )
-        guard let cached = await readyCachedFile(for: songID, quality: quality) else {
+        guard let cached = readyCachedFileNow(for: songID, quality: quality) else {
             throw TrackCacheError.emptyDownload
         }
         finalizeInstall(cached.url)
         return cached
+    }
+
+    func recordPartialFileAccess(_ url: URL) {
+        let url = url.standardizedFileURL
+        let path = url.path
+        guard manages(url),
+              url.pathExtension.lowercased() == "range",
+              !pendingDeletePaths.contains(path),
+              (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+        else { return }
+        finalizeInstall(url)
+    }
+
+    func invalidateCachedFile(_ url: URL) {
+        let url = url.standardizedFileURL
+        let path = url.path
+        guard manages(url),
+              Self.supportedExtensions.contains(url.pathExtension.lowercased()),
+              Self.audioFileInfo(at: url) != nil
+        else {
+            return
+        }
+        let matchingKeys = inFlight.keys.filter { key in
+            candidateURLs(for: key.songID, quality: key.quality)
+                .contains { $0.standardizedFileURL.path == path }
+        }
+        for key in matchingKeys {
+            guard let request = inFlight.removeValue(forKey: key) else { continue }
+            request.task.cancel()
+            request.waiters.values.forEach { $0.resume(throwing: CancellationError()) }
+        }
+        try? FileManager.default.removeItem(at: Self.metadataURL(for: url))
+        if pins[path] != nil {
+            pendingDeletePaths.insert(path)
+        } else {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     @discardableResult
@@ -500,13 +553,21 @@ final actor TrackCache {
                 return
             }
             do {
-                let url = try Self.finalize(
-                    temporaryURL,
+                let url: URL
+                if let cached = try existingCachedFile(
                     for: key.songID,
-                    quality: key.quality,
-                    storedExtension: nil,
-                    directory: directory
-                )
+                    quality: key.quality
+                ) {
+                    url = cached.url
+                } else {
+                    url = try Self.finalize(
+                        temporaryURL,
+                        for: key.songID,
+                        quality: key.quality,
+                        storedExtension: nil,
+                        directory: directory
+                    )
+                }
                 finalizeInstall(url)
                 settled = .success(url)
             } catch {
@@ -587,6 +648,27 @@ final actor TrackCache {
             .union([url.standardizedFileURL.path])
     }
 
+    private func existingCachedFile(
+        for songID: Int64,
+        quality: String,
+        returningProtected: Bool = false
+    ) throws -> CachedFile? {
+        if let cached = readyCachedFileNow(for: songID, quality: quality) { return cached }
+        var protectedFileExists = false
+        for url in candidateURLs(for: songID, quality: Self.cacheComponent(quality)) {
+            let path = url.standardizedFileURL.path
+            guard FileManager.default.fileExists(atPath: path),
+                  pins[path] != nil || pendingDeletePaths.contains(path)
+            else { continue }
+            protectedFileExists = true
+            if returningProtected, let info = Self.audioFileInfo(at: url) {
+                return CachedFile(url: url, fileExtension: info.fileExtension, size: info.size)
+            }
+        }
+        guard !protectedFileExists else { throw CocoaError(.fileWriteFileExists) }
+        return nil
+    }
+
     private func finalizeInstall(_ url: URL) {
         touch(url)
         trimCacheIfNeeded(keeping: protectedPaths(including: url))
@@ -604,20 +686,27 @@ final actor TrackCache {
         guard let enumerator = FileManager.default.enumerator(
             at: directory,
             includingPropertiesForKeys: [
-                .isRegularFileKey, .fileSizeKey, .contentAccessDateKey, .contentModificationDateKey
+                .isRegularFileKey, .fileSizeKey, .fileAllocatedSizeKey,
+                .contentAccessDateKey, .contentModificationDateKey
             ],
             options: [.skipsHiddenFiles]
         ) else { return }
 
         // ponytail: scan on completed fills; add a persistent index only if cache size makes this measurable.
         let files = enumerator.compactMap { value -> CacheFile? in
-            guard let url = value as? URL,
-                  Self.supportedExtensions.contains(url.pathExtension.lowercased()),
+            guard let url = value as? URL else { return nil }
+            let fileExtension = url.pathExtension.lowercased()
+            guard Self.quotaExtensions.contains(fileExtension),
                   let values = try? url.resourceValues(forKeys: [
-                      .isRegularFileKey, .fileSizeKey, .contentAccessDateKey, .contentModificationDateKey
+                      .isRegularFileKey, .fileSizeKey, .fileAllocatedSizeKey,
+                      .contentAccessDateKey, .contentModificationDateKey
                   ]),
-                  values.isRegularFile == true,
-                  let size = values.fileSize,
+                  values.isRegularFile == true
+            else { return nil }
+            let size = fileExtension == "range"
+                ? (values.fileAllocatedSize ?? values.fileSize)
+                : values.fileSize
+            guard let size,
                   size > 0
             else { return nil }
             return CacheFile(

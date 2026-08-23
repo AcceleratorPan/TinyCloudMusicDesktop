@@ -584,13 +584,13 @@ private struct IOSPlaybackProgress: View {
         VStack(spacing: 0) {
             Slider(
                 value: Binding(
-                    get: { isScrubbing ? scrubPosition : player.position },
+                    get: { isScrubbing ? scrubPosition : player.displayedPosition },
                     set: { scrubPosition = $0 }
                 ),
                 in: 0...max(player.duration, 1),
                 onEditingChanged: { editing in
                     if editing {
-                        scrubPosition = player.position
+                        scrubPosition = player.displayedPosition
                         isScrubbing = true
                     } else {
                         player.seek(to: scrubPosition)
@@ -601,11 +601,11 @@ private struct IOSPlaybackProgress: View {
             .disabled(player.currentSong == nil || player.isControlInteractionLocked)
             .accessibilityLabel("播放进度")
             .accessibilityValue(
-                "\(IOSDurationText.format(isScrubbing ? scrubPosition : player.position))，总时长 \(IOSDurationText.format(player.duration))"
+                "\(IOSDurationText.format(isScrubbing ? scrubPosition : player.displayedPosition))，总时长 \(IOSDurationText.format(player.duration))"
             )
 
             HStack {
-                Text(IOSDurationText.format(isScrubbing ? scrubPosition : player.position))
+                Text(IOSDurationText.format(isScrubbing ? scrubPosition : player.displayedPosition))
                 Spacer()
                 Text(IOSDurationText.format(player.duration))
             }

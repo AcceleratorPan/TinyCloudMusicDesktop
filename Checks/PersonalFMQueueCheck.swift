@@ -80,7 +80,7 @@ enum PersonalFMQueueCheck {
         }
         try await waitUntil("second crossfade report") { await localRepository.playbackStarts().count >= 2 }
         let requests = await localRepository.requests()
-        precondition(requests.contains("\(crossfadeSongs[1].id):quality:lossless"))
+        precondition(requests.contains("\(crossfadeSongs[1].id):level:lossless"))
         precondition(!requests.contains("\(crossfadeSongs[1].id):level:jymaster"))
         let playbackStarts = await localRepository.playbackStarts()
         precondition(playbackStarts == crossfadeSongs.map { "\($0.id):\($0.id)" })

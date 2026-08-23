@@ -1688,10 +1688,7 @@ final class MusicDownloadManager {
                             fileExtension: audio.source.type
                         )
                         if let stored, !cacheGeneration.isCurrent(cacheContext) {
-                            try? FileManager.default.removeItem(at: stored.url)
-                            try? FileManager.default.removeItem(
-                                at: stored.url.appendingPathExtension("metadata.plist")
-                            )
+                            await audioCache.invalidateCachedFile(stored.url)
                         }
                     }
                     cacheActivity.end()

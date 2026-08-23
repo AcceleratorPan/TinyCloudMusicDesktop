@@ -401,7 +401,11 @@ struct AppShellPerformanceTests {
         let library = try source("LibraryFeatureViews.swift", in: sourceRoot)
         let songPlaylists = try source("SongPlaylistViews.swift", in: sourceRoot)
         let home = try slice(views, from: "private struct HomeView", to: "private struct HomeSectionView")
-        let comment = try slice(comments, from: "struct CommentEmojiText", to: "#else")
+        let comment = try slice(
+            comments,
+            from: "struct CommentEmojiText",
+            to: "#else\n@main\nprivate enum CommentEmojiCheck"
+        )
         let recent = try slice(library, from: "struct ListeningHistoryView", to: "private struct RecentMediaRow")
         let menuPosition = try slice(
             app,
