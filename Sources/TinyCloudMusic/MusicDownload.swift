@@ -1516,7 +1516,10 @@ final class MusicDownloadManager {
                             cacheGeneration: cacheGeneration,
                             cacheActivity: cacheActivity,
                             transferDownload: transferDownload,
-                            configuration: configuration
+                            configuration: configuration,
+                            backgroundIdentifier: configuration.identifier.map {
+                                _ in MusicDownloadSession.identifier(forVideo: request.resource.identity)
+                            }
                         ) { update(nil, $0) }
                     } catch {
                         let recoveredResumeData = retryPolicy.resumeData(from: error) ?? resumeData

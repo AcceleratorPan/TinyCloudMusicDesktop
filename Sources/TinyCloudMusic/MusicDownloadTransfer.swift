@@ -23,6 +23,14 @@ enum MusicDownloadSession {
         "com.tinycloudmusic.downloads.audio.\(songID)"
     }
 
+    static func identifier(forVideo identity: String) -> String {
+        let encoded = Data(identity.utf8).base64EncodedString()
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "=", with: "")
+        return "com.tinycloudmusic.downloads.video.\(encoded)"
+    }
+
     static func configuration(
         from seed: URLSessionConfiguration,
         identifier: String?

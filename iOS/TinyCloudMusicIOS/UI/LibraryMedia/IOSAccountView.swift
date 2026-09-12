@@ -536,6 +536,7 @@ private struct IOSQRLoginView: View {
             }
         }
         .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
         .onAppear(perform: start)
         .onDisappear(perform: cancel)
         .onChange(of: scenePhase) { _, value in
@@ -928,6 +929,7 @@ private struct IOSPhoneLoginView: View {
             }
         }
         .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
         .onAppear { focusedField = .phone }
         .onDisappear {
             operationTask?.cancel()

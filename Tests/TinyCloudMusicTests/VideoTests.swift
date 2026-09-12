@@ -225,6 +225,19 @@ private func verifyVideoValidation() async throws {
         throw VideoCheckError.failed
     }
 
+    let validRedirectDelegate = VideoPlaybackRedirectDelegate()
+    var upgradedRedirect: URLRequest?
+    validRedirectDelegate.urlSession(
+        redirectSession,
+        task: redirectTask,
+        willPerformHTTPRedirection: redirectResponse,
+        newRequest: URLRequest(url: URL(string: "http://vod.126.net/redirected.mp4")!)
+    ) { upgradedRedirect = $0 }
+    guard upgradedRedirect?.url?.scheme == "https",
+          upgradedRedirect?.url?.host == "vod.126.net",
+          !validRedirectDelegate.rejectedUnsafeRedirect
+    else { throw VideoCheckError.failed }
+
     for resource in [CommentResource.mv(0), .video(" \n "), .video("https://example.com/video")] {
         do {
             _ = try resource.threadID()

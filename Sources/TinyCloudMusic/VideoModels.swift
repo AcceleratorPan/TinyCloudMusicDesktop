@@ -211,12 +211,16 @@ final class VideoPlaybackRedirectDelegate: NSObject, URLSessionTaskDelegate, @un
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
-        guard request.url.map(VideoPlaybackURLPolicy.isAllowed) == true else {
+        guard let url = request.url,
+              let normalizedURL = VideoPlaybackURLPolicy.normalized(url)
+        else {
             lock.withLock { rejectedRedirect = true }
             completionHandler(nil)
             return
         }
-        completionHandler(request)
+        var normalizedRequest = request
+        normalizedRequest.url = normalizedURL
+        completionHandler(normalizedRequest)
     }
 }
 

@@ -472,6 +472,8 @@ private struct IOSVideoDetailView: View {
     @State private var errorMessage: String?
     @State private var loadTask: Task<Void, Never>?
     @State private var loadRequest = LatestRecommendationRequest()
+    @State private var playerStatusObservation: NSKeyValueObservation?
+    @State private var playerFailureObserver: NSObjectProtocol?
 
     var body: some View {
         Group {
@@ -611,6 +613,7 @@ private struct IOSVideoDetailView: View {
             loadTask = nil
             resolutionTask?.cancel()
             resolutionTask = nil
+            clearPlaybackObservers()
             model.audioSession.endExternalPlayback(videoPlayer)
             videoPlayer?.pause()
             videoPlayer?.replaceCurrentItem(with: nil)
@@ -698,10 +701,11 @@ private struct IOSVideoDetailView: View {
             let playbackURL = try await VideoPlaybackURLResolver.resolve(source.url)
             try Task.checkCancellation()
             guard loadRequest.accepts(generation) else { return }
-            let external = AVPlayer(url: playbackURL)
+            let external = AVPlayer(playerItem: AVPlayerItem(url: playbackURL))
             videoPlayer = external
             selectedResolution = source.resolution
             activeResolution = source.resolution
+            installPlaybackObservers(for: external, generation: generation)
             model.audioSession.setExternalPlayer(external, title: loaded.title, creator: loaded.creator)
         } catch is CancellationError {
         } catch {
@@ -779,17 +783,19 @@ private struct IOSVideoDetailView: View {
             let playbackURL = try await VideoPlaybackURLResolver.resolve(source.url)
             try Task.checkCancellation()
             guard loadRequest.accepts(generation) else { return }
-            let replacement = AVPlayer(url: playbackURL)
+            let replacement = AVPlayer(playerItem: AVPlayerItem(url: playbackURL))
             if let position, position.isNumeric {
                 _ = await replacement.seek(to: position, toleranceBefore: .zero, toleranceAfter: .zero)
             }
             try Task.checkCancellation()
             guard loadRequest.accepts(generation) else { return }
+            clearPlaybackObservers()
             previousPlayer?.pause()
             previousPlayer?.replaceCurrentItem(with: nil)
             videoPlayer = replacement
             selectedResolution = source.resolution
             activeResolution = source.resolution
+            installPlaybackObservers(for: replacement, generation: generation)
             model.audioSession.setExternalPlayer(replacement, title: detail.title, creator: detail.creator, shouldPlay: shouldPlay)
         } catch is CancellationError {
             guard loadRequest.accepts(generation) else { return }
@@ -798,6 +804,62 @@ private struct IOSVideoDetailView: View {
             guard !Task.isCancelled, loadRequest.accepts(generation) else { return }
             selectedResolution = previousResolution
             playbackError = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func installPlaybackObservers(for player: AVPlayer, generation: Int) {
+        guard let item = player.currentItem else { return }
+        playerStatusObservation = item.observe(\.status, options: [.initial, .new]) { item, _ in
+            let status = item.status
+            let message = item.error?.localizedDescription
+            Task { @MainActor in
+                guard loadRequest.accepts(generation), videoPlayer === player else { return }
+                switch status {
+                case .readyToPlay:
+                    playbackError = nil
+                case .failed:
+                    failPlayback(player, message: message ?? "视频播放失败，请重试")
+                case .unknown:
+                    break
+                @unknown default:
+                    failPlayback(player, message: "视频播放状态无法识别")
+                }
+            }
+        }
+        playerFailureObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { notification in
+            let message = (notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?
+                .localizedDescription ?? "视频播放中断，请重试"
+            Task { @MainActor in
+                guard loadRequest.accepts(generation), videoPlayer === player else { return }
+                failPlayback(player, message: message)
+            }
+        }
+    }
+
+    @MainActor
+    private func failPlayback(_ player: AVPlayer, message: String) {
+        clearPlaybackObservers()
+        model.audioSession.endExternalPlayback(player)
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        videoPlayer = nil
+        activeResolution = nil
+        isSwitchingResolution = false
+        playbackError = message
+    }
+
+    @MainActor
+    private func clearPlaybackObservers() {
+        playerStatusObservation?.invalidate()
+        playerStatusObservation = nil
+        if let playerFailureObserver {
+            NotificationCenter.default.removeObserver(playerFailureObserver)
+            self.playerFailureObserver = nil
         }
     }
 

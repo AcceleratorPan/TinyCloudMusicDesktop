@@ -161,13 +161,16 @@ struct IOSNowPlayingView: View {
                     IOSListenTogetherView(controller: controller, player: player)
                 }
             }
-            .overlay(alignment: .top) {
-                IOSInteractionToast(message: model.interactionMessage)
-                    .padding(.top, 8)
-            }
         }
         .tint(.red)
         .preferredColorScheme(model.settings.appearance.iosColorScheme)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if model.interactionMessage != nil {
+                IOSInteractionToast(message: model.interactionMessage)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+            }
+        }
     }
 
     private var queuePositionText: String {
@@ -825,6 +828,7 @@ private struct IOSPlaybackQualityView: View {
             }
         }
         .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
         .task(id: retryRevision) { await load() }
     }
 
@@ -1266,6 +1270,7 @@ private struct IOSPlaybackQueueView: View {
             .toolbar { Button("完成") { dismiss() } }
         }
         .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 }
 

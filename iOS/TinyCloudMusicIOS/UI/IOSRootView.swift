@@ -82,10 +82,12 @@ struct IOSRootView: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
                     .background(.regularMaterial, in: Capsule())
-                    .padding(.top, 8)
+                    .padding(.top, 44)
+                    .safeAreaPadding(.top, 8)
             } else {
                 IOSInteractionToast(message: model.interactionMessage)
-                    .padding(.top, 8)
+                    .padding(.top, 44)
+                    .safeAreaPadding(.top, 8)
             }
         }
         .fullScreenCover(isPresented: $showingNowPlaying) {
@@ -103,6 +105,7 @@ struct IOSRootView: View {
             } else {
                 ContentUnavailableView("一起听不可用", systemImage: "person.2.slash")
                     .presentationDetents([.medium])
+                    .presentationDragIndicator(.visible)
             }
         }
         .task { await container.start() }
@@ -219,6 +222,7 @@ struct IOSRootView: View {
         } else {
             ContentUnavailableView("需要登录", systemImage: "person.crop.circle.badge.exclamationmark")
                 .presentationDetents([.medium])
+                .presentationDragIndicator(.visible)
         }
     }
 
@@ -349,6 +353,7 @@ private struct IOSAddSongToPlaylistView: View {
             }
         }
         .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
         .task(id: initialTaskIdentity) {
             await loadInitialPage(initialTaskIdentity)
         }

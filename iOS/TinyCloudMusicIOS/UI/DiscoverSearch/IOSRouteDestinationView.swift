@@ -188,10 +188,7 @@ private struct IOSArtistDetail: View {
                 circularArtwork: true,
                 saveArtwork: saveArtwork
             )
-            LazyVGrid(
-                columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible())],
-                spacing: 8
-            ) {
+            HStack(alignment: .center, spacing: 10) {
                 if let first = songs.first {
                     IOSDetailActionButton(
                         title: "播放热门歌曲",
@@ -200,12 +197,14 @@ private struct IOSArtistDetail: View {
                     ) {
                         player.play(first, in: songs)
                     }
+                    .frame(maxWidth: .infinity)
                 }
                 let followed = model.artistFollowOverrides[artist.id] ?? artist.isFollowed
                 let isUpdatingFollow = model.pendingMutations.contains(.artistFollow(artist.id))
                 IOSDetailActionButton(
                     title: followed ? "取消关注" : "关注",
                     symbol: followed ? "person.badge.minus" : "person.badge.plus",
+                    compact: true,
                     showsProgress: isUpdatingFollow,
                     disabled: model.currentUserID == nil || isUpdatingFollow
                 ) {
@@ -448,10 +447,7 @@ private struct IOSAlbumDetail: View {
                 openCreator: { model.open(.artist(album.artist.id)) },
                 saveArtwork: saveArtwork
             )
-            LazyVGrid(
-                columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible())],
-                spacing: 8
-            ) {
+            HStack(alignment: .center, spacing: 10) {
                 if let first = songs.first {
                     IOSDetailActionButton(
                         title: "全部播放（\(songs.count.formatted())）",
@@ -460,12 +456,14 @@ private struct IOSAlbumDetail: View {
                     ) {
                         player.play(first, in: songs)
                     }
+                    .frame(maxWidth: .infinity)
                 }
                 let subscribed = model.albumSubscriptionOverrides[album.id] ?? album.isSubscribed
                 let isUpdatingSubscription = model.pendingMutations.contains(.albumSubscription(album.id))
                 IOSDetailActionButton(
                     title: subscribed ? "取消收藏" : "收藏",
                     symbol: subscribed ? "star.slash" : "star",
+                    compact: true,
                     showsProgress: isUpdatingSubscription,
                     disabled: model.currentUserID == nil || isUpdatingSubscription
                 ) {
@@ -710,10 +708,7 @@ private struct IOSPlaylistDetail: View {
     }
 
     private var actions: some View {
-        LazyVGrid(
-            columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible())],
-            spacing: 8
-        ) {
+        VStack(alignment: .leading, spacing: 10) {
             if let first = songs.first {
                 IOSDetailActionButton(
                     title: "全部播放（\(songCount.formatted())）",
@@ -722,60 +717,70 @@ private struct IOSPlaylistDetail: View {
                 ) {
                     player.play(first, in: songs, allSongIDs: trackIDs, playlistID: playlist.id)
                 }
+                .frame(maxWidth: .infinity)
             }
-            if model.downloads != nil {
-                IOSDetailActionButton(
-                    title: isAddingDownloads ? "正在加入" : "全部下载",
-                    symbol: "arrow.down.circle",
-                    showsProgress: isAddingDownloads,
-                    disabled: trackIDs.isEmpty || isAddingDownloads
-                ) {
-                    downloadQuality = model.settings.quality
-                    showsDownloadOptions = true
-                }
-            }
-            if playlist.specialType != 5, unlikedSongCount > 0 {
-                IOSDetailActionButton(
-                    title: isFavoritingAll ? "正在收藏" : "全部收藏",
-                    symbol: "heart",
-                    showsProgress: isFavoritingAll,
-                    disabled: mutationContext == nil || isFavoritingAll
-                ) { confirmsFavoriteAll = true }
-            }
-            if model.currentUserID != playlist.creatorID {
-                let subscribed = model.playlistSubscriptionOverrides[playlist.id] ?? playlist.isSubscribed
-                IOSDetailActionButton(
-                    title: subscribed ? "取消收藏歌单" : "收藏歌单",
-                    symbol: subscribed ? "star.slash" : "star",
-                    disabled: model.currentUserID == nil
-                        || model.pendingMutations.contains(.playlistSubscription(playlist.id))
-                ) { model.setPlaylistSubscribed(playlist.id, subscribed: !subscribed) }
-            }
-            if canManagePlaylist {
-                Menu {
-                    Button("编辑歌单", systemImage: "pencil") { showsMetadataEditor = true }
-                    Button("更新封面", systemImage: "photo") { choosesCover = true }
-                    Button("歌曲排序", systemImage: "arrow.up.arrow.down") { showsSongOrder = true }
-                        .disabled(trackIDs.count < 2)
-                    if playlist.isPrivate {
-                        Divider()
-                        Button("设为公开", systemImage: "lock.open", role: .destructive) {
-                            confirmsPublish = true
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    if model.downloads != nil {
+                        IOSDetailActionButton(
+                            title: isAddingDownloads ? "正在加入" : "全部下载",
+                            symbol: "arrow.down.circle",
+                            compact: true,
+                            showsProgress: isAddingDownloads,
+                            disabled: trackIDs.isEmpty || isAddingDownloads
+                        ) {
+                            downloadQuality = model.settings.quality
+                            showsDownloadOptions = true
                         }
                     }
-                } label: {
-                    HStack(spacing: 7) {
-                        if isPreparingCover || isPublishing { ProgressView().controlSize(.small) }
-                        else { Image(systemName: "ellipsis.circle") }
-                        Text("管理歌单")
+                    if playlist.specialType != 5, unlikedSongCount > 0 {
+                        IOSDetailActionButton(
+                            title: isFavoritingAll ? "正在收藏" : "全部收藏",
+                            symbol: "heart",
+                            compact: true,
+                            showsProgress: isFavoritingAll,
+                            disabled: mutationContext == nil || isFavoritingAll
+                        ) { confirmsFavoriteAll = true }
                     }
-                    .frame(maxWidth: .infinity)
+                    if model.currentUserID != playlist.creatorID {
+                        let subscribed = model.playlistSubscriptionOverrides[playlist.id] ?? playlist.isSubscribed
+                        IOSDetailActionButton(
+                            title: subscribed ? "取消收藏歌单" : "收藏歌单",
+                            symbol: subscribed ? "star.slash" : "star",
+                            compact: true,
+                            disabled: model.currentUserID == nil
+                                || model.pendingMutations.contains(.playlistSubscription(playlist.id))
+                        ) { model.setPlaylistSubscribed(playlist.id, subscribed: !subscribed) }
+                    }
+                    if canManagePlaylist {
+                        Menu {
+                            Button("编辑歌单", systemImage: "pencil") { showsMetadataEditor = true }
+                            Button("更新封面", systemImage: "photo") { choosesCover = true }
+                            Button("歌曲排序", systemImage: "arrow.up.arrow.down") { showsSongOrder = true }
+                                .disabled(trackIDs.count < 2)
+                            if playlist.isPrivate {
+                                Divider()
+                                Button("设为公开", systemImage: "lock.open", role: .destructive) {
+                                    confirmsPublish = true
+                                }
+                            }
+                        } label: {
+                            VStack(spacing: 4) {
+                                if isPreparingCover || isPublishing { ProgressView().controlSize(.small) }
+                                else { Image(systemName: "ellipsis.circle") }
+                                Text("管理")
+                                    .font(.caption)
+                                    .lineLimit(1)
+                            }
+                            .frame(minWidth: 72, minHeight: 56)
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.roundedRectangle(radius: 8))
+                        .controlSize(.regular)
+                        .disabled(isPreparingCover || isPublishing)
+                        .accessibilityLabel(isPreparingCover ? "正在准备封面" : isPublishing ? "正在设为公开" : "管理歌单")
+                    }
                 }
-                .buttonStyle(.bordered)
-                .buttonBorderShape(.roundedRectangle(radius: 8))
-                .controlSize(.large)
-                .disabled(isPreparingCover || isPublishing)
-                .accessibilityLabel(isPreparingCover ? "正在准备封面" : isPublishing ? "正在设为公开" : "管理歌单")
             }
         }
         .frame(maxWidth: 440, alignment: .leading)
@@ -806,6 +811,7 @@ private struct IOSPlaylistDetail: View {
             }
         }
         .presentationDetents([.medium])
+        .presentationDragIndicator(.visible)
     }
 
     private var mutationContext: IOSPlaylistMutationContext? {
@@ -1699,13 +1705,18 @@ private struct IOSDetailActionButton: View {
     let title: String
     let symbol: String
     var prominent = false
+    var compact = false
     var showsProgress = false
     var disabled = false
     let action: () -> Void
 
     @ViewBuilder
     var body: some View {
-        if prominent {
+        if compact {
+            button
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+        } else if prominent {
             button
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
@@ -1716,22 +1727,39 @@ private struct IOSDetailActionButton: View {
 
     private var button: some View {
         Button(action: action) {
-            HStack(spacing: 7) {
-                if showsProgress {
-                    ProgressView().controlSize(.small)
+            Group {
+                if compact {
+                    VStack(spacing: 4) {
+                        icon
+                        Text(title)
+                            .font(.caption)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(minWidth: 72, minHeight: 56)
                 } else {
-                    Image(systemName: symbol)
+                    HStack(spacing: 7) {
+                        icon
+                        Text(title)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 44)
                 }
-                Text(title)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
             }
-            .frame(maxWidth: .infinity)
         }
         .disabled(disabled)
         .buttonBorderShape(.roundedRectangle(radius: 8))
-        .controlSize(.large)
         .accessibilityLabel(showsProgress ? "\(title)，处理中" : title)
+    }
+
+    @ViewBuilder
+    private var icon: some View {
+        if showsProgress {
+            ProgressView().controlSize(.small)
+        } else {
+            Image(systemName: symbol)
+        }
     }
 }
 
@@ -2309,6 +2337,7 @@ private struct IOSPlaylistSongOrderSheet: View {
             }
         }
         .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
         .interactiveDismissDisabled(isSaving || (!writeCompleted && draft != original))
         .task(id: loadID) { await loadSongs() }
         .onDisappear { saveTask?.cancel() }
@@ -2482,6 +2511,7 @@ private struct IOSPlaylistCoverUpdateSheet: View {
             }
         }
         .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
         .interactiveDismissDisabled(isSaving)
         .onDisappear { saveTask?.cancel() }
     }

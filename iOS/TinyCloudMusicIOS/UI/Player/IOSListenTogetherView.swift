@@ -97,6 +97,7 @@ struct IOSListenTogetherView: View {
             .toolbar { Button("完成") { dismiss() } }
         }
         .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
         .alert("结束一起听？", isPresented: $showingEndConfirmation) {
             Button("结束", role: .destructive) {
                 Task { await controller.endRoom() }

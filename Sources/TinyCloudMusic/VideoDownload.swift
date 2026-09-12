@@ -21,6 +21,7 @@ enum VideoFileDownload {
         cacheActivity: MusicDownloadCacheActivity? = nil,
         transferDownload: Transfer? = nil,
         configuration: URLSessionConfiguration = .ephemeral,
+        backgroundIdentifier: String? = nil,
         progress: @escaping @Sendable (Double?) -> Void
     ) async throws -> URL {
         guard VideoPlaybackURLPolicy.isAllowed(url), resolution > 0 else {
@@ -55,7 +56,8 @@ enum VideoFileDownload {
                             responseExpectedContentLength: responseExpected
                         )
                     },
-                    allowsRequest: { $0.url.map(VideoPlaybackURLPolicy.isAllowed) == true }
+                    allowsRequest: { $0.url.map(VideoPlaybackURLPolicy.isAllowed) == true },
+                    backgroundIdentifier: backgroundIdentifier
                 )
                 defer { transfer.invalidate() }
                 result = try await transfer.download(request: request, resumeData: resumeData)
