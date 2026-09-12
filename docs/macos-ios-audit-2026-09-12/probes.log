@@ -1,0 +1,5 @@
+{"extracted_source_sha256": "cf1d313eaabc1bb9f51aeffbccdd42b50d1571e1229131f72fde8dc24050b108", "note": "Actual merge method, offset expression and PDF installation helpers; UI lifecycle is not exercised."}
+cloud_offsets=[0, 30, 90, 180]
+cloud_expected_offsets=[0, 30, 60, 90]
+existing_sheet_file_preserved=false
+sheet_expected_preserved=true

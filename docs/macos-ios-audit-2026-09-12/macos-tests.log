@@ -1,0 +1,46 @@
+[0/1] Planning build
+Building for debugging...
+[0/4] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.82s)
+Test Suite 'Selected tests' started at 2026-09-12 10:39:28.719.
+Test Suite 'TinyCloudMusicPackageTests.xctest' started at 2026-09-12 10:39:28.720.
+Test Suite 'TinyCloudMusicPackageTests.xctest' passed at 2026-09-12 10:39:28.720.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-12 10:39:28.720.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1501
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "iOS audit remediation" started.
+◇ Test "Malformed lyric timestamps cannot overflow and valid boundary values remain intact" started.
+✔ Test "Malformed lyric timestamps cannot overflow and valid boundary values remain intact" passed after 0.003 seconds.
+◇ Test "Off-main lyrics retain results, bound oversized inputs and propagate cancellation" started.
+✔ Test "Off-main lyrics retain results, bound oversized inputs and propagate cancellation" passed after 0.025 seconds.
+◇ Test "Unique artwork saves preserve existing files, including concurrent saves" started.
+✔ Test "Unique artwork saves preserve existing files, including concurrent saves" passed after 0.003 seconds.
+◇ Test "Paused and completed audio/video records survive restart without transfer" started.
+✔ Test "Paused and completed audio/video records survive restart without transfer" passed after 0.026 seconds.
+◇ Test "Legacy records with unknown pause intent require explicit resume" started.
+✔ Test "Legacy records with unknown pause intent require explicit resume" passed after 0.005 seconds.
+◇ Test "Completed cloud downloads wait for their owner and survive logout" started.
+✔ Test "Completed cloud downloads wait for their owner and survive logout" passed after 0.003 seconds.
+◇ Test "Same-account credential replacement notifies observers without a state change" started.
+✔ Test "Same-account credential replacement notifies observers without a state change" passed after 0.001 seconds.
+◇ Test "Video subscription writes invalidate cached subscription lists" started.
+✔ Test "Video subscription writes invalidate cached subscription lists" passed after 0.008 seconds.
+✔ Suite "iOS audit remediation" passed after 0.078 seconds.
+◇ Suite "Music download infrastructure" started.
+◇ Test "Retry delay honors server backoff and paused resume data" started.
+✔ Test "Retry delay honors server backoff and paused resume data" passed after 0.001 seconds.
+◇ Test "Allocator reserves lyric targets across audio extensions" started.
+✔ Test "Allocator reserves lyric targets across audio extensions" passed after 0.001 seconds.
+◇ Test "Pending requests and resume data survive a new store instance" started.
+✔ Test "Pending requests and resume data survive a new store instance" passed after 0.005 seconds.
+◇ Test "Enumeration prunes expired records" started.
+✔ Test "Enumeration prunes expired records" passed after 0.001 seconds.
+◇ Test "Resume updates preserve original FIFO order" started.
+✔ Test "Resume updates preserve original FIFO order" passed after 0.039 seconds.
+◇ Test "Stale cleanup only removes UUID part files" started.
+✔ Test "Stale cleanup only removes UUID part files" passed after 0.001 seconds.
+✔ Suite "Music download infrastructure" passed after 0.048 seconds.
+✔ Test run with 14 tests in 2 suites passed after 0.126 seconds.

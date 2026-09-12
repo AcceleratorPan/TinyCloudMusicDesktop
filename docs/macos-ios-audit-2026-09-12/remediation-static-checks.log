@@ -1,0 +1,6 @@
+Checks/run-api-checks.sh: syntax OK; 18 compiler-driving entries use one job and disable batch mode
+Checks/run-listen-together-live-smoke.sh: syntax OK; 2 compiler-driving entries use one job and disable batch mode
+iOS/TinyCloudMusicIOS/Info.plist: OK
+iOS/TinyCloudMusicIOS/PrivacyInfo.xcprivacy: OK
+iOS/TinyCloudMusicIOS.xcodeproj/project.pbxproj: OK
+git diff --check: OK

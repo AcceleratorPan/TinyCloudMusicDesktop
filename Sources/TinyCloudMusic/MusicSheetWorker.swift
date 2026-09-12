@@ -1,4 +1,5 @@
 import CoreGraphics
+import Darwin
 import Foundation
 import ImageIO
 
@@ -123,7 +124,8 @@ actor MusicSheetWorker {
         return try Self.installPDF(
             at: source,
             to: Self.cacheURL(sheetID: sheetID, root: cacheRoot),
-            maximumBytes: Self.maximumDocumentBytes
+            maximumBytes: Self.maximumDocumentBytes,
+            replacingInvalidDestination: true
         )
     }
 
@@ -158,24 +160,44 @@ actor MusicSheetWorker {
             return MusicSheetSaveResult(url: destination, saved: false)
         }
         guard Self.isValidPDF(at: source) else { throw MusicSheetFileError.invalidPDF }
-        _ = try Self.installPDF(at: source, to: destination, maximumBytes: nil)
-        return MusicSheetSaveResult(url: destination, saved: true)
+        let savedURL = try Self.installPDF(
+            at: source, to: destination, maximumBytes: nil, replacingInvalidDestination: false
+        )
+        return MusicSheetSaveResult(url: savedURL, saved: true)
     }
 
-    func cleanupExpired() async {
-        cleanupExpired(now: Date())
+    func cleanupExpired(additionalRoots: [URL] = []) async {
+        cleanupExpired(now: Date(), additionalRoots: additionalRoots)
     }
 
-    func cleanupExpired(now: Date) {
+    func cleanupExpired(now: Date, additionalRoots: [URL] = []) {
         let manager = FileManager.default
-        guard let files = try? manager.contentsOfDirectory(
-            at: temporaryRoot,
-            includingPropertiesForKeys: [.contentModificationDateKey],
-            options: [.skipsHiddenFiles]
-        ) else { return }
-        for file in files {
-            let date = try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
-            if date.map({ now.timeIntervalSince($0) > 24 * 60 * 60 }) != false {
+        let keys: Set<URLResourceKey> = [
+            .contentModificationDateKey,
+            .isDirectoryKey,
+            .isRegularFileKey,
+            .isSymbolicLinkKey
+        ]
+        let cutoff = now.addingTimeInterval(-24 * 60 * 60)
+        for root in [temporaryRoot] + additionalRoots {
+            guard !Task.isCancelled else { return }
+            guard let values = try? root.resourceValues(forKeys: keys),
+                  values.isDirectory == true,
+                  values.isSymbolicLink == false
+            else { continue }
+            guard let files = try? manager.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: Array(keys),
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            for file in files {
+                guard !Task.isCancelled else { return }
+                guard let values = try? file.resourceValues(forKeys: keys),
+                      values.isRegularFile == true,
+                      values.isSymbolicLink == false,
+                      let date = values.contentModificationDate,
+                      date < cutoff
+                else { continue }
                 try? manager.removeItem(at: file)
             }
         }
@@ -379,7 +401,7 @@ actor MusicSheetWorker {
 
         let destination = try temporaryURL(fileExtension: fileExtension)
         do {
-            try FileManager.default.copyItem(at: downloaded, to: destination)
+            try MusicDownloadFiles.stageDownloadedFile(downloaded, at: destination)
             return destination
         } catch {
             removeTemporary(destination)
@@ -496,7 +518,8 @@ actor MusicSheetWorker {
     private static func installPDF(
         at source: URL,
         to destination: URL,
-        maximumBytes: Int?
+        maximumBytes: Int?,
+        replacingInvalidDestination: Bool
     ) throws -> URL {
         if isValidPDF(at: destination, maximumBytes: maximumBytes) { return destination }
         try FileManager.default.createDirectory(
@@ -507,6 +530,25 @@ actor MusicSheetWorker {
         defer { try? FileManager.default.removeItem(at: part) }
         try FileManager.default.copyItem(at: source, to: part)
         try Task.checkCancellation()
+        if !replacingInvalidDestination {
+            var candidate = destination
+            var suffix = 2
+            while true {
+                try Task.checkCancellation()
+                // Publish the staged file atomically without replacing another writer's file.
+                if renamex_np(part.path, candidate.path, UInt32(RENAME_EXCL)) == 0 {
+                    return candidate
+                }
+                let code = errno
+                guard code == EEXIST else {
+                    throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+                }
+                candidate = destination.deletingLastPathComponent()
+                    .appending(path: "\(destination.deletingPathExtension().lastPathComponent) (\(suffix))")
+                    .appendingPathExtension(destination.pathExtension)
+                suffix += 1
+            }
+        }
         if FileManager.default.fileExists(atPath: destination.path) {
             _ = try FileManager.default.replaceItemAt(destination, withItemAt: part)
         } else {

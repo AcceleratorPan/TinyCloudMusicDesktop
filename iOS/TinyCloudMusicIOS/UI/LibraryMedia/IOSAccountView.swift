@@ -18,6 +18,7 @@ struct IOSAccountView: View {
     @State private var isLoggingOut = false
     @State private var confirmsLogout = false
     @State private var selectedFolder: IOSFolderKind?
+    @State private var showsFolderPicker = false
     @State private var crossfadeDraft: TimeInterval?
     @State private var isClearingCache = false
     @State private var confirmsCacheClear = false
@@ -44,23 +45,22 @@ struct IOSAccountView: View {
         .tint(.red)
         .sheet(isPresented: $showsQRLogin) {
             if let session = model.session {
-                IOSQRLoginView(session: session, onSuccess: sessionDidChange)
+                IOSQRLoginView(session: session, onSuccess: { model.showToast("登录成功") })
             }
         }
         .sheet(isPresented: $showsPhoneLogin) {
             if let session = model.session {
-                IOSPhoneLoginView(session: session, onSuccess: sessionDidChange)
+                IOSPhoneLoginView(session: session, onSuccess: { model.showToast("登录成功") })
             }
         }
         .fileImporter(
-            isPresented: Binding(
-                get: { selectedFolder != nil },
-                set: { if !$0 { selectedFolder = nil } }
-            ),
+            isPresented: $showsFolderPicker,
             allowedContentTypes: [.folder],
             allowsMultipleSelection: false
         ) { result in
             handleFolderSelection(result)
+        } onCancellation: {
+            selectedFolder = nil
         }
         .alert("确定退出登录？", isPresented: $confirmsLogout) {
             Button("退出登录", role: .destructive) { logout() }
@@ -314,7 +314,10 @@ struct IOSAccountView: View {
     }
 
     private func folderRow(_ title: String, path: String, kind: IOSFolderKind) -> some View {
-        Button { selectedFolder = kind } label: {
+        Button {
+            selectedFolder = kind
+            showsFolderPicker = true
+        } label: {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title).foregroundStyle(.primary)
@@ -361,7 +364,7 @@ struct IOSAccountView: View {
             cookie = ""
             isSavingCookie = false
             if saved {
-                await sessionDidChange()
+                model.showToast("登录成功")
             } else {
                 message = "Cookie 未通过验证，未保存。"
             }
@@ -374,7 +377,6 @@ struct IOSAccountView: View {
             defer { isRefreshing = false }
             do {
                 if try await session.refresh() {
-                    await sessionDidChange()
                     model.showToast("登录已刷新")
                 } else {
                     message = "刷新后的会话未通过验证，原登录保持不变。"
@@ -390,7 +392,6 @@ struct IOSAccountView: View {
         isLoggingOut = true
         Task { @MainActor in
             let warning = await session.logout()
-            await sessionDidChange()
             isLoggingOut = false
             if let warning {
                 message = warning
@@ -398,14 +399,6 @@ struct IOSAccountView: View {
                 model.showToast("已退出登录")
             }
         }
-    }
-
-    @MainActor
-    private func sessionDidChange() async {
-        guard let session = model.session else { return }
-        player.setAccountCredentialRevision(session.credentialRevision)
-        await model.refreshAccountState()
-        if session.state == .authenticated { model.showToast("登录成功") }
     }
 
     private func verifyMusicU(_ session: SessionController) {

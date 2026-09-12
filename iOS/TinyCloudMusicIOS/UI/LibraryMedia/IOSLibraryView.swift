@@ -333,19 +333,21 @@ struct IOSLibraryView: View {
             let recommendedUsers = (try? await extras.recommendedUsers(expectedCredentialRevision: revision)) ?? []
             try Task.checkCancellation()
             guard library.transport.credentialSnapshotValue().revision == revision else { return }
-            model.storeLibrarySnapshot(
-                LibrarySnapshot(
-                    user: user,
-                    songs: loadedSongs,
-                    playlists: playlists,
-                    following: loadedFollowing,
-                    recommendedUsers: recommendedUsers
-                ),
-                playlistRevision: playlistRevision
+            let snapshot = LibrarySnapshot(
+                user: user,
+                songs: loadedSongs,
+                playlists: playlists,
+                following: loadedFollowing,
+                recommendedUsers: recommendedUsers
             )
+            model.storeLibrarySnapshot(snapshot, playlistRevision: playlistRevision)
             progressiveSnapshot = nil
             phase = .loaded
-            await model.refreshAccountState()
+            await model.refreshLikedSongIDs(
+                userID: snapshot.user.id,
+                playlists: snapshot.playlists,
+                credentialRevision: revision
+            )
         } catch is CancellationError {
         } catch {
             phase = progressiveSnapshot == nil ? .failed(error.localizedDescription) : .loaded
@@ -609,6 +611,7 @@ private struct IOSPlaylistManagerView: View {
     @State private var isPrivate = false
     @State private var editing: Playlist?
     @State private var deleting: Playlist?
+    @State private var isSavingOrder = false
     @State private var errorMessage: String?
 
     var body: some View {
@@ -650,11 +653,16 @@ private struct IOSPlaylistManagerView: View {
                         }
                     }
                     .onMove(perform: move)
+                    .moveDisabled(isSavingOrder || isLoading || isCreating)
                 }
             }
         }
         .navigationTitle("歌单管理")
-        .toolbar { EditButton() }
+        .disabled(isSavingOrder)
+        .toolbar {
+            if isSavingOrder { ProgressView().accessibilityLabel("正在保存歌单顺序") }
+            EditButton().disabled(isSavingOrder)
+        }
         .task { await reload(force: false) }
         .refreshable { await reload(force: true) }
         .sheet(item: $editing) { playlist in
@@ -695,6 +703,7 @@ private struct IOSPlaylistManagerView: View {
 
     @MainActor
     private func reload(force: Bool) async {
+        guard !isSavingOrder else { return }
         guard let library, let revision else {
             isLoading = false
             errorMessage = "当前登录状态已变化，请返回后重试。"
@@ -786,14 +795,13 @@ private struct IOSPlaylistManagerView: View {
     }
 
     private func move(from source: IndexSet, to destination: Int) {
+        guard !isSavingOrder, !isLoading, !isCreating, deleting == nil, let library, let revision else { return }
+        isSavingOrder = true
         let previous = playlists
         playlists.move(fromOffsets: source, toOffset: destination)
         let ordered = playlists
         Task { @MainActor in
-            guard let library, let revision else {
-                playlists = previous
-                return
-            }
+            defer { isSavingOrder = false }
             do {
                 try await library.updatePlaylistOrder(
                     ordered.map(\.id),
@@ -803,6 +811,7 @@ private struct IOSPlaylistManagerView: View {
                 publish(ordered)
                 model.showToast("歌单顺序已保存")
             } catch {
+                guard self.revision == revision else { return }
                 playlists = previous
                 errorMessage = error.localizedDescription
             }
@@ -1078,6 +1087,8 @@ private struct IOSRecentMediaLabel: View {
 }
 
 struct IOSCloudMusicView: View {
+    static let pageSize = 30
+
     @Bindable var model: AppModel
     @Bindable var player: PlayerController
     @State private var page: CloudSongPage?
@@ -1087,6 +1098,7 @@ struct IOSCloudMusicView: View {
     @State private var isImporting = false
     @State private var showsUploads = false
     @State private var uploadError: String?
+    @State private var loadRequest = LatestRecommendationRequest()
 
     var body: some View {
         Group {
@@ -1230,35 +1242,61 @@ struct IOSCloudMusicView: View {
 
     @MainActor
     private func load(reset: Bool, force: Bool) async {
-        guard let library = model.library, model.currentUserID != nil else {
+        guard !Task.isCancelled else { return }
+        guard let library = model.library, let userID = model.currentUserID else {
+            _ = loadRequest.begin()
             page = nil
+            isLoading = false
+            isLoadingMore = false
+            errorMessage = nil
             return
         }
         if reset {
+            _ = loadRequest.begin()
             isLoading = true
+            isLoadingMore = false
             errorMessage = nil
         } else {
-            guard !isLoadingMore else { return }
+            guard !isLoading, !isLoadingMore else { return }
             isLoadingMore = true
         }
+        let generation = loadRequest.generation
         let revision = revision
-        let offset = reset ? 0 : (page.map { $0.offset + $0.songs.count } ?? 0)
+        let offset = reset ? 0 : Self.nextOffset(after: page)
+        func isCurrent() -> Bool {
+            loadRequest.accepts(
+                generation,
+                accountID: userID,
+                credentialRevision: revision,
+                currentAccountID: model.currentUserID,
+                currentCredentialRevision: self.revision
+            )
+        }
+        defer {
+            if isCurrent() {
+                if reset { isLoading = false } else { isLoadingMore = false }
+            }
+        }
         do {
             let value = try await library.cloudSongs(
                 offset: offset,
+                limit: Self.pageSize,
                 forceRefresh: force,
                 expectedCredentialRevision: revision
             )
             try Task.checkCancellation()
-            guard self.revision == revision else { return }
+            guard isCurrent() else { return }
             page = reset ? value : page?.appending(value) ?? value
             errorMessage = nil
         } catch is CancellationError {
         } catch {
+            guard !Task.isCancelled, isCurrent() else { return }
             errorMessage = error.localizedDescription
         }
-        isLoading = false
-        isLoadingMore = false
+    }
+
+    static func nextOffset(after page: CloudSongPage?) -> Int {
+        page.map { $0.offset + pageSize } ?? 0
     }
 }
 
@@ -1268,6 +1306,7 @@ private struct IOSCloudSongDetailView: View {
     @Bindable var player: PlayerController
     @State private var detail: CloudSong?
     @State private var lyrics: SongLyrics?
+    @State private var lyricLines: [LyricLine] = []
     @State private var isLoading = true
     @State private var errorMessage: String?
 
@@ -1336,7 +1375,7 @@ private struct IOSCloudSongDetailView: View {
                     }
                 }
                 if let lyrics {
-                    lyricContent(lyrics)
+                    lyricContent(lyrics, lines: lyricLines)
                 } else if !isLoading, errorMessage == nil {
                     IOSLibraryEmptyRow(title: "暂无歌词", symbol: "text.quote")
                 }
@@ -1357,8 +1396,7 @@ private struct IOSCloudSongDetailView: View {
     }
 
     @ViewBuilder
-    private func lyricContent(_ lyrics: SongLyrics) -> some View {
-        let lines = LRCParser.parse(lyrics)
+    private func lyricContent(_ lyrics: SongLyrics, lines: [LyricLine]) -> some View {
         if lines.isEmpty {
             if lyrics.lineLyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 IOSLibraryEmptyRow(title: "暂无歌词", symbol: "text.quote")
@@ -1420,7 +1458,11 @@ private struct IOSCloudSongDetailView: View {
             )
             try Task.checkCancellation()
             guard self.revision == revision else { return }
-            lyrics = value
+            if lyrics != value {
+                let lines = try await LRCParser.parseOffMain(value)
+                guard self.revision == revision else { return }
+                (lyrics, lyricLines) = (value, lines)
+            }
         } catch is CancellationError {
             return
         } catch {
@@ -1431,33 +1473,58 @@ private struct IOSCloudSongDetailView: View {
     }
 }
 
+private struct IOSRecommendationDatesTaskIdentity: Equatable {
+    let accountID: Int64?
+    let credentialRevision: UInt64
+    let reloadRevision: Int
+}
+
+private struct IOSRecommendationSongsTaskIdentity: Equatable {
+    let accountID: Int64?
+    let credentialRevision: UInt64
+    let acceptedDatesRevision: Int
+    let selectedDate: RecommendationHistoryDate?
+    let detailRetryRevision: Int
+}
+
 struct IOSRecommendationHistoryView: View {
     @Bindable var model: AppModel
     @Bindable var player: PlayerController
     @State private var dates: [RecommendationHistoryDate] = []
-    @State private var selected: RecommendationHistoryDate?
+    @State private var requestState = RecommendationHistoryRequestState()
     @State private var songs: [Song] = []
-    @State private var isLoading = true
-    @State private var errorMessage: String?
+    @State private var acceptedDatesRevision = 0
+    @State private var datesReloadRevision = 0
+    @State private var detailRetryRevision = 0
+    @State private var consumedDetailRetryRevision = 0
+    @State private var datesRequest = LatestRecommendationRequest()
+    @State private var songsRequest = LatestRecommendationRequest()
+    @State private var loadedAccountID: Int64?
+    @State private var loadedCredentialRevision: UInt64?
+    @State private var isLoadingDates = true
+    @State private var isLoadingSongs = false
+    @State private var datesError: String?
+    @State private var songsError: String?
 
     var body: some View {
+        let datesIdentity = currentDatesIdentity
+        let songsIdentity = currentSongsIdentity
         Group {
             if model.currentUserID == nil {
                 IOSLibraryEmptyState(title: "登录后查看历史日推", symbol: "calendar")
-            } else if isLoading && dates.isEmpty {
+            } else if isLoadingDates {
                 IOSLibraryLoadingView(title: "正在载入历史日推")
-            } else if let errorMessage, dates.isEmpty {
-                IOSLibraryFailureView(title: "无法载入历史日推", message: errorMessage) {
-                    Task { await loadDates(force: true) }
+            } else if let datesError {
+                IOSLibraryFailureView(title: "无法载入历史日推", message: datesError) {
+                    datesReloadRevision &+= 1
                 }
+            } else if dates.isEmpty {
+                IOSLibraryEmptyState(title: "暂无历史日推", symbol: "calendar.badge.exclamationmark")
             } else {
                 VStack(spacing: 0) {
                     Picker("日期", selection: Binding(
-                        get: { selected },
-                        set: { value in
-                            selected = value
-                            Task { await loadSongs(force: false) }
-                        }
+                        get: { requestState.selectedDate },
+                        set: { requestState.selectedDate = $0 }
                     )) {
                         ForEach(dates) { date in
                             Text(date.value).tag(Optional(date))
@@ -1468,11 +1535,11 @@ struct IOSRecommendationHistoryView: View {
                     .padding(.horizontal, 16)
                     .frame(minHeight: 52)
                     Divider()
-                    if isLoading {
+                    if isLoadingSongs {
                         IOSLibraryLoadingView(title: "正在载入推荐歌曲")
-                    } else if let errorMessage {
-                        IOSLibraryFailureView(title: "无法载入推荐歌曲", message: errorMessage) {
-                            Task { await loadSongs(force: true) }
+                    } else if let songsError {
+                        IOSLibraryFailureView(title: "无法载入推荐歌曲", message: songsError) {
+                            detailRetryRevision &+= 1
                         }
                     } else if songs.isEmpty {
                         IOSLibraryEmptyState(title: "当天暂无推荐", symbol: "music.note")
@@ -1487,63 +1554,148 @@ struct IOSRecommendationHistoryView: View {
         }
         .navigationTitle("历史日推")
         .navigationBarTitleDisplayMode(.inline)
-        .task(id: "\(model.currentUserID ?? 0):\(revision)") { await loadDates(force: false) }
+        .task(id: datesIdentity) { await loadDates(identity: datesIdentity) }
+        .task(id: songsIdentity) { await loadSongs(identity: songsIdentity) }
     }
 
-    private var revision: UInt64 {
-        model.library?.transport.credentialSnapshotValue().revision ?? 0
-    }
-
-    @MainActor
-    private func loadDates(force: Bool) async {
-        guard let library = model.library, model.currentUserID != nil else { return }
-        isLoading = true
-        errorMessage = nil
-        let revision = revision
-        do {
-            let values = try await library.recommendationHistoryDates(
-                forceRefresh: force,
-                expectedCredentialRevision: revision
-            )
-            try Task.checkCancellation()
-            guard self.revision == revision else { return }
-            dates = values
-            selected = values.first
-            await loadSongs(force: force)
-        } catch is CancellationError {
-        } catch {
-            isLoading = false
-            errorMessage = error.localizedDescription
+    private var credentialRevision: UInt64 {
+        if let session = model.session {
+            _ = session.state
+            return session.credentialRevision
         }
+        return model.library?.transport.credentialSnapshotValue().revision ?? 0
+    }
+
+    private var currentDatesIdentity: IOSRecommendationDatesTaskIdentity {
+        IOSRecommendationDatesTaskIdentity(
+            accountID: model.currentUserID,
+            credentialRevision: credentialRevision,
+            reloadRevision: datesReloadRevision
+        )
+    }
+
+    private var currentSongsIdentity: IOSRecommendationSongsTaskIdentity {
+        IOSRecommendationSongsTaskIdentity(
+            accountID: model.currentUserID,
+            credentialRevision: credentialRevision,
+            acceptedDatesRevision: acceptedDatesRevision,
+            selectedDate: requestState.selectedDate,
+            detailRetryRevision: detailRetryRevision
+        )
     }
 
     @MainActor
-    private func loadSongs(force: Bool) async {
-        guard let library = model.library, let selected else {
-            songs = []
-            isLoading = false
+    private func loadDates(identity: IOSRecommendationDatesTaskIdentity) async {
+        guard identity == currentDatesIdentity else { return }
+        let generation = datesRequest.begin()
+        let force = requestState.beginDates(reload: identity.reloadRevision)
+        _ = songsRequest.begin()
+        songs = []
+        songsError = nil
+        isLoadingSongs = false
+        if loadedAccountID != identity.accountID
+            || loadedCredentialRevision != identity.credentialRevision {
+            dates = []
+        }
+        loadedAccountID = identity.accountID
+        loadedCredentialRevision = identity.credentialRevision
+        datesError = nil
+        guard let library = model.library, identity.accountID != nil else {
+            isLoadingDates = false
             return
         }
-        isLoading = true
-        errorMessage = nil
-        let revision = revision
+        isLoadingDates = true
         do {
-            let values = try await library.historicalDailyRecommendations(
-                on: selected,
-                availableDates: dates,
-                forceRefresh: force,
-                expectedCredentialRevision: revision
+            let root = try await library.transport.requestRecommendationHistory(
+                refreshCache: force,
+                expectedCredentialRevision: identity.credentialRevision
             )
             try Task.checkCancellation()
-            guard self.selected == selected, self.revision == revision else { return }
-            songs = values
-            isLoading = false
+            guard acceptsDates(identity, generation: generation) else { return }
+            let values = library.decodeRecommendationHistoryDates(root)
+            try Task.checkCancellation()
+            guard acceptsDates(identity, generation: generation) else { return }
+            dates = values
+            requestState.acceptDates(values, force: force)
+            acceptedDatesRevision &+= 1
+            isLoadingDates = false
         } catch is CancellationError {
         } catch {
-            guard self.selected == selected, self.revision == revision else { return }
-            isLoading = false
-            errorMessage = error.localizedDescription
+            guard !Task.isCancelled, acceptsDates(identity, generation: generation) else { return }
+            datesError = error.localizedDescription
+            isLoadingDates = false
         }
+    }
+
+    @MainActor
+    private func loadSongs(identity: IOSRecommendationSongsTaskIdentity) async {
+        guard identity == currentSongsIdentity else { return }
+        let generation = songsRequest.begin()
+        guard let library = model.library,
+              let selectedDate = identity.selectedDate,
+              identity.accountID != nil,
+              loadedAccountID == identity.accountID,
+              loadedCredentialRevision == identity.credentialRevision,
+              dates.contains(selectedDate)
+        else {
+            songs = []
+            songsError = nil
+            isLoadingSongs = false
+            return
+        }
+        var force = requestState.consumeDetailForce(for: selectedDate)
+        if consumedDetailRetryRevision != identity.detailRetryRevision {
+            consumedDetailRetryRevision = identity.detailRetryRevision
+            force = true
+        }
+        songs = []
+        songsError = nil
+        isLoadingSongs = true
+        do {
+            let root = try await library.transport.requestRecommendationHistory(
+                date: selectedDate.value,
+                refreshCache: force,
+                expectedCredentialRevision: identity.credentialRevision
+            )
+            try Task.checkCancellation()
+            guard acceptsSongs(identity, generation: generation) else { return }
+            let values = library.decodeHistoricalDailyRecommendations(root)
+            try Task.checkCancellation()
+            guard acceptsSongs(identity, generation: generation) else { return }
+            songs = values
+            isLoadingSongs = false
+        } catch is CancellationError {
+        } catch {
+            guard !Task.isCancelled, acceptsSongs(identity, generation: generation) else { return }
+            songsError = error.localizedDescription
+            isLoadingSongs = false
+        }
+    }
+
+    private func acceptsDates(_ identity: IOSRecommendationDatesTaskIdentity, generation: Int) -> Bool {
+        guard let accountID = identity.accountID, identity == currentDatesIdentity else { return false }
+        return datesRequest.accepts(
+            generation,
+            accountID: accountID,
+            credentialRevision: identity.credentialRevision,
+            currentAccountID: model.currentUserID,
+            currentCredentialRevision: credentialRevision
+        )
+    }
+
+    private func acceptsSongs(_ identity: IOSRecommendationSongsTaskIdentity, generation: Int) -> Bool {
+        guard let accountID = identity.accountID,
+              identity == currentSongsIdentity,
+              loadedAccountID == identity.accountID,
+              loadedCredentialRevision == identity.credentialRevision
+        else { return false }
+        return songsRequest.accepts(
+            generation,
+            accountID: accountID,
+            credentialRevision: identity.credentialRevision,
+            currentAccountID: model.currentUserID,
+            currentCredentialRevision: credentialRevision
+        )
     }
 }
 
@@ -2345,13 +2497,15 @@ struct IOSDownloadsView: View {
     @Bindable var manager: MusicDownloadManager
 
     var body: some View {
+        let songIDs = orderedSongIDs
+        let videoIDs = orderedVideoIDs
         List {
             if manager.states.isEmpty && manager.videoStates.isEmpty {
                 IOSLibraryEmptyRow(title: "暂无下载任务", symbol: "arrow.down.circle")
             } else {
-                if !orderedSongIDs.isEmpty {
+                if !songIDs.isEmpty {
                     Section("歌曲") {
-                        ForEach(orderedSongIDs, id: \.self) { id in
+                        ForEach(songIDs, id: \.self) { id in
                             if let item = manager.items[id], let state = manager.states[id] {
                                 IOSDownloadRow(
                                     title: item.title,
@@ -2366,9 +2520,9 @@ struct IOSDownloadsView: View {
                         }
                     }
                 }
-                if !orderedVideoIDs.isEmpty {
+                if !videoIDs.isEmpty {
                     Section("视频") {
-                        ForEach(orderedVideoIDs, id: \.self) { id in
+                        ForEach(videoIDs, id: \.self) { id in
                             if let item = manager.videoItems[id], let state = manager.videoStates[id] {
                                 IOSDownloadRow(
                                     title: item.title,

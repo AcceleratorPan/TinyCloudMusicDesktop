@@ -170,7 +170,6 @@ struct IOSRootView: View {
         } message: {
             Text(model.settingsMessage ?? "")
         }
-        .environment(\.dynamicTypeSize, systemDynamicTypeSize.oneStepSmaller.oneStepSmaller)
     }
 
     private func navigationStack<Content: View>(
@@ -262,26 +261,6 @@ private struct IOSCacheConfiguration: Equatable {
     let root: URL
 }
 
-extension DynamicTypeSize {
-    var oneStepSmaller: Self {
-        switch self {
-        case .xSmall: .xSmall
-        case .small: .xSmall
-        case .medium: .small
-        case .large: .medium
-        case .xLarge: .large
-        case .xxLarge: .xLarge
-        case .xxxLarge: .xxLarge
-        case .accessibility1: .xxxLarge
-        case .accessibility2: .accessibility1
-        case .accessibility3: .accessibility2
-        case .accessibility4: .accessibility3
-        case .accessibility5: .accessibility4
-        @unknown default: self
-        }
-    }
-}
-
 private struct IOSAddSongToPlaylistView: View {
     let song: Song
     let userID: Int64
@@ -292,9 +271,13 @@ private struct IOSAddSongToPlaylistView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var phase = Phase.loading
     @State private var retryRevision = 0
+    @State private var loadMoreRetryRevision = 0
+    @State private var loadMoreOwner: LoadMoreIdentity?
+    @State private var loadMoreError: String?
     @State private var operationError: String?
 
     var body: some View {
+        let initialTaskIdentity = initialLoadIdentity
         NavigationStack {
             Group {
                 switch phase {
@@ -308,42 +291,46 @@ private struct IOSAddSongToPlaylistView: View {
                     } actions: {
                         Button("重试") { retryRevision += 1 }
                     }
-                case let .loaded(playlists):
-                    if playlists.isEmpty {
+                case let .loaded(page):
+                    if page.playlists.isEmpty {
                         ContentUnavailableView(
                             "没有可用歌单",
                             systemImage: "music.note.list",
                             description: Text("创建歌单后可将这首歌添加进去")
                         )
                     } else {
-                        List(playlists) { item in
-                            Button { add(to: item) } label: {
-                                HStack(spacing: 12) {
-                                    IOSArtworkView(
-                                        artwork: Artwork(
-                                            symbol: "music.note.list",
-                                            accent: .red,
-                                            remoteURL: item.playlist.coverURL
-                                        ),
-                                        cornerRadius: 6
-                                    )
-                                    .frame(width: 44, height: 44)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(item.playlist.name).foregroundStyle(.primary).lineLimit(1)
-                                        Text("\(item.playlist.trackCount) 首 · \(item.playlist.creatorName)")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(1)
+                        List {
+                            ForEach(page.playlists) { item in
+                                Button { add(to: item) } label: {
+                                    HStack(spacing: 12) {
+                                        IOSArtworkView(
+                                            artwork: Artwork(
+                                                symbol: "music.note.list",
+                                                accent: .red,
+                                                remoteURL: item.playlist.coverURL
+                                            ),
+                                            cornerRadius: 6
+                                        )
+                                        .frame(width: 44, height: 44)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(item.playlist.name).foregroundStyle(.primary).lineLimit(1)
+                                            Text("\(item.playlist.trackCount) 首 · \(item.playlist.creatorName)")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
+                                        Spacer()
+                                        Image(systemName: item.containsTrack ? "checkmark.circle.fill" : "plus.circle")
+                                            .foregroundStyle(item.containsTrack ? Color.secondary : Color.red)
                                     }
-                                    Spacer()
-                                    Image(systemName: item.containsTrack ? "checkmark.circle.fill" : "plus.circle")
-                                        .foregroundStyle(item.containsTrack ? Color.secondary : Color.red)
+                                    .frame(minHeight: 52)
                                 }
-                                .frame(minHeight: 52)
+                                .disabled(item.containsTrack || isAdding)
+                                .accessibilityLabel(item.containsTrack ? "\(item.playlist.name)，已包含" : "添加到\(item.playlist.name)")
                             }
-                            .disabled(item.containsTrack || isAdding)
-                            .accessibilityLabel(item.containsTrack ? "\(item.playlist.name)，已包含" : "添加到\(item.playlist.name)")
+                            if page.hasMore { loadMoreFooter }
                         }
+                        .refreshable { retryRevision &+= 1 }
                     }
                 }
             }
@@ -362,10 +349,18 @@ private struct IOSAddSongToPlaylistView: View {
             }
         }
         .presentationDetents([.medium, .large])
-        .task(id: retryRevision) { await load() }
+        .task(id: initialTaskIdentity) {
+            await loadInitialPage(initialTaskIdentity)
+        }
     }
 
-    private var credentialRevision: UInt64 { library.transport.credentialSnapshotValue().revision }
+    private var credentialRevision: UInt64 {
+        if let session = model.session {
+            _ = session.state
+            return session.credentialRevision
+        }
+        return library.transport.credentialSnapshotValue().revision
+    }
 
     private var isAdding: Bool {
         model.pendingMutations.contains {
@@ -374,33 +369,109 @@ private struct IOSAddSongToPlaylistView: View {
         }
     }
 
-    private func load() async {
-        let revision = credentialRevision
-        guard model.currentUserID == userID else { return }
-        phase = .loading
-        do {
-            var offset = 0
-            var values: [MusicAvailablePlaylist] = []
-            var seen = Set<Int64>()
-            while true {
-                let page = try await extras.availablePlaylists(
-                    userID: userID,
-                    trackID: song.id,
-                    offset: offset,
-                    expectedCredentialRevision: revision
-                )
-                try Task.checkCancellation()
-                guard model.currentUserID == userID, credentialRevision == revision else { return }
-                let fresh = page.playlists.filter { seen.insert($0.id).inserted }
-                values.append(contentsOf: fresh)
-                phase = .loaded(values)
-                guard page.hasMore, page.offset > offset, !fresh.isEmpty else { return }
-                offset = page.offset
+    private var initialLoadIdentity: LoadIdentity {
+        LoadIdentity(
+            userID: userID,
+            trackID: song.id,
+            credentialRevision: credentialRevision,
+            retryRevision: retryRevision
+        )
+    }
+
+    private var loadMoreIdentity: LoadMoreIdentity {
+        LoadMoreIdentity(load: initialLoadIdentity, retryRevision: loadMoreRetryRevision)
+    }
+
+    private var isLoadingMore: Bool { loadMoreOwner != nil }
+
+    private var loadMoreFooter: some View {
+        let loadMoreTaskIdentity = loadMoreIdentity
+        return VStack(spacing: 8) {
+            if let loadMoreError {
+                IOSInlineRetry(message: loadMoreError) { loadMoreRetryRevision &+= 1 }
+            } else if isLoadingMore {
+                ProgressView("正在加载更多歌单")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 60)
+            } else {
+                Button {
+                    loadMoreRetryRevision &+= 1
+                } label: {
+                    Label("加载更多歌单", systemImage: "arrow.down.circle")
+                }
+                .frame(maxWidth: .infinity, minHeight: 60)
             }
+        }
+        .task(id: loadMoreTaskIdentity) {
+            await loadNextPage(loadMoreTaskIdentity)
+        }
+    }
+
+    private func loadInitialPage(_ identity: LoadIdentity) async {
+        guard identity == initialLoadIdentity, model.currentUserID == identity.userID else { return }
+        phase = .loading
+        loadMoreOwner = nil
+        loadMoreError = nil
+        do {
+            let page = try await extras.availablePlaylists(
+                userID: identity.userID,
+                trackID: identity.trackID,
+                offset: 0,
+                expectedCredentialRevision: identity.credentialRevision
+            )
+            try Task.checkCancellation()
+            guard identity == initialLoadIdentity, model.currentUserID == identity.userID else { return }
+            phase = .loaded(
+                MusicAvailablePlaylistPage(playlists: [], offset: 0, hasMore: true).appending(page)
+            )
         } catch is CancellationError {
         } catch {
-            guard model.currentUserID == userID, credentialRevision == revision else { return }
+            guard !Task.isCancelled,
+                  identity == initialLoadIdentity,
+                  model.currentUserID == identity.userID
+            else { return }
             phase = .failed(error.localizedDescription)
+        }
+    }
+
+    private func loadNextPage(_ identity: LoadMoreIdentity) async {
+        guard identity == loadMoreIdentity,
+              model.currentUserID == identity.load.userID,
+              case let .loaded(page) = phase,
+              page.hasMore,
+              loadMoreOwner != identity
+        else { return }
+        let offset = page.offset
+        loadMoreOwner = identity
+        loadMoreError = nil
+        defer {
+            if loadMoreOwner == identity { loadMoreOwner = nil }
+        }
+        do {
+            let next = try await extras.availablePlaylists(
+                userID: identity.load.userID,
+                trackID: identity.load.trackID,
+                offset: offset,
+                expectedCredentialRevision: identity.load.credentialRevision
+            )
+            try Task.checkCancellation()
+            guard loadMoreOwner == identity,
+                  identity == loadMoreIdentity,
+                  model.currentUserID == identity.load.userID,
+                  case let .loaded(current) = phase,
+                  current.offset == offset
+            else { return }
+            phase = .loaded(current.appending(next))
+        } catch is CancellationError {
+        } catch {
+            guard !Task.isCancelled,
+                  loadMoreOwner == identity,
+                  identity == loadMoreIdentity,
+                  model.currentUserID == identity.load.userID,
+                  case let .loaded(current) = phase,
+                  current.offset == offset
+            else { return }
+            loadMoreError = error.localizedDescription
         }
     }
 
@@ -416,7 +487,19 @@ private struct IOSAddSongToPlaylistView: View {
 
     private enum Phase: Equatable {
         case loading
-        case loaded([MusicAvailablePlaylist])
+        case loaded(MusicAvailablePlaylistPage)
         case failed(String)
+    }
+
+    private struct LoadIdentity: Equatable {
+        let userID: Int64
+        let trackID: Int64
+        let credentialRevision: UInt64
+        let retryRevision: Int
+    }
+
+    private struct LoadMoreIdentity: Equatable {
+        let load: LoadIdentity
+        let retryRevision: Int
     }
 }

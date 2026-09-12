@@ -35,6 +35,7 @@ enum SessionOperationError: LocalizedError, Equatable, Sendable {
 @Observable
 final class SessionController {
     typealias Validator = @Sendable (SessionCredentials) async throws -> Bool
+    typealias RestoreAccountValidator = @Sendable (SessionCredentials) async throws -> MusicLibraryUser?
     typealias VIPValidator = @Sendable (String) async throws -> Bool
     typealias BeforeLogout = @MainActor @Sendable () async -> Void
     typealias PersistCredentials = @Sendable (SessionCredentials?) throws -> Void
@@ -48,7 +49,10 @@ final class SessionController {
 
     private(set) var state: SessionState = .guest
     private(set) var isVIPVerified = false
-    var credentialRevision: UInt64 { credentialSnapshot.load().revision }
+    var credentialRevision: UInt64 {
+        access(keyPath: \.credentialRevision)
+        return credentialSnapshot.load().revision
+    }
     var credentials: SessionCredentials? {
         guard case let .authenticated(credentials) = credentialSnapshot.load().state else { return nil }
         return credentials
@@ -88,7 +92,10 @@ final class SessionController {
         state = Self.sessionState(for: self.credentialSnapshot.load().state)
     }
 
-    func restore() async {
+    @discardableResult
+    func restore(
+        accountValidator: RestoreAccountValidator? = nil
+    ) async -> ValidatedMusicLibraryAccount? {
         let operation = beginOperation()
         let initial = credentialSnapshot.load()
         var vipVerified = false
@@ -97,12 +104,14 @@ final class SessionController {
             switch initial.state {
             case .unavailable:
                 state = .error
-                return
+                return nil
             case .guest:
                 let guest = try await registerGuest(musicU: "")
+                try Task.checkCancellation()
                 try requireCurrent(operation)
+                guard credentialSnapshot.load() == initial else { return nil }
                 _ = try commit(guest, state: .guest, vipVerified: false)
-                return
+                return nil
             case let .authenticated(stored):
                 var current = stored
                 if current.deviceID.isEmpty {
@@ -117,16 +126,22 @@ final class SessionController {
                     let validationResult: Bool?
                     do {
                         validationResult = try await vipValidator(current.musicU)
+                    } catch is CancellationError {
+                        throw CancellationError()
                     } catch {
                         validationResult = nil
                     }
+                    try Task.checkCancellation()
                     try requireCurrent(operation)
+                    guard credentialSnapshot.load() == initial else { return nil }
                     if validationResult == false {
                         if current.cookie.isEmpty {
                             let guest = try await registerGuest(musicU: "")
+                            try Task.checkCancellation()
                             try requireCurrent(operation)
+                            guard credentialSnapshot.load() == initial else { return nil }
                             _ = try commit(guest, state: .guest, vipVerified: false)
-                            return
+                            return nil
                         }
                         current = try credentialsRemovingMusicU(from: current)
                     } else if validationResult == true {
@@ -134,11 +149,14 @@ final class SessionController {
                     }
                 }
 
+                guard credentialSnapshot.load() == initial else { return nil }
                 if current.cookie.isEmpty {
                     let guest = try await registerGuest(musicU: current.musicU)
+                    try Task.checkCancellation()
                     try requireCurrent(operation)
+                    guard credentialSnapshot.load() == initial else { return nil }
                     _ = try commit(guest, state: .guest, vipVerified: vipVerified)
-                    return
+                    return nil
                 }
                 if NeteaseCookieHeader.isGuest(current.cookie) {
                     if current != stored {
@@ -147,28 +165,55 @@ final class SessionController {
                         state = .guest
                         isVIPVerified = vipVerified
                     }
-                    return
+                    return nil
                 }
 
-                let isValid = try await validator(current)
+                let validatedUser: MusicLibraryUser?
+                let isValid: Bool
+                if let accountValidator {
+                    validatedUser = try await accountValidator(current)
+                    isValid = validatedUser != nil
+                } else {
+                    validatedUser = nil
+                    isValid = try await validator(current)
+                }
+                try Task.checkCancellation()
                 try requireCurrent(operation)
+                guard credentialSnapshot.load() == initial else { return nil }
                 if !isValid {
                     let guest = try await registerGuest(musicU: current.musicU)
+                    try Task.checkCancellation()
                     try requireCurrent(operation)
+                    guard credentialSnapshot.load() == initial else { return nil }
                     _ = try commit(guest, state: .guest, vipVerified: vipVerified)
+                    return nil
                 } else if current != stored {
                     _ = try commit(current, state: .authenticated, vipVerified: vipVerified)
                 } else {
                     state = .authenticated
                     isVIPVerified = vipVerified
                 }
+                try Task.checkCancellation()
+                try requireCurrent(operation)
+                guard let validatedUser else { return nil }
+                let final = credentialSnapshot.load()
+                guard case let .authenticated(finalCredentials) = final.state,
+                      finalCredentials.cookie == current.cookie
+                else { return nil }
+                return ValidatedMusicLibraryAccount(
+                    user: validatedUser,
+                    credentialRevision: final.revision
+                )
             }
         } catch SessionOperationError.superseded {
+            return nil
         } catch is CancellationError {
+            return nil
         } catch {
-            guard isCurrent(operation) else { return }
+            guard isCurrent(operation) else { return nil }
             state = .error
             isVIPVerified = vipVerified
+            return nil
         }
     }
 
@@ -508,7 +553,9 @@ final class SessionController {
         vipVerified: Bool
     ) throws -> CredentialSnapshotValue {
         try persistCredentials(credentials)
-        let value = credentialSnapshot.store(.authenticated(credentials))
+        let value = withMutation(keyPath: \.credentialRevision) {
+            credentialSnapshot.store(.authenticated(credentials))
+        }
         self.state = state
         isVIPVerified = vipVerified && !credentials.musicU.isEmpty
         return value
@@ -517,7 +564,7 @@ final class SessionController {
     @discardableResult
     private func commitGuest(state: SessionState) throws -> CredentialSnapshotValue {
         try persistCredentials(nil)
-        let value = credentialSnapshot.store(.guest)
+        let value = withMutation(keyPath: \.credentialRevision) { credentialSnapshot.store(.guest) }
         self.state = state
         isVIPVerified = false
         return value

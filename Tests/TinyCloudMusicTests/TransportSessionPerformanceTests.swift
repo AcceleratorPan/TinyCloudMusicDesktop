@@ -1958,6 +1958,302 @@ struct TransportSessionPerformanceTests {
         #expect(try store.load() == accountA)
     }
 
+    @Test("Restore returns a revision-tagged account without calling the Bool validator")
+    func restoreReturnsRevisionTaggedValidatedAccount() async throws {
+        let stored = try fakeCredentials("restore-account")
+        let snapshot = CredentialSnapshot(.authenticated(stored))
+        let boolCalls = LockedCounter()
+        let accountCalls = LockedCounter()
+        let validatedCredentials = CredentialsBox()
+        let user = fakeUser(7)
+        let session = SessionController(
+            store: CredentialStore(service: "TinyCloudMusicTests.\(UUID())"),
+            credentialSnapshot: snapshot,
+            transport: fixtureTransport(snapshot: snapshot),
+            validator: { _ in
+                boolCalls.increment()
+                return true
+            },
+            vipValidator: { _ in true }
+        )
+
+        let result = await session.restore(accountValidator: { credentials in
+            accountCalls.increment()
+            validatedCredentials.store(credentials)
+            return user
+        })
+
+        #expect(result == ValidatedMusicLibraryAccount(
+            user: user,
+            credentialRevision: snapshot.load().revision
+        ))
+        #expect(validatedCredentials.load() == stored)
+        #expect(accountCalls.count == 1)
+        #expect(boolCalls.count == 0)
+        #expect(session.state == .authenticated)
+    }
+
+    @Test("Restore without an account validator keeps the Bool validator path")
+    func restoreWithoutAccountValidatorUsesBoolValidator() async throws {
+        let stored = try fakeCredentials("restore-bool")
+        let snapshot = CredentialSnapshot(.authenticated(stored))
+        let boolCalls = LockedCounter()
+        let session = SessionController(
+            store: CredentialStore(service: "TinyCloudMusicTests.\(UUID())"),
+            credentialSnapshot: snapshot,
+            transport: fixtureTransport(snapshot: snapshot),
+            validator: { _ in
+                boolCalls.increment()
+                return true
+            },
+            vipValidator: { _ in true }
+        )
+
+        #expect(await session.restore() == nil)
+        #expect(boolCalls.count == 1)
+        #expect(session.state == .authenticated)
+        #expect(snapshot.load().state == .authenticated(stored))
+    }
+
+    @Test("A nil restore account follows the existing guest transition")
+    func nilRestoreAccountReturnsNil() async throws {
+        let store = CredentialStore(service: "TinyCloudMusicTests.\(UUID())")
+        defer { try? store.delete() }
+        let stored = try fakeCredentials("restore-nil")
+        try store.save(stored)
+        let snapshot = CredentialSnapshot(.authenticated(stored))
+        let boolCalls = LockedCounter()
+        let accountCalls = LockedCounter()
+        let deviceID = Self.deviceID
+        let session = SessionController(
+            store: store,
+            credentialSnapshot: snapshot,
+            transport: fixtureTransport(snapshot: snapshot),
+            validator: { _ in
+                boolCalls.increment()
+                return true
+            },
+            vipValidator: { _ in true },
+            guestRegistrar: {
+                NeteaseAuthenticationContext(cookie: "MUSIC_A=guest", deviceID: deviceID)
+            }
+        )
+
+        let result = await session.restore(accountValidator: { _ in
+            accountCalls.increment()
+            return nil
+        })
+
+        #expect(result == nil)
+        #expect(accountCalls.count == 1)
+        #expect(boolCalls.count == 0)
+        #expect(session.state == .guest)
+        #expect(NeteaseCookieHeader.isGuest(try #require(session.credentials).cookie))
+        #expect(try store.load() == session.credentials)
+    }
+
+    @Test("Restore validator errors never publish an account")
+    func restoreValidatorErrorReturnsNil() async throws {
+        let stored = try fakeCredentials("restore-error")
+        let snapshot = CredentialSnapshot(.authenticated(stored))
+        let initial = snapshot.load()
+        let session = SessionController(
+            store: CredentialStore(service: "TinyCloudMusicTests.\(UUID())"),
+            credentialSnapshot: snapshot,
+            transport: fixtureTransport(snapshot: snapshot),
+            validator: { _ in true },
+            vipValidator: { _ in true }
+        )
+
+        let result = await session.restore(accountValidator: { _ in
+            throw PersistenceFixtureError()
+        })
+
+        #expect(result == nil)
+        #expect(snapshot.load() == initial)
+        #expect(session.state == .error)
+    }
+
+    @Test("Cancelling restore never publishes an account")
+    func cancelledRestoreReturnsNil() async throws {
+        let stored = try fakeCredentials("restore-cancel")
+        let snapshot = CredentialSnapshot(.authenticated(stored))
+        let initial = snapshot.load()
+        let accountCalls = LockedCounter()
+        let user = fakeUser(8)
+        let session = SessionController(
+            store: CredentialStore(service: "TinyCloudMusicTests.\(UUID())"),
+            credentialSnapshot: snapshot,
+            transport: fixtureTransport(snapshot: snapshot),
+            validator: { _ in true },
+            vipValidator: { _ in true }
+        )
+        let restore = Task {
+            await session.restore(accountValidator: { _ in
+                accountCalls.increment()
+                try await Task.sleep(for: .seconds(60))
+                return user
+            })
+        }
+
+        #expect(await eventually { accountCalls.count == 1 })
+        restore.cancel()
+        let result = await restore.value
+
+        #expect(result == nil)
+        #expect(snapshot.load() == initial)
+        #expect(session.state == .authenticated)
+    }
+
+    @Test("A superseded restore cannot publish its old account")
+    func supersededRestoreReturnsNil() async throws {
+        let store = CredentialStore(service: "TinyCloudMusicTests.\(UUID())")
+        defer { try? store.delete() }
+        let stored = try fakeCredentials("restore-old")
+        try store.save(stored)
+        let snapshot = CredentialSnapshot(.authenticated(stored))
+        let accountGate = AsyncGate()
+        let accountCalls = LockedCounter()
+        let user = fakeUser(9)
+        let session = SessionController(
+            store: store,
+            credentialSnapshot: snapshot,
+            transport: fixtureTransport(snapshot: snapshot),
+            validator: { _ in true },
+            vipValidator: { _ in true }
+        )
+        let restore = Task {
+            await session.restore(accountValidator: { _ in
+                accountCalls.increment()
+                await accountGate.wait()
+                return user
+            })
+        }
+
+        #expect(await eventually { await accountGate.hasEntered() })
+        #expect(await session.save(cookie: "MUSIC_U=restore-new"))
+        let newLogin = snapshot.load()
+        await accountGate.release()
+        let result = await restore.value
+
+        #expect(result == nil)
+        #expect(accountCalls.count == 1)
+        #expect(snapshot.load() == newLogin)
+        #expect(session.credentials?.cookie.contains("MUSIC_U=restore-new") == true)
+        #expect(session.state == .authenticated)
+    }
+
+    @Test("Credential revision or cookie drift rejects a validated restore account")
+    func restoreRejectsCredentialDrift() async throws {
+        let user = fakeUser(10)
+
+        do {
+            let stored = try fakeCredentials("restore-revision-a")
+            let snapshot = CredentialSnapshot(.authenticated(stored))
+            let initialRevision = snapshot.load().revision
+            let session = SessionController(
+                store: CredentialStore(service: "TinyCloudMusicTests.\(UUID())"),
+                credentialSnapshot: snapshot,
+                transport: fixtureTransport(snapshot: snapshot),
+                validator: { _ in true },
+                vipValidator: { _ in true }
+            )
+
+            let result = await session.restore(accountValidator: { _ in
+                _ = snapshot.store(.authenticated(stored))
+                return user
+            })
+
+            #expect(result == nil)
+            #expect(snapshot.load().revision == initialRevision + 1)
+            #expect(snapshot.load().state == .authenticated(stored))
+        }
+
+        do {
+            let stored = try fakeCredentials("restore-cookie-a")
+            let replacement = try fakeCredentials("restore-cookie-b")
+            let snapshot = CredentialSnapshot(.authenticated(stored))
+            let session = SessionController(
+                store: CredentialStore(service: "TinyCloudMusicTests.\(UUID())"),
+                credentialSnapshot: snapshot,
+                transport: fixtureTransport(snapshot: snapshot),
+                validator: { _ in true },
+                vipValidator: { _ in true }
+            )
+
+            let result = await session.restore(accountValidator: { _ in
+                _ = snapshot.store(.authenticated(replacement))
+                return user
+            })
+
+            #expect(result == nil)
+            #expect(snapshot.load().state == .authenticated(replacement))
+        }
+    }
+
+    @Test("Restore keeps corrected credentials durable before publishing them")
+    func restoreCorrectionRemainsDurableFirst() async throws {
+        let stored = try SessionCredentials(cookie: "MUSIC_U=restore", musicU: "vip-restore")
+        let snapshot = CredentialSnapshot(.authenticated(stored))
+        let initial = snapshot.load()
+        let persisted = CredentialsBox()
+        let persistenceCalls = LockedCounter()
+        let user = fakeUser(11)
+        let session = SessionController(
+            store: CredentialStore(service: "TinyCloudMusicTests.\(UUID())"),
+            credentialSnapshot: snapshot,
+            transport: fixtureTransport(snapshot: snapshot),
+            validator: { _ in true },
+            vipValidator: { _ in true },
+            persistCredentials: { credentials in
+                persistenceCalls.increment()
+                persisted.store(credentials)
+                throw PersistenceFixtureError()
+            }
+        )
+
+        let result = await session.restore(accountValidator: { _ in user })
+
+        #expect(result == nil)
+        #expect(persistenceCalls.count == 1)
+        #expect(persisted.load()?.deviceID.isEmpty == false)
+        #expect(snapshot.load() == initial)
+        #expect(session.credentials == stored)
+        #expect(session.state == .error)
+    }
+
+    @Test("VIP correction returns only the final revision-tagged account")
+    func restoreVIPCorrectionReturnsFinalAccount() async throws {
+        let store = CredentialStore(service: "TinyCloudMusicTests.\(UUID())")
+        defer { try? store.delete() }
+        let stored = try fakeCredentials("restore-vip")
+        try store.save(stored)
+        let snapshot = CredentialSnapshot(.authenticated(stored))
+        let validatedCredentials = CredentialsBox()
+        let user = fakeUser(12)
+        let session = SessionController(
+            store: store,
+            credentialSnapshot: snapshot,
+            transport: fixtureTransport(snapshot: snapshot),
+            validator: { _ in true },
+            vipValidator: { _ in false }
+        )
+
+        let result = await session.restore(accountValidator: { credentials in
+            validatedCredentials.store(credentials)
+            return user
+        })
+
+        #expect(validatedCredentials.load()?.musicU.isEmpty == true)
+        #expect(result == ValidatedMusicLibraryAccount(
+            user: user,
+            credentialRevision: snapshot.load().revision
+        ))
+        #expect(try store.load() == session.credentials)
+        #expect(session.credentials?.musicU.isEmpty == true)
+        #expect(!session.isVIPVerified)
+    }
+
     @Test("An in-flight old QR 803 cannot commit after a newer login")
     func inFlightQRSuccessCannotOverwriteNewLogin() async throws {
         let store = CredentialStore(service: "TinyCloudMusicTests.\(UUID())")
@@ -2032,7 +2328,7 @@ struct TransportSessionPerformanceTests {
         #expect(await session.save(cookie: "MUSIC_U=new-login"))
         let newLogin = snapshot.load()
         await guestGate.release()
-        await restore.value
+        _ = await restore.value
 
         #expect(snapshot.load() == newLogin)
         #expect(newLogin.revision == 1)
@@ -2139,13 +2435,23 @@ struct TransportSessionPerformanceTests {
             validator: { _ in true },
             vipValidator: { _ in true }
         )
+        let validatedCredentials = CredentialsBox()
+        let user = fakeUser(13)
 
-        await session.restore()
+        let result = await session.restore(accountValidator: { credentials in
+            validatedCredentials.store(credentials)
+            return user
+        })
         let migrated = try #require(session.credentials)
+        #expect(validatedCredentials.load() == migrated)
         #expect(!migrated.deviceID.isEmpty)
         #expect(try store.load() == migrated)
         #expect(session.credentialRevision == snapshot.load().revision)
         #expect(transport.credentialSnapshotValue().revision == session.credentialRevision)
+        #expect(result == ValidatedMusicLibraryAccount(
+            user: user,
+            credentialRevision: session.credentialRevision
+        ))
     }
 
     @Test("Concurrent authentication requests keep response cookies isolated")
@@ -2489,6 +2795,23 @@ struct TransportSessionPerformanceTests {
             cookie: "MUSIC_U=\(token); __csrf=test",
             musicU: "vip-\(token)",
             deviceID: Self.deviceID
+        )
+    }
+
+    private func fakeUser(_ id: Int64) -> MusicLibraryUser {
+        MusicLibraryUser(
+            id: id,
+            nickname: "User \(id)",
+            signature: "",
+            detail: "",
+            avatarURL: nil,
+            gender: 0,
+            level: 1,
+            listenedSongCount: 0,
+            followerCount: 0,
+            followingCount: 0,
+            isFollowed: false,
+            followsCurrentUser: false
         )
     }
 

@@ -1,5 +1,75 @@
 import Foundation
 
+enum MusicDownloadSession {
+    static func defaultSession() -> URLSession {
+#if os(iOS)
+        let configuration = URLSessionConfiguration.background(
+            withIdentifier: "com.tinycloudmusic.downloads"
+        )
+        configuration.sessionSendsLaunchEvents = true
+        configuration.waitsForConnectivity = true
+        configuration.allowsExpensiveNetworkAccess = true
+        configuration.allowsConstrainedNetworkAccess = false
+        configuration.isDiscretionary = false
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 24 * 60 * 60
+        return URLSession(configuration: configuration)
+#else
+        return .shared
+#endif
+    }
+
+    static func identifier(for songID: Int64) -> String {
+        "com.tinycloudmusic.downloads.audio.\(songID)"
+    }
+
+    static func configuration(
+        from seed: URLSessionConfiguration,
+        identifier: String?
+    ) -> URLSessionConfiguration {
+#if os(iOS)
+        guard let baseIdentifier = seed.identifier ?? identifier else { return seed }
+        let configuration = URLSessionConfiguration.background(
+            withIdentifier: identifier ?? "\(baseIdentifier).\(UUID().uuidString)"
+        )
+        configuration.sessionSendsLaunchEvents = true
+        configuration.waitsForConnectivity = true
+        configuration.allowsExpensiveNetworkAccess = true
+        configuration.allowsConstrainedNetworkAccess = false
+        configuration.isDiscretionary = false
+        configuration.timeoutIntervalForRequest = seed.timeoutIntervalForRequest
+        configuration.timeoutIntervalForResource = seed.timeoutIntervalForResource
+        return configuration
+#else
+        _ = identifier
+        return seed
+#endif
+    }
+
+    static func isBackground(_ session: URLSession) -> Bool {
+#if os(iOS)
+        session.configuration.identifier != nil
+#else
+        _ = session
+        return false
+#endif
+    }
+}
+
+private final class MusicDownloadBackgroundEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completionHandlers: [String: () -> Void] = [:]
+
+    func store(identifier: String, completionHandler: @escaping () -> Void) {
+        lock.withLock { completionHandlers[identifier] = completionHandler }
+    }
+
+    func finish(identifier: String) {
+        let completion = lock.withLock { completionHandlers.removeValue(forKey: identifier) }
+        completion?()
+    }
+}
+
 struct MusicDownloadTransferResult: Sendable {
     let temporaryURL: URL
     let response: URLResponse
@@ -50,9 +120,13 @@ final class MusicDownloadTransfer: NSObject, URLSessionDownloadDelegate, @unchec
     init(
         session: URLSession,
         progress: @escaping @Sendable (Int64, Int64, Int64) -> Void,
-        allowsRequest: @escaping @Sendable (URLRequest) -> Bool = { _ in true }
+        allowsRequest: @escaping @Sendable (URLRequest) -> Bool = { _ in true },
+        backgroundIdentifier: String? = nil
     ) {
-        let configuration = session.configuration
+        let configuration = MusicDownloadSession.configuration(
+            from: session.configuration,
+            identifier: backgroundIdentifier
+        )
         self.progress = progress
         self.allowsRequest = allowsRequest
         super.init()
@@ -140,6 +214,15 @@ final class MusicDownloadTransfer: NSObject, URLSessionDownloadDelegate, @unchec
         transferSession.invalidateAndCancel()
         Self.resume(invalidated.1)
     }
+
+    static func registerBackgroundEvents(
+        identifier: String,
+        completionHandler: @escaping () -> Void
+    ) {
+        backgroundEvents.store(identifier: identifier, completionHandler: completionHandler)
+    }
+
+    private static let backgroundEvents = MusicDownloadBackgroundEvents()
 
     private func pause(id: UUID) {
         var shouldFinishWithoutTask = false
@@ -300,5 +383,10 @@ final class MusicDownloadTransfer: NSObject, URLSessionDownloadDelegate, @unchec
         completionHandler: @escaping @Sendable (URLRequest?) -> Void
     ) {
         completionHandler(allowsRequest(request) ? request : nil)
+    }
+
+    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        guard let identifier = session.configuration.identifier else { return }
+        Self.backgroundEvents.finish(identifier: identifier)
     }
 }

@@ -4,6 +4,22 @@ import PDFKit
 import SwiftUI
 import UIKit
 
+private struct IOSNativeVideoPlayer: UIViewControllerRepresentable {
+    let player: AVPlayer?
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        // The audio coordinator publishes metadata for music, videos and broadcasts.
+        controller.updatesNowPlayingInfoCenter = false
+        controller.player = player
+        return controller
+    }
+
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
+        if controller.player !== player { controller.player = player }
+    }
+}
+
 struct IOSMediaView: View {
     @Bindable private var model: AppModel
     @Bindable private var player: PlayerController
@@ -189,7 +205,7 @@ private struct IOSVideoRecommendationsView: View {
         }
         .navigationTitle("MV 与视频")
         .navigationBarTitleDisplayMode(.inline)
-        .task(id: "\(section.rawValue):\(loadIdentity)") { await load(section, force: false) }
+        .task(id: "\(section.rawValue):\(loadIdentity(for: section))") { await load(section, force: false) }
         .toolbar {
             ToolbarItem {
                 Button { Task { await load(section, force: true) } } label: { Image(systemName: "arrow.clockwise") }
@@ -203,8 +219,8 @@ private struct IOSVideoRecommendationsView: View {
         model.videoLibrary?.transport.credentialSnapshotValue().revision ?? 0
     }
 
-    private var loadIdentity: String {
-        "\(model.currentUserID ?? 0):\(revision)"
+    private func loadIdentity(for section: IOSVideoSection) -> String {
+        "\(model.currentUserID ?? 0):\(revision):\(section == .subscriptions ? model.videoSubscriptionRevision : 0)"
     }
 
     private var selectedState: IOSVideoSectionState? {
@@ -256,7 +272,7 @@ private struct IOSVideoRecommendationsView: View {
     @MainActor
     private func load(_ section: IOSVideoSection, force: Bool) async {
         let revision = revision
-        let identity = loadIdentity
+        let identity = loadIdentity(for: section)
         if states[section]?.identity != identity {
             states[section] = IOSVideoSectionState(identity: identity)
         } else if !force, states[section]?.hasLoaded == true {
@@ -304,7 +320,7 @@ private struct IOSVideoRecommendationsView: View {
             try Task.checkCancellation()
             guard states[section]?.identity == identity,
                   states[section]?.generation == generation,
-                  loadIdentity == identity,
+                  loadIdentity(for: section) == identity,
                   self.revision == revision
             else { return }
             states[section]?.items = loadedItems
@@ -316,7 +332,7 @@ private struct IOSVideoRecommendationsView: View {
         } catch {
             guard states[section]?.identity == identity,
                   states[section]?.generation == generation,
-                  loadIdentity == identity,
+                  loadIdentity(for: section) == identity,
                   self.revision == revision
             else { return }
             states[section]?.errorMessage = error.localizedDescription
@@ -332,6 +348,7 @@ private struct IOSVideoRecommendationsView: View {
         else { return }
         let generation = state.generation
         let identity = state.identity
+        guard loadIdentity(for: section) == identity else { return }
         let revision = revision
         states[section]?.isLoadingMore = true
         states[section]?.errorMessage = nil
@@ -353,6 +370,7 @@ private struct IOSVideoRecommendationsView: View {
                 try Task.checkCancellation()
                 guard states[section]?.identity == identity,
                       states[section]?.generation == generation,
+                      loadIdentity(for: section) == identity,
                       self.revision == revision,
                       states[section]?.nextOffset == offset
                 else { return }
@@ -369,6 +387,7 @@ private struct IOSVideoRecommendationsView: View {
                 try Task.checkCancellation()
                 guard states[section]?.identity == identity,
                       states[section]?.generation == generation,
+                      loadIdentity(for: section) == identity,
                       self.revision == revision,
                       states[section]?.subscriptionPage?.nextOffset == page.nextOffset
                 else { return }
@@ -451,6 +470,8 @@ private struct IOSVideoDetailView: View {
     @State private var detailRefreshError: String?
     @State private var mutationError: String?
     @State private var errorMessage: String?
+    @State private var loadTask: Task<Void, Never>?
+    @State private var loadRequest = LatestRecommendationRequest()
 
     var body: some View {
         Group {
@@ -458,13 +479,13 @@ private struct IOSVideoDetailView: View {
                 IOSLibraryLoadingView(title: "正在载入\(resource.displayName)")
             } else if let errorMessage, detail == nil {
                 IOSLibraryFailureView(title: "无法载入\(resource.displayName)", message: errorMessage) {
-                    Task { await load(force: true) }
+                    _ = startLoad(force: true)
                 }
             } else if let detail {
                 List {
                     Section {
                         ZStack {
-                            VideoPlayer(player: videoPlayer)
+                            IOSNativeVideoPlayer(player: videoPlayer)
                                 .aspectRatio(16 / 9, contentMode: .fit)
                                 .background(.black)
                                 .accessibilityLabel("\(detail.title)视频播放器")
@@ -502,7 +523,7 @@ private struct IOSVideoDetailView: View {
                     if let detailRefreshError {
                         Section("详情刷新失败") {
                             IOSInlineRetry(message: detailRefreshError) {
-                                Task { await load(force: true) }
+                                _ = startLoad(force: true)
                             }
                         }
                     }
@@ -570,18 +591,27 @@ private struct IOSVideoDetailView: View {
                 }
                 .listStyle(.insetGrouped)
                 .refreshable {
-                    await load(force: true)
+                    guard !Task.isCancelled else { return }
+                    await startLoad(force: true).value
+                    guard !Task.isCancelled else { return }
                     await loadRelated()
                 }
             }
         }
         .navigationTitle(resource.displayName)
         .navigationBarTitleDisplayMode(.inline)
-        .task(id: resource.identity) { await load(force: false) }
+        .task(id: resource.identity) {
+            guard !Task.isCancelled else { return }
+            await startLoad(force: false).value
+        }
         .task(id: "\(resource.identity)-related") { await loadRelated() }
         .onDisappear {
+            _ = loadRequest.begin()
+            loadTask?.cancel()
+            loadTask = nil
             resolutionTask?.cancel()
             resolutionTask = nil
+            model.audioSession.endExternalPlayback(videoPlayer)
             videoPlayer?.pause()
             videoPlayer?.replaceCurrentItem(with: nil)
             videoPlayer = nil
@@ -602,9 +632,27 @@ private struct IOSVideoDetailView: View {
     }
 
     @MainActor
-    private func load(force: Bool) async {
+    private func startLoad(force: Bool) -> Task<Void, Never> {
+        loadTask?.cancel()
+        resolutionTask?.cancel()
+        resolutionTask = nil
+        isSwitchingResolution = false
+        let generation = loadRequest.begin()
+        let task = Task { await load(force: force, generation: generation) }
+        loadTask = task
+        return task
+    }
+
+    @MainActor
+    private func load(force: Bool, generation: Int) async {
+        guard !Task.isCancelled, loadRequest.accepts(generation) else { return }
+        defer {
+            if loadRequest.accepts(generation) {
+                isLoading = false
+                loadTask = nil
+            }
+        }
         guard let library = model.videoLibrary else {
-            isLoading = false
             errorMessage = "视频服务不可用"
             return
         }
@@ -620,10 +668,11 @@ private struct IOSVideoDetailView: View {
             case let .video(id): loaded = .video(try await library.videoDetail(id: id, refreshCache: force))
             }
             try Task.checkCancellation()
+            guard loadRequest.accepts(generation) else { return }
         } catch is CancellationError {
             return
         } catch {
-            isLoading = false
+            guard !Task.isCancelled, loadRequest.accepts(generation) else { return }
             if isRefreshing { detailRefreshError = error.localizedDescription }
             else { errorMessage = error.localizedDescription }
             return
@@ -632,7 +681,6 @@ private struct IOSVideoDetailView: View {
         detail = loaded
         isSubscribed = model.videoSubscriptionOverrides[resource] ?? loaded.isSubscribed
         if isRefreshing, videoPlayer != nil {
-            isLoading = false
             return
         }
 
@@ -645,17 +693,19 @@ private struct IOSVideoDetailView: View {
         selectedResolution = preferredResolution
         do {
             let source = try await playbackSource(for: loaded, resolution: preferredResolution)
+            try Task.checkCancellation()
+            guard loadRequest.accepts(generation) else { return }
             let playbackURL = try await VideoPlaybackURLResolver.resolve(source.url)
             try Task.checkCancellation()
-            player.pauseForVideo()
-            videoPlayer = AVPlayer(url: playbackURL)
+            guard loadRequest.accepts(generation) else { return }
+            let external = AVPlayer(url: playbackURL)
+            videoPlayer = external
             selectedResolution = source.resolution
             activeResolution = source.resolution
-            videoPlayer?.play()
-            isLoading = false
+            model.audioSession.setExternalPlayer(external, title: loaded.title, creator: loaded.creator)
         } catch is CancellationError {
         } catch {
-            isLoading = false
+            guard !Task.isCancelled, loadRequest.accepts(generation) else { return }
             playbackError = error.localizedDescription
         }
     }
@@ -707,7 +757,8 @@ private struct IOSVideoDetailView: View {
 
     @MainActor
     private func switchResolution(to resolution: Int) async {
-        guard let detail, resolution != activeResolution, !isSwitchingResolution else { return }
+        guard !Task.isCancelled, let detail, resolution != activeResolution, !isSwitchingResolution else { return }
+        let generation = loadRequest.generation
         let previousResolution = activeResolution ?? selectedResolution
         let previousPlayer = videoPlayer
         let position = previousPlayer?.currentTime()
@@ -715,39 +766,50 @@ private struct IOSVideoDetailView: View {
         selectedResolution = resolution
         playbackError = nil
         isSwitchingResolution = true
+        defer {
+            if loadRequest.accepts(generation) {
+                isSwitchingResolution = false
+                resolutionTask = nil
+            }
+        }
         do {
             let source = try await playbackSource(for: detail, resolution: resolution)
+            try Task.checkCancellation()
+            guard loadRequest.accepts(generation) else { return }
             let playbackURL = try await VideoPlaybackURLResolver.resolve(source.url)
             try Task.checkCancellation()
+            guard loadRequest.accepts(generation) else { return }
             let replacement = AVPlayer(url: playbackURL)
             if let position, position.isNumeric {
                 _ = await replacement.seek(to: position, toleranceBefore: .zero, toleranceAfter: .zero)
             }
             try Task.checkCancellation()
+            guard loadRequest.accepts(generation) else { return }
             previousPlayer?.pause()
             previousPlayer?.replaceCurrentItem(with: nil)
             videoPlayer = replacement
             selectedResolution = source.resolution
             activeResolution = source.resolution
-            if shouldPlay { replacement.play() }
+            model.audioSession.setExternalPlayer(replacement, title: detail.title, creator: detail.creator, shouldPlay: shouldPlay)
         } catch is CancellationError {
+            guard loadRequest.accepts(generation) else { return }
             selectedResolution = previousResolution
         } catch {
+            guard !Task.isCancelled, loadRequest.accepts(generation) else { return }
             selectedResolution = previousResolution
             playbackError = error.localizedDescription
         }
-        isSwitchingResolution = false
-        resolutionTask = nil
     }
 
     @MainActor
     private func setSubscribed(_ subscribed: Bool) async {
-        guard let library = model.videoLibrary,
-              model.currentUserID != nil,
+        guard !isWriting, let library = model.videoLibrary,
+              let userID = model.currentUserID,
               let revision = model.confirmedAccountCredentialRevision,
               library.transport.credentialSnapshotValue().revision == revision
         else { return }
         isWriting = true
+        defer { isWriting = false }
         mutationError = nil
         do {
             switch resource {
@@ -756,12 +818,17 @@ private struct IOSVideoDetailView: View {
             case let .video(id):
                 try await library.setVideoSubscribed(id, subscribed: subscribed, expectedCredentialRevision: revision)
             }
+            try Task.checkCancellation()
+            guard model.accountContextIsCurrent(userID: userID, credentialRevision: revision, transport: library.transport)
+            else { return }
             isSubscribed = subscribed
             model.videoSubscriptionDidChange(resource, subscribed: subscribed)
+        } catch is CancellationError {
         } catch {
+            guard model.accountContextIsCurrent(userID: userID, credentialRevision: revision, transport: library.transport)
+            else { return }
             mutationError = error.localizedDescription
         }
-        isWriting = false
     }
 }
 
@@ -1311,6 +1378,27 @@ private enum IOSAudioSection: String, CaseIterable, Identifiable {
     var id: Self { self }
 }
 
+private struct IOSAudioFilterTaskIdentity: Equatable {
+    let section: IOSAudioSection
+    let credentialRevision: UInt64
+    let retryRevision: Int
+}
+
+private struct IOSPodcastResultTaskIdentity: Equatable {
+    let section: IOSAudioSection
+    let categoryID: Int64?
+    let credentialRevision: UInt64
+    let retryRevision: Int
+}
+
+private struct IOSBroadcastResultTaskIdentity: Equatable {
+    let section: IOSAudioSection
+    let categoryID: String
+    let regionID: String
+    let credentialRevision: UInt64
+    let retryRevision: Int
+}
+
 private struct IOSAudioDiscoveryView: View {
     @Bindable var model: AppModel
     @State private var section = IOSAudioSection.podcasts
@@ -1323,11 +1411,19 @@ private struct IOSAudioDiscoveryView: View {
     @State private var channels: [BroadcastChannel] = []
     @State private var channelPage: BroadcastChannelPage?
     @State private var isLoading = true
+    @State private var isLoadingFilters = true
     @State private var isLoadingMore = false
     @State private var errorMessage: String?
-    @State private var loadGeneration = 0
+    @State private var filterGeneration = 0
+    @State private var resultGeneration = 0
+    @State private var filterRetryRevision = 0
+    @State private var podcastRetryRevision = 0
+    @State private var consumedPodcastRetryRevision = 0
+    @State private var broadcastRetryRevision = 0
+    @State private var loadMoreTask: Task<Void, Never>?
 
     var body: some View {
+        let filterIdentity = filterTaskIdentity
         VStack(spacing: 0) {
             Picker("声音内容", selection: $section) {
                 ForEach(IOSAudioSection.allCases) { Text($0.rawValue).tag($0) }
@@ -1345,159 +1441,220 @@ private struct IOSAudioDiscoveryView: View {
         }
         .navigationTitle("播客与广播")
         .navigationBarTitleDisplayMode(.inline)
-        .task(id: section.rawValue) { await load() }
+        .task(id: filterIdentity) { await load(identity: filterIdentity) }
+        .onDisappear { cancelLoadMore() }
     }
 
     @ViewBuilder
     private var podcastContent: some View {
-        if isLoading && podcasts.isEmpty {
-            IOSLibraryLoadingView(title: "正在载入播客")
-        } else if let errorMessage, podcasts.isEmpty {
-            IOSLibraryFailureView(title: "无法载入播客", message: errorMessage) { Task { await load() } }
-        } else {
-            List {
-                Section {
-                    Picker("分类", selection: $selectedCategoryID) {
-                        ForEach(categories) { Text($0.name).tag(Optional($0.id)) }
+        let taskIdentity = podcastTaskIdentity
+        Group {
+            if (isLoadingFilters || isLoading) && podcasts.isEmpty {
+                IOSLibraryLoadingView(title: "正在载入播客")
+            } else if let errorMessage, podcasts.isEmpty {
+                IOSLibraryFailureView(title: "无法载入播客", message: errorMessage) { retryPodcasts() }
+            } else {
+                List {
+                    Section {
+                        Picker("分类", selection: $selectedCategoryID) {
+                            ForEach(categories) { Text($0.name).tag(Optional($0.id)) }
+                        }
                     }
-                    .onChange(of: selectedCategoryID) { oldValue, newValue in
-                        guard oldValue != nil, oldValue != newValue else { return }
-                        Task { await loadPodcasts() }
-                    }
-                }
-                Section(selectedCategory?.name ?? "推荐播客") {
-                    if podcasts.isEmpty {
-                        IOSLibraryEmptyRow(title: "暂无推荐播客", symbol: "dot.radiowaves.left.and.right")
-                    } else {
-                        ForEach(podcasts) { podcast in
-                            NavigationLink(value: Route.podcast(podcast.id)) { IOSPodcastLabel(podcast: podcast) }
+                    Section(selectedCategory?.name ?? "推荐播客") {
+                        if podcasts.isEmpty {
+                            IOSLibraryEmptyRow(title: "暂无推荐播客", symbol: "dot.radiowaves.left.and.right")
+                        } else {
+                            ForEach(podcasts) { podcast in
+                                NavigationLink(value: Route.podcast(podcast.id)) { IOSPodcastLabel(podcast: podcast) }
+                            }
                         }
                     }
                 }
+                .listStyle(.insetGrouped)
+                .refreshable { podcastRetryRevision &+= 1 }
             }
-            .listStyle(.insetGrouped)
-            .refreshable { await loadPodcasts(force: true) }
         }
+        .task(id: taskIdentity) { await loadPodcasts(identity: taskIdentity) }
     }
 
     @ViewBuilder
     private var broadcastContent: some View {
-        if isLoading && channels.isEmpty {
-            IOSLibraryLoadingView(title: "正在载入广播")
-        } else if let errorMessage, channels.isEmpty {
-            IOSLibraryFailureView(title: "无法载入广播", message: errorMessage) { Task { await load() } }
-        } else {
-            List {
-                if let filters {
-                    Section("筛选") {
-                        Picker("分类", selection: $categoryID) {
-                            Text("全部").tag("0")
-                            ForEach(filters.categories) { Text($0.name).tag($0.id) }
-                        }
-                        Picker("地区", selection: $regionID) {
-                            Text("全部").tag("0")
-                            ForEach(filters.regions) { Text($0.name).tag($0.id) }
-                        }
-                    }
-                    .onChange(of: categoryID) { _, _ in Task { await loadChannels(reset: true) } }
-                    .onChange(of: regionID) { _, _ in Task { await loadChannels(reset: true) } }
-                }
-                Section("频道") {
-                    if channels.isEmpty {
-                        IOSLibraryEmptyRow(title: "暂无广播频道", symbol: "radio")
-                    } else {
-                        ForEach(channels) { channel in
-                            NavigationLink(value: Route.broadcast(channel.id, channel.coverURL)) {
-                                IOSBroadcastLabel(channel: channel)
+        let taskIdentity = broadcastTaskIdentity
+        Group {
+            if (isLoadingFilters || isLoading) && channels.isEmpty {
+                IOSLibraryLoadingView(title: "正在载入广播")
+            } else if let errorMessage, channels.isEmpty {
+                IOSLibraryFailureView(title: "无法载入广播", message: errorMessage) { retryBroadcasts() }
+            } else {
+                List {
+                    if let filters {
+                        Section("筛选") {
+                            Picker("分类", selection: $categoryID) {
+                                Text("全部").tag("0")
+                                ForEach(filters.categories) { Text($0.name).tag($0.id) }
+                            }
+                            Picker("地区", selection: $regionID) {
+                                Text("全部").tag("0")
+                                ForEach(filters.regions) { Text($0.name).tag($0.id) }
                             }
                         }
-                        if channelPage?.hasMore == true {
-                            Button("载入更多") { Task { await loadChannels(reset: false) } }
-                                .frame(maxWidth: .infinity, minHeight: 44)
-                                .disabled(isLoadingMore)
+                    }
+                    Section("频道") {
+                        if channels.isEmpty {
+                            IOSLibraryEmptyRow(title: "暂无广播频道", symbol: "radio")
+                        } else {
+                            ForEach(channels) { channel in
+                                NavigationLink(value: Route.broadcast(channel.id, channel.coverURL)) {
+                                    IOSBroadcastLabel(channel: channel)
+                                }
+                            }
+                            if channelPage?.hasMore == true {
+                                Button("载入更多", action: startLoadMore)
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                                    .disabled(isLoadingMore)
+                            }
                         }
                     }
                 }
+                .listStyle(.insetGrouped)
+                .refreshable { broadcastRetryRevision &+= 1 }
             }
-            .listStyle(.insetGrouped)
-            .refreshable { await loadChannels(reset: true) }
+        }
+        .task(id: taskIdentity) { await loadChannels(identity: taskIdentity, reset: true) }
+    }
+
+    private var credentialRevision: UInt64 {
+        model.audioLibrary?.transport.credentialSnapshotValue().revision ?? 0
+    }
+
+    private var filterTaskIdentity: IOSAudioFilterTaskIdentity {
+        IOSAudioFilterTaskIdentity(
+            section: section,
+            credentialRevision: credentialRevision,
+            retryRevision: filterRetryRevision
+        )
+    }
+
+    private var podcastTaskIdentity: IOSPodcastResultTaskIdentity {
+        IOSPodcastResultTaskIdentity(
+            section: section,
+            categoryID: selectedCategoryID,
+            credentialRevision: credentialRevision,
+            retryRevision: podcastRetryRevision
+        )
+    }
+
+    private var broadcastTaskIdentity: IOSBroadcastResultTaskIdentity {
+        IOSBroadcastResultTaskIdentity(
+            section: section,
+            categoryID: categoryID,
+            regionID: regionID,
+            credentialRevision: credentialRevision,
+            retryRevision: broadcastRetryRevision
+        )
+    }
+
+    private func retryPodcasts() {
+        if categories.isEmpty || selectedCategoryID == nil {
+            filterRetryRevision &+= 1
+        } else {
+            podcastRetryRevision &+= 1
+        }
+    }
+
+    private func retryBroadcasts() {
+        if filters == nil {
+            filterRetryRevision &+= 1
+        } else {
+            broadcastRetryRevision &+= 1
         }
     }
 
     @MainActor
-    private func load() async {
-        loadGeneration &+= 1
-        let generation = loadGeneration
-        let section = section
-        isLoadingMore = false
+    private func load(identity: IOSAudioFilterTaskIdentity) async {
+        guard !Task.isCancelled, identity == filterTaskIdentity else { return }
+        filterGeneration &+= 1
+        let generation = filterGeneration
         guard let library = model.audioLibrary else {
-            isLoading = false
+            isLoadingFilters = false
             errorMessage = "声音服务不可用"
             return
         }
-        isLoading = true
+        isLoadingFilters = true
         errorMessage = nil
         do {
-            if section == .podcasts {
+            if identity.section == .podcasts {
                 let values = try await library.podcastCategories()
                 try Task.checkCancellation()
-                guard loadGeneration == generation, self.section == section else { return }
+                guard filterGeneration == generation,
+                      filterTaskIdentity == identity,
+                      credentialRevision == identity.credentialRevision
+                else { return }
                 categories = values
                 if !values.contains(where: { $0.id == selectedCategoryID }) {
                     selectedCategoryID = values.first?.id
                 }
-                await loadPodcasts()
             } else {
                 let value = try await library.broadcastFilters()
                 try Task.checkCancellation()
-                guard loadGeneration == generation, self.section == section else { return }
+                guard filterGeneration == generation,
+                      filterTaskIdentity == identity,
+                      credentialRevision == identity.credentialRevision
+                else { return }
                 filters = value
-                await loadChannels(reset: true)
             }
+            isLoadingFilters = false
         } catch is CancellationError {
         } catch {
-            guard loadGeneration == generation, self.section == section else { return }
-            isLoading = false
+            guard filterGeneration == generation,
+                  filterTaskIdentity == identity,
+                  credentialRevision == identity.credentialRevision
+            else { return }
+            isLoadingFilters = false
             errorMessage = error.localizedDescription
         }
     }
 
     @MainActor
-    private func loadPodcasts(force: Bool = false) async {
-        loadGeneration &+= 1
-        let generation = loadGeneration
-        let section = section
-        guard section == .podcasts,
+    private func loadPodcasts(identity: IOSPodcastResultTaskIdentity) async {
+        guard !Task.isCancelled,
+              identity == podcastTaskIdentity,
+              identity.section == .podcasts,
               let library = model.audioLibrary,
-              let selectedCategory
+              let categoryID = identity.categoryID
         else {
-            isLoading = false
-            return
-        }
-        let categoryID = selectedCategory.id
-        isLoading = true
-        errorMessage = nil
-        defer {
-            if loadGeneration == generation,
-               self.section == section,
-               selectedCategoryID == categoryID {
+            if !Task.isCancelled,
+               identity == podcastTaskIdentity,
+               identity.section == .podcasts {
                 isLoading = false
             }
+            return
         }
+        let force = identity.retryRevision != consumedPodcastRetryRevision
+        consumedPodcastRetryRevision = identity.retryRevision
+        cancelLoadMore()
+        resultGeneration &+= 1
+        let generation = resultGeneration
+        podcasts = []
+        isLoadingMore = false
+        isLoading = true
+        errorMessage = nil
         do {
             let values = try await library.recommendedPodcasts(categoryID: categoryID, refreshCache: force)
             try Task.checkCancellation()
-            guard loadGeneration == generation,
-                  self.section == section,
-                  selectedCategoryID == categoryID
+            guard resultGeneration == generation,
+                  podcastTaskIdentity == identity,
+                  credentialRevision == identity.credentialRevision
             else { return }
             podcasts = values
+            isLoading = false
         } catch is CancellationError {
         } catch {
-            guard loadGeneration == generation,
-                  self.section == section,
-                  selectedCategoryID == categoryID
+            guard resultGeneration == generation,
+                  podcastTaskIdentity == identity,
+                  credentialRevision == identity.credentialRevision
             else { return }
+            isLoading = false
             errorMessage = error.localizedDescription
         }
     }
@@ -1507,13 +1664,25 @@ private struct IOSAudioDiscoveryView: View {
     }
 
     @MainActor
-    private func loadChannels(reset: Bool) async {
-        guard section == .broadcasts, let library = model.audioLibrary else { return }
-        let categoryID = categoryID
-        let regionID = regionID
+    private func loadChannels(identity: IOSBroadcastResultTaskIdentity, reset: Bool) async {
+        guard !Task.isCancelled,
+              identity == broadcastTaskIdentity,
+              identity.section == .broadcasts,
+              let library = model.audioLibrary
+        else {
+            if !Task.isCancelled,
+               identity == broadcastTaskIdentity,
+               identity.section == .broadcasts {
+                isLoading = false
+            }
+            return
+        }
         let currentPage: BroadcastChannelPage?
         if reset {
-            loadGeneration &+= 1
+            cancelLoadMore()
+            resultGeneration &+= 1
+            channelPage = nil
+            channels = []
             isLoading = true
             isLoadingMore = false
             currentPage = nil
@@ -1526,39 +1695,52 @@ private struct IOSAudioDiscoveryView: View {
             isLoadingMore = true
             currentPage = page
         }
-        let generation = loadGeneration
+        let generation = resultGeneration
         errorMessage = nil
-        defer {
-            if loadGeneration == generation,
-               section == .broadcasts,
-               self.categoryID == categoryID,
-               self.regionID == regionID {
-                if reset { isLoading = false } else { isLoadingMore = false }
-            }
-        }
         do {
             let value = try await library.broadcastChannels(
-                categoryID: categoryID,
-                regionID: regionID,
+                categoryID: identity.categoryID,
+                regionID: identity.regionID,
                 cursor: currentPage?.nextCursor ?? .initial
             )
             try Task.checkCancellation()
-            guard loadGeneration == generation,
-                  section == .broadcasts,
-                  self.categoryID == categoryID,
-                  self.regionID == regionID,
+            guard resultGeneration == generation,
+                  broadcastTaskIdentity == identity,
+                  credentialRevision == identity.credentialRevision,
                   reset || channelPage?.nextCursor == currentPage?.nextCursor
             else { return }
             channelPage = currentPage?.appending(value) ?? value
             channels = channelPage?.channels ?? []
+            if reset { isLoading = false } else { isLoadingMore = false }
         } catch is CancellationError {
         } catch {
-            guard loadGeneration == generation,
-                  section == .broadcasts,
-                  self.categoryID == categoryID,
-                  self.regionID == regionID
+            guard resultGeneration == generation,
+                  broadcastTaskIdentity == identity,
+                  credentialRevision == identity.credentialRevision
             else { return }
+            if reset { isLoading = false } else { isLoadingMore = false }
             errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func cancelLoadMore() {
+        loadMoreTask?.cancel()
+        loadMoreTask = nil
+    }
+
+    @MainActor
+    private func startLoadMore() {
+        guard loadMoreTask == nil else { return }
+        let identity = broadcastTaskIdentity
+        let generation = resultGeneration
+        loadMoreTask = Task { @MainActor in
+            await loadChannels(identity: identity, reset: false)
+            guard !Task.isCancelled,
+                  resultGeneration == generation,
+                  broadcastTaskIdentity == identity
+            else { return }
+            loadMoreTask = nil
         }
     }
 }
@@ -1607,6 +1789,7 @@ private struct IOSPodcastDetailView: View {
     @State private var loadMoreError: String?
     @State private var mutationError: String?
     @State private var errorMessage: String?
+    @State private var loadGeneration = 0
 
     var body: some View {
         Group {
@@ -1676,6 +1859,10 @@ private struct IOSPodcastDetailView: View {
             errorMessage = "播客服务不可用"
             return
         }
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        defer { if loadGeneration == generation { isLoading = false } }
+        isLoadingMore = false
         loadMoreError = nil
         isLoading = true
         errorMessage = nil
@@ -1683,34 +1870,46 @@ private struct IOSPodcastDetailView: View {
             async let loadedPodcast = library.podcast(id: podcastID, refreshCache: force)
             async let loadedPage = library.podcastEpisodes(podcastID: podcastID, refreshCache: force)
             let (podcast, page) = try await (loadedPodcast, loadedPage)
+            try Task.checkCancellation()
+            guard loadGeneration == generation else { return }
             self.podcast = podcast
             self.page = page
             isSubscribed = model.podcastSubscriptionOverride(for: podcast.id) ?? podcast.isSubscribed
         } catch is CancellationError {
-        } catch { errorMessage = error.localizedDescription }
-        isLoading = false
+        } catch {
+            guard loadGeneration == generation else { return }
+            errorMessage = error.localizedDescription
+        }
     }
 
     @MainActor
     private func loadMore() async {
-        guard let library = model.audioLibrary, let page, !isLoadingMore else { return }
+        guard let library = model.audioLibrary, let page, !isLoading, !isLoadingMore else { return }
+        let generation = loadGeneration
         isLoadingMore = true
+        defer { if loadGeneration == generation { isLoadingMore = false } }
         loadMoreError = nil
         do {
             let next = try await library.podcastEpisodes(podcastID: podcastID, offset: page.nextOffset)
+            try Task.checkCancellation()
+            guard loadGeneration == generation else { return }
             self.page = page.appending(next)
         } catch is CancellationError {
-        } catch { loadMoreError = error.localizedDescription }
-        isLoadingMore = false
+        } catch {
+            guard loadGeneration == generation else { return }
+            loadMoreError = error.localizedDescription
+        }
     }
 
     @MainActor
     private func subscribe(_ subscribed: Bool) async {
-        guard let library = model.audioLibrary,
+        guard !isWriting, let library = model.audioLibrary,
+              let userID = model.currentUserID,
               let revision = model.confirmedAccountCredentialRevision,
               library.transport.credentialSnapshotValue().revision == revision
         else { return }
         isWriting = true
+        defer { isWriting = false }
         mutationError = nil
         do {
             try await library.setPodcastSubscribed(
@@ -1718,10 +1917,17 @@ private struct IOSPodcastDetailView: View {
                 subscribed: subscribed,
                 expectedCredentialRevision: revision
             )
+            try Task.checkCancellation()
+            guard model.accountContextIsCurrent(userID: userID, credentialRevision: revision, transport: library.transport)
+            else { return }
             isSubscribed = subscribed
             model.commitPodcastSubscription(id: podcastID, subscribed: subscribed)
-        } catch { mutationError = error.localizedDescription }
-        isWriting = false
+        } catch is CancellationError {
+        } catch {
+            guard model.accountContextIsCurrent(userID: userID, credentialRevision: revision, transport: library.transport)
+            else { return }
+            mutationError = error.localizedDescription
+        }
     }
 }
 
@@ -1874,7 +2080,7 @@ private struct IOSPodcastEpisodeView: View {
         do {
             let source = try await library.voiceLyrics(programID: episodeID)
             try Task.checkCancellation()
-            lyricsPhase = .loaded(LRCParser.parse(source))
+            lyricsPhase = .loaded(try await LRCParser.parseOffMain(source))
         } catch is CancellationError {
         } catch {
             lyricsPhase = .failed(error.localizedDescription)
@@ -1987,20 +2193,16 @@ private struct IOSBroadcastDetailView: View {
                         if !info.channel.description.isEmpty { Text(info.channel.description).font(.subheadline) }
                     }
                     Section("操作") {
-                        Button { streamPlayer == nil ? startPlayback() : stopPlayback() } label: {
-                            Label(
-                                isConnecting ? "正在连接" : streamPlayer == nil ? "播放直播" : "停止播放",
-                                systemImage: streamPlayer == nil ? "play.fill" : "stop.fill"
-                            )
+                        Button(action: togglePlayback) {
+                            Label(playbackButtonTitle, systemImage: isConnecting || playbackState == .playing || playbackState == .loading ? "stop.fill" : "play.fill")
                         }
-                        .disabled(isConnecting)
                         Button { Task { await collect(!isCollected) } } label: {
                             Label(isCollected ? "取消收藏" : "收藏", systemImage: isCollected ? "star.fill" : "star")
                         }
                         .disabled(model.currentUserID == nil || isWriting)
                     }
-                    if let errorMessage {
-                        Section { Label(errorMessage, systemImage: "exclamationmark.triangle").foregroundStyle(.red) }
+                    if let playbackErrorMessage {
+                        Section { Label(playbackErrorMessage, systemImage: "exclamationmark.triangle").foregroundStyle(.red) }
                     }
                 }
                 .listStyle(.insetGrouped)
@@ -2018,6 +2220,34 @@ private struct IOSBroadcastDetailView: View {
 
     private var isCollected: Bool {
         model.broadcastCollectionOverrides[channelID] ?? info?.channel.isCollected ?? false
+    }
+
+    private var playbackState: IOSExternalPlaybackState { model.audioSession.state(for: streamPlayer) }
+
+    private var playbackErrorMessage: String? {
+        if case let .failed(message) = playbackState { return message }
+        return errorMessage
+    }
+
+    private var playbackButtonTitle: String {
+        if isConnecting { return "取消连接" }
+        return switch playbackState {
+        case .idle: "播放直播"
+        case .loading: "正在缓冲 · 停止"
+        case .playing: "停止播放"
+        case .paused: "继续播放"
+        case .failed: "重试直播"
+        }
+    }
+
+    private func togglePlayback() {
+        if isConnecting || playbackState == .playing || playbackState == .loading {
+            stopPlayback()
+        } else if playbackState == .paused, let streamPlayer, let info {
+            model.audioSession.setExternalPlayer(streamPlayer, title: info.channel.name, creator: info.currentProgramTitle, isLive: true)
+        } else {
+            startPlayback()
+        }
     }
 
     @MainActor
@@ -2061,10 +2291,9 @@ private struct IOSBroadcastDetailView: View {
                 let url = try await BroadcastStreamURLPolicy.playableURL(source.absoluteString)
                 try Task.checkCancellation()
                 guard playbackRequestID == requestID else { throw CancellationError() }
-                songPlayer.pauseForVideo()
                 let player = AVPlayer(url: url)
                 streamPlayer = player
-                player.play()
+                model.audioSession.setExternalPlayer(player, title: current.channel.name, creator: current.currentProgramTitle, isLive: true)
                 info = current
             } catch is CancellationError {
             } catch { errorMessage = error.localizedDescription }
@@ -2075,6 +2304,7 @@ private struct IOSBroadcastDetailView: View {
         playbackRequestID = nil
         playbackTask?.cancel()
         playbackTask = nil
+        model.audioSession.endExternalPlayback(streamPlayer)
         streamPlayer?.pause()
         streamPlayer = nil
         isConnecting = false
@@ -2082,20 +2312,29 @@ private struct IOSBroadcastDetailView: View {
 
     @MainActor
     private func collect(_ collected: Bool) async {
-        guard let library = model.audioLibrary,
+        guard !isWriting, let library = model.audioLibrary,
+              let userID = model.currentUserID,
               let revision = model.confirmedAccountCredentialRevision,
               library.transport.credentialSnapshotValue().revision == revision
         else { return }
         isWriting = true
+        defer { isWriting = false }
         do {
             try await library.setBroadcastCollected(
                 channelID,
                 collected: collected,
                 expectedCredentialRevision: revision
             )
+            try Task.checkCancellation()
+            guard model.accountContextIsCurrent(userID: userID, credentialRevision: revision, transport: library.transport)
+            else { return }
             model.broadcastCollectionOverrides[channelID] = collected
-        } catch { errorMessage = error.localizedDescription }
-        isWriting = false
+        } catch is CancellationError {
+        } catch {
+            guard model.accountContextIsCurrent(userID: userID, credentialRevision: revision, transport: library.transport)
+            else { return }
+            errorMessage = error.localizedDescription
+        }
     }
 }
 
@@ -2175,6 +2414,7 @@ private struct IOSPersonalFMContent: View {
                         IOSSongRow(
                             song: track.song,
                             songs: songs,
+                            onPlay: { player.playQueuedSong(track.id) },
                             model: model,
                             player: player
                         )
@@ -2684,11 +2924,13 @@ private struct IOSActivityView: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
-private enum IOSExportFileStore {
+enum IOSExportFileStore {
+    static let directory = FileManager.default.temporaryDirectory
+        .appending(path: "TinyCloudMusicExports", directoryHint: .isDirectory)
+
     static func image(data: Data, sourceURL: URL) async throws -> URL {
         try await Task.detached(priority: .utility) {
-            let directory = FileManager.default.temporaryDirectory
-                .appending(path: "TinyCloudMusicExports", directoryHint: .isDirectory)
+            let directory = Self.directory
             try FileManager.default.createDirectory(
                 at: directory,
                 withIntermediateDirectories: true

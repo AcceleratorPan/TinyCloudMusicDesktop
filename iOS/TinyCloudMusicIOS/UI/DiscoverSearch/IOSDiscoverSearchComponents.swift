@@ -6,6 +6,7 @@ struct IOSSongRow: View {
     var allSongIDs: [Int64]?
     var playlistID: Int64?
     var trackNumber: Int?
+    var onPlay: (() -> Void)?
     @Bindable var model: AppModel
     @Bindable var player: PlayerController
 
@@ -47,14 +48,7 @@ struct IOSSongRow: View {
             .accessibilityLabel("播放\(song.name)，\(song.artistsDisplay)")
 
             Menu {
-                IOSSongActionsMenu(
-                    song: song,
-                    songs: songs,
-                    allSongIDs: allSongIDs,
-                    playlistID: playlistID,
-                    model: model,
-                    player: player
-                )
+                actionsMenu
             } label: {
                 Image(systemName: "ellipsis")
                     .frame(width: 44, height: 44)
@@ -63,20 +57,24 @@ struct IOSSongRow: View {
             .accessibilityLabel("\(song.name)的更多操作")
         }
         .frame(minHeight: 68)
-        .contextMenu {
-            IOSSongActionsMenu(
-                song: song,
-                songs: songs,
-                allSongIDs: allSongIDs,
-                playlistID: playlistID,
-                model: model,
-                player: player
-            )
-        }
+        .contextMenu { actionsMenu }
     }
 
-    private func play() {
-        player.play(song, in: songs, allSongIDs: allSongIDs, playlistID: playlistID)
+    var actionsMenu: IOSSongActionsMenu {
+        IOSSongActionsMenu(
+            song: song,
+            songs: songs,
+            allSongIDs: allSongIDs,
+            playlistID: playlistID,
+            onPlay: play,
+            model: model,
+            player: player
+        )
+    }
+
+    func play() {
+        if let onPlay { onPlay() }
+        else { player.play(song, in: songs, allSongIDs: allSongIDs, playlistID: playlistID) }
     }
 }
 
@@ -85,13 +83,12 @@ struct IOSSongActionsMenu: View {
     let songs: [Song]
     var allSongIDs: [Int64]?
     var playlistID: Int64?
+    var onPlay: (() -> Void)?
     @Bindable var model: AppModel
     @Bindable var player: PlayerController
 
     var body: some View {
-        Button {
-            player.play(song, in: songs, allSongIDs: allSongIDs, playlistID: playlistID)
-        } label: {
+        Button(action: play) {
             Label("播放", systemImage: "play.fill")
         }
         Button { player.appendToQueue([song]) } label: {
@@ -134,6 +131,11 @@ struct IOSSongActionsMenu: View {
         Button { model.open(.comments(song.id)) } label: {
             Label("评论", systemImage: "bubble.left")
         }
+    }
+
+    func play() {
+        if let onPlay { onPlay() }
+        else { player.play(song, in: songs, allSongIDs: allSongIDs, playlistID: playlistID) }
     }
 }
 

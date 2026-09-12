@@ -4,9 +4,11 @@ set -euo pipefail
 ROOT=${0:A:h:h}
 cd "$ROOT"
 
+# Run only while no other Swift/Xcode compiler command is active (AGENTS.md).
+
 MODE=${1-}
 if [[ "$MODE" == "--self-check" ]]; then
-  swiftc -parse-as-library -warnings-as-errors Checks/ListenTogetherLiveSmoke.swift \
+  swiftc -j 1 -disable-batch-mode -parse-as-library -warnings-as-errors Checks/ListenTogetherLiveSmoke.swift \
     -o /tmp/tinycloudmusic-listen-together-redaction-check
   exec /tmp/tinycloudmusic-listen-together-redaction-check
 fi
@@ -52,8 +54,8 @@ interrupt() {
 trap cleanup EXIT
 trap interrupt INT TERM
 
-swift build --build-tests -j 4
-BIN_PATH=$(swift build --show-bin-path)
+swift build --build-tests -j 1 -Xswiftc -disable-batch-mode
+BIN_PATH=$(swift build --show-bin-path -j 1)
 SWIFT_EXECUTABLE=$(xcrun --find swift)
 TEST_HELPER="${SWIFT_EXECUTABLE:h:h}/libexec/swift/pm/swiftpm-testing-helper"
 TEST_BUNDLE="$BIN_PATH/TinyCloudMusicPackageTests.xctest/Contents/MacOS/TinyCloudMusicPackageTests"

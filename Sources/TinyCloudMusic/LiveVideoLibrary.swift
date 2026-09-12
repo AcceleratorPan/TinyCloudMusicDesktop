@@ -150,6 +150,7 @@ struct LiveVideoLibrary: Sendable {
             path: "/weapi/mv/\(action)",
             payload: ["mvId": id, "mvIds": try jsonString([String(id)])],
             expectedCredentialRevision: expectedCredentialRevision,
+            invalidatesGroups: [.library],
             retryable: false
         )
     }
@@ -165,6 +166,7 @@ struct LiveVideoLibrary: Sendable {
             path: "/weapi/cloudvideo/video/\(action)",
             payload: ["id": id],
             expectedCredentialRevision: expectedCredentialRevision,
+            invalidatesGroups: [.library],
             retryable: false
         )
     }
@@ -223,6 +225,7 @@ struct LiveVideoLibrary: Sendable {
         refreshCache: Bool = false,
         expectedCredentialRevision: UInt64? = nil,
         vipCredential: VIPRequesterCredential? = nil,
+        invalidatesGroups: Set<EAPIReadCache> = [],
         retryable: Bool = true,
         restrictsRedirects: Bool = false
     ) async throws -> [String: Any] {
@@ -232,6 +235,7 @@ struct LiveVideoLibrary: Sendable {
             cache: cache,
             refreshCache: refreshCache,
             expectedCredentialRevision: expectedCredentialRevision,
+            invalidatesGroups: invalidatesGroups,
             invalidatesAccountCache: false,
             vip: vipCredential != nil,
             useStoredCookieForVIP: vipCredential == .storedCookie,

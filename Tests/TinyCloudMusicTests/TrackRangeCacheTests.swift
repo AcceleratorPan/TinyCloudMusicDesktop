@@ -601,6 +601,81 @@ struct TrackRangeCacheTests {
         await cache.close(session)
     }
 
+    @Test("A disjoint urgent target does not wait for an unrelated in-flight range")
+    func disjointUrgentTargetStartsImmediately() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let body = rangeAudio(count: rangeBlockSize * 8)
+        let origin = URL(string: "https://example.com/disjoint")!
+        let source = rangeSource(origin, data: body)
+        let distantGate = RangeResponseGate()
+        let urgentGate = RangeResponseGate()
+        let firstRange = 0..<rangeBlockSize
+        let urgentRange = rangeBlockSize..<(rangeBlockSize + rangeSequentialWindowSize)
+        let distantRange = (rangeBlockSize * 6)..<(rangeBlockSize * 7)
+        let fixture = RangeDownloadFixture(
+            root: root.appending(path: "responses"),
+            sourceIDs: [origin: 1],
+            steps: [
+                .partial(body.subdata(in: firstRange), range: firstRange, total: body.count),
+                .partial(
+                    body.subdata(in: distantRange),
+                    range: distantRange,
+                    total: body.count,
+                    gate: distantGate
+                ),
+                .partial(
+                    body.subdata(in: urgentRange),
+                    range: urgentRange,
+                    total: body.count,
+                    gate: urgentGate
+                ),
+            ]
+        )
+        let cache = TrackRangeCache(trackCache: TrackCache(directory: root)) {
+            try await fixture.download($0)
+        }
+        let session = try await cache.open(
+            key: rangeKey,
+            format: "mp3",
+            initialSource: source,
+            sourceProvider: { source }
+        )
+        #expect(try await cache.read(
+            session: session,
+            offset: 0,
+            maximumLength: 1
+        ) == body.subdata(in: 0..<1))
+
+        let distant = Task {
+            try await cache.read(
+                session: session,
+                offset: Int64(distantRange.lowerBound),
+                maximumLength: 1
+            )
+        }
+        try await waitForRangeCondition { await distantGate.hasEntered() }
+        let urgent = Task {
+            try await cache.read(
+                session: session,
+                offset: Int64(urgentRange.lowerBound),
+                maximumLength: 1
+            )
+        }
+        try await waitForRangeCondition { await urgentGate.hasEntered() }
+        #expect(await fixture.callCount() == 3)
+
+        await urgentGate.release()
+        #expect(try await urgent.value == body.subdata(
+            in: urgentRange.lowerBound..<(urgentRange.lowerBound + 1)
+        ))
+        await distantGate.release()
+        #expect(try await distant.value == body.subdata(
+            in: distantRange.lowerBound..<(distantRange.lowerBound + 1)
+        ))
+        await cache.close(session)
+    }
+
     @Test("Malformed metadata, truncated body, overflow range, and schema mismatch are removed")
     func coldValidationRemovesDamage() async throws {
         enum Damage: CaseIterable { case metadata, body, range, schema }
@@ -1136,7 +1211,6 @@ struct TrackRangeCacheTests {
             steps: [
                 .partial(body.subdata(in: 0..<64), range: 0..<64, total: body.count, etag: "\"old\""),
                 RangeResponseStep(status: 403, gate: expiryGate),
-                RangeResponseStep(status: 403, gate: expiryGate),
                 .partial(retryBody, range: retryRange, total: body.count, gate: retryGate),
             ]
         )
@@ -1150,46 +1224,49 @@ struct TrackRangeCacheTests {
             sourceProvider: { try await provider.next() }
         )
         #expect(try await cache.read(session: session, offset: 0, maximumLength: 8) == body.subdata(in: 0..<8))
+        let firstOffset = 64
         let firstReader = Task {
-            try await cache.read(session: session, offset: 100, maximumLength: 8)
+            try await cache.read(session: session, offset: Int64(firstOffset), maximumLength: 8)
         }
-        try await waitForRangeCondition { await expiryGate.waiterCount() == 1 }
+        try await waitForRangeCondition { await expiryGate.hasEntered() }
         let secondOffset = rangeBlockSize + 100
         let secondReader = Task {
             try await cache.read(session: session, offset: Int64(secondOffset), maximumLength: 8)
         }
-        try await waitForRangeCondition { await expiryGate.waiterCount() == 2 }
+        try await waitForRangeCondition {
+            await cache.inFlightWaiterCountForTesting() == 2
+        }
+        #expect(await expiryGate.waiterCount() == 1)
         await expiryGate.release()
         try await waitForRangeCondition { await providerGate.hasEntered() }
         #expect(await provider.calls == 1)
         await providerGate.release()
         try await waitForRangeCondition { await retryGate.waiterCount() == 1 }
         await retryGate.release()
-        #expect(try await firstReader.value == body.subdata(in: 100..<108))
+        #expect(try await firstReader.value == body.subdata(in: firstOffset..<(firstOffset + 8)))
         #expect(try await secondReader.value == body.subdata(in: secondOffset..<(secondOffset + 8)))
         #expect(await provider.calls == 1)
-        #expect(await fixture.requests.map(\.sourceID) == [1, 1, 1, 2])
-        #expect(await fixture.requests.map(\.ifRange) == [nil, "\"old\"", "\"old\"", nil])
+        #expect(await fixture.requests.map(\.sourceID) == [1, 1, 2])
+        #expect(await fixture.requests.map(\.ifRange) == [nil, "\"old\"", nil])
         await cache.close(session)
     }
 
-    @Test("A full response supersedes a blocked refresh without calling the provider again")
-    func fullResponseSupersedesRefresh() async throws {
+    @Test("Concurrent distinct blocks converge when both responses are complete")
+    func concurrentDistinctBlocksConvergeOnCompleteResponse() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let sourceURL = URL(string: "https://example.com/audio")!
-        let body = rangeAudio(count: rangeBlockSize * 2 + 1_000)
+        let body = rangeAudio(count: rangeBlockSize * 4 + 1_000)
         let source = rangeSource(sourceURL, data: body)
-        let expiryGate = RangeResponseGate()
         let completeGate = RangeResponseGate()
-        let providerGate = RangeResponseGate()
-        let provider = RangeSourceFixture([source], gate: providerGate)
+        let provider = RangeSourceFixture([])
+        let firstRange = 0..<rangeBlockSize
         let fixture = RangeDownloadFixture(
             root: root.appending(path: "responses"),
             sourceIDs: [sourceURL: 1],
             steps: [
-                .partial(body.subdata(in: 0..<64), range: 0..<64, total: body.count),
-                RangeResponseStep(status: 403, gate: expiryGate),
+                .partial(body.subdata(in: firstRange), range: firstRange, total: body.count),
+                .complete(body, gate: completeGate),
                 .complete(body, gate: completeGate),
             ]
         )
@@ -1201,33 +1278,190 @@ struct TrackRangeCacheTests {
             initialSource: source,
             sourceProvider: { try await provider.next() }
         )
-        _ = try await cache.read(session: session, offset: 0, maximumLength: 1)
+        #expect(try await cache.read(
+            session: session,
+            offset: 0,
+            maximumLength: 1
+        ) == body.subdata(in: 0..<1))
 
-        let refreshing = Task {
-            try await cache.read(session: session, offset: 100, maximumLength: 8)
-        }
-        try await waitForRangeCondition { await expiryGate.hasEntered() }
-        let completingOffset = rangeBlockSize + 100
-        let completing = Task {
+        let firstOffset = rangeBlockSize + 100
+        let firstReader = Task {
             try await cache.read(
                 session: session,
-                offset: Int64(completingOffset),
+                offset: Int64(firstOffset),
                 maximumLength: 8
             )
         }
         try await waitForRangeCondition { await completeGate.hasEntered() }
-        await expiryGate.release()
-        try await waitForRangeCondition { await providerGate.hasEntered() }
+        let secondOffset = rangeBlockSize * 3 + 100
+        let secondReader = Task {
+            try await cache.read(
+                session: session,
+                offset: Int64(secondOffset),
+                maximumLength: 8
+            )
+        }
+        try await waitForRangeCondition {
+            await cache.inFlightWaiterCountForTesting() == 2
+        }
+        #expect(await completeGate.waiterCount() == 2)
         await completeGate.release()
-        try await waitForRangeCondition { await providerGate.cancellations == 1 }
-        await providerGate.release()
 
-        #expect(try await refreshing.value == body.subdata(in: 100..<108))
-        #expect(try await completing.value == body.subdata(
-            in: completingOffset..<(completingOffset + 8)
+        #expect(try await firstReader.value == body.subdata(
+            in: firstOffset..<(firstOffset + 8)
         ))
-        #expect(await provider.calls == 1)
+        #expect(try await secondReader.value == body.subdata(
+            in: secondOffset..<(secondOffset + 8)
+        ))
+        #expect(await provider.calls == 0)
         #expect(await fixture.callCount() == 3)
+        #expect(await trackCache.readyFile(for: rangeKey.songID, quality: rangeKey.quality) != nil)
+        await cache.close(session)
+    }
+
+    @Test("A cancelled complete response drains for its replacement reader")
+    func cancelledCompleteResponseDrainsForReplacement() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sourceURL = URL(string: "https://example.com/audio")!
+        let body = rangeAudio(count: rangeBlockSize * 4 + 1_000)
+        let source = rangeSource(sourceURL, data: body)
+        let completeGate = RangeResponseGate()
+        let provider = RangeSourceFixture([])
+        let firstRange = 0..<rangeBlockSize
+        let fixture = RangeDownloadFixture(
+            root: root.appending(path: "responses"),
+            sourceIDs: [sourceURL: 1],
+            steps: [
+                .partial(body.subdata(in: firstRange), range: firstRange, total: body.count),
+                .complete(body, gate: completeGate),
+                .complete(body, gate: completeGate),
+            ]
+        )
+        let trackCache = TrackCache(directory: root.appending(path: "StreamCache"))
+        let cache = TrackRangeCache(trackCache: trackCache) { try await fixture.download($0) }
+        let session = try await cache.open(
+            key: rangeKey,
+            format: "mp3",
+            initialSource: source,
+            sourceProvider: { try await provider.next() }
+        )
+        _ = try await cache.contentInfo(for: session)
+        #expect(try await cache.read(
+            session: session,
+            offset: 0,
+            maximumLength: 1
+        ) == body.subdata(in: 0..<1))
+
+        let cancelledReader = Task {
+            try await cache.read(
+                session: session,
+                offset: Int64(rangeBlockSize + 100),
+                maximumLength: 8
+            )
+        }
+        try await waitForRangeCondition { await completeGate.hasEntered() }
+        try await waitForRangeCondition {
+            await cache.inFlightWaiterCountForTesting() == 1
+        }
+        cancelledReader.cancel()
+        await expectCancellation { _ = try await cancelledReader.value }
+        try await waitForRangeCondition {
+            await cache.inFlightWaiterCountForTesting() == 0
+        }
+
+        let replacementOffset = rangeBlockSize * 3 + 100
+        let replacementReader = Task {
+            try await cache.read(
+                session: session,
+                offset: Int64(replacementOffset),
+                maximumLength: 8
+            )
+        }
+        try await waitForRangeCondition {
+            await cache.inFlightWaiterCountForTesting() == 1
+        }
+        #expect(await fixture.callCount() == 2)
+        #expect(await completeGate.waiterCount() == 1)
+        #expect(await fixture.cancellations == 0)
+        await completeGate.release()
+
+        #expect(try await replacementReader.value == body.subdata(
+            in: replacementOffset..<(replacementOffset + 8)
+        ))
+        #expect(await provider.calls == 0)
+        #expect(await fixture.cancellations == 0)
+        #expect(await fixture.callCount() == 2)
+        #expect(await trackCache.readyFile(for: rangeKey.songID, quality: rangeKey.quality) != nil)
+        await cache.close(session)
+    }
+
+    @Test("An unadopted content-info handoff commits its partial response")
+    func cancelledPartialResponseCompletesHandoff() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sourceURL = URL(string: "https://example.com/audio")!
+        let body = rangeAudio(count: rangeBlockSize + 1_000)
+        let source = rangeSource(sourceURL, data: body)
+        let tailGate = RangeResponseGate()
+        let firstRange = 0..<rangeBlockSize
+        let tailRange = rangeBlockSize..<body.count
+        let fixture = RangeDownloadFixture(
+            root: root.appending(path: "responses"),
+            sourceIDs: [sourceURL: 1],
+            steps: [
+                .partial(body.subdata(in: firstRange), range: firstRange, total: body.count),
+                .partial(
+                    body.subdata(in: tailRange),
+                    range: tailRange,
+                    total: body.count,
+                    gate: tailGate
+                ),
+            ]
+        )
+        let trackCache = TrackCache(directory: root.appending(path: "StreamCache"))
+        let cache = TrackRangeCache(trackCache: trackCache) { try await fixture.download($0) }
+        let session = try await cache.open(
+            key: rangeKey,
+            format: "mp3",
+            initialSource: source,
+            sourceProvider: { source }
+        )
+        _ = try await cache.contentInfo(for: session)
+        #expect(try await cache.read(
+            session: session,
+            offset: 0,
+            maximumLength: 1
+        ) == body.subdata(in: 0..<1))
+
+        let cancelledReader = Task {
+            try await cache.read(
+                session: session,
+                offset: Int64(rangeBlockSize),
+                maximumLength: 8
+            )
+        }
+        try await waitForRangeCondition { await tailGate.hasEntered() }
+        cancelledReader.cancel()
+        await expectCancellation { _ = try await cancelledReader.value }
+        try await waitForRangeCondition {
+            await cache.inFlightWaiterCountForTesting() == 0
+        }
+        #expect(await fixture.cancellations == 0)
+        await tailGate.release()
+        try await waitForRangeCondition { await fixture.completions == 2 }
+        try await waitForRangeCondition {
+            rangeFiles(in: root.appending(path: "responses"), withExtension: "").isEmpty
+        }
+
+        let laterOffset = rangeBlockSize + 100
+        #expect(try await cache.read(
+            session: session,
+            offset: Int64(laterOffset),
+            maximumLength: 8
+        ) == body.subdata(in: laterOffset..<(laterOffset + 8)))
+        #expect(await fixture.callCount() == 2)
+        #expect(await fixture.cancellations == 0)
         #expect(await trackCache.readyFile(for: rangeKey.songID, quality: rangeKey.quality) != nil)
         await cache.close(session)
     }
@@ -1451,11 +1685,11 @@ struct TrackRangeCacheTests {
         let oldBody = rangeAudio(count: rangeBlockSize * 2, fill: 1)
         let newBody = rangeAudio(count: oldBody.count, fill: 2)
         let oldSource = rangeSource(sourceA, data: oldBody)
-        let provider = RangeSourceFixture([rangeSource(sourceB, data: newBody)])
+        let newSource = rangeSource(sourceB, data: newBody)
         let lateGate = RangeResponseGate()
         let fixture = RangeDownloadFixture(
             root: root.appending(path: "responses"),
-            sourceIDs: [sourceA: 1, sourceB: 2],
+            sourceIDs: [sourceA: 1],
             steps: [
                 .partial(
                     oldBody.subdata(in: 0..<64),
@@ -1469,7 +1703,6 @@ struct TrackRangeCacheTests {
                     gate: lateGate,
                     ignoresCancellation: true
                 ),
-                RangeResponseStep(status: 403),
             ]
         )
         let trackCache = TrackCache(directory: root.appending(path: "StreamCache"))
@@ -1478,39 +1711,30 @@ struct TrackRangeCacheTests {
             key: rangeKey,
             format: "mp3",
             initialSource: oldSource,
-            sourceProvider: { try await provider.next() }
+            sourceProvider: { oldSource }
         )
         #expect(try await cache.read(session: first, offset: 0, maximumLength: 1) == oldBody.subdata(in: 0..<1))
-        let second = try await cache.open(
-            key: rangeKey,
-            format: "mp3",
-            initialSource: oldSource,
-            sourceProvider: { try await provider.next() }
-        )
         let oldBodyURL = try #require(rangeFiles(in: root, withExtension: "range").first)
         let lateReader = Task {
             try await cache.read(session: first, offset: 100, maximumLength: 1)
         }
         try await waitForRangeCondition { await lateGate.hasEntered() }
-        let mismatchReader = Task {
-            try await cache.read(
-                session: second,
-                offset: Int64(rangeBlockSize + 100),
-                maximumLength: 1
-            )
-        }
         await expectRangeError(.inconsistentRepresentation) {
-            _ = try await mismatchReader.value
+            _ = try await cache.open(
+                key: rangeKey,
+                format: "mp3",
+                initialSource: newSource,
+                sourceProvider: { newSource }
+            )
         }
         await expectRangeError(.inconsistentRepresentation) {
             _ = try await lateReader.value
         }
-        #expect(await provider.calls == 1)
         #expect(await cache.descriptor(for: rangeKey) == nil)
         #expect(rangeFiles(in: root, withExtension: "plist").isEmpty)
 
         await lateGate.release()
-        try await waitForRangeCondition { await fixture.completions == 3 }
+        try await waitForRangeCondition { await fixture.completions == 2 }
         try await waitForRangeCondition {
             rangeFiles(in: root.appending(path: "responses"), withExtension: "").isEmpty
         }
@@ -1523,14 +1747,13 @@ struct TrackRangeCacheTests {
         let replacement = try await cache.open(
             key: rangeKey,
             format: "mp3",
-            initialSource: rangeSource(sourceB, data: newBody),
-            sourceProvider: { rangeSource(sourceB, data: newBody) }
+            initialSource: newSource,
+            sourceProvider: { newSource }
         )
         let bodyURLs = rangeFiles(in: root, withExtension: "range")
         #expect(bodyURLs.count == 2)
         #expect(bodyURLs.contains(oldBodyURL))
         await cache.close(first)
-        await cache.close(second)
         await cache.close(replacement)
         try await cache.clear()
         try await waitForRangeCondition { rangeFiles(in: root, withExtension: "range").isEmpty }

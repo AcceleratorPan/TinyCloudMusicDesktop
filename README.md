@@ -12,9 +12,11 @@ URLSession 构建，支持 macOS 14 及以上版本。应用没有 Qt 运行依�
 
 ## 构建与运行
 
+本机只允许一个编译命令运行；以下命令依次执行，复用 `.build`。开始前确认没有其他 Swift/Xcode 编译进程。自动化代理启动应用另需该次明确授权，见 [AGENTS.md](AGENTS.md)。
+
 ```bash
-swift build -j 4 -Xswiftc -warnings-as-errors
-swift run TinyCloudMusic
+swift build -j 1 -Xswiftc -disable-batch-mode -Xswiftc -warnings-as-errors
+swift run -j 1 -Xswiftc -disable-batch-mode TinyCloudMusic
 ```
 
 应用可在访客模式下使用公开内容。登录账号时按 `Command-,` 打开设置，选择“网页登录”；
@@ -27,7 +29,7 @@ VIP 凭据可在设置的“高级设置”中单独验证、保存或清除。
 ```bash
 TINYCLOUDMUSIC_COOKIE='<authorized cookie>' \
 TINYCLOUDMUSIC_MUSIC_U='<authorized MUSIC_U>' \
-swift run TinyCloudMusic
+swift run -j 1 -Xswiftc -disable-batch-mode TinyCloudMusic
 ```
 
 ## 当前功能
@@ -47,7 +49,7 @@ swift run TinyCloudMusic
 运行仓库自带的一组构建与接口检查：
 
 ```bash
-Checks/run-api-checks.sh
+TINYCLOUDMUSIC_COOKIE= TINYCLOUDMUSIC_MUSIC_U= Checks/run-api-checks.sh
 ```
 
 该脚本会执行 warnings-as-errors 构建、Core/EAPI/Cache 检查、46 个 Qt/Swift API
@@ -57,7 +59,7 @@ Checks/run-api-checks.sh
 完整 Xcode 环境还应运行：
 
 ```bash
-swift test -j 4
+swift test -j 1 --no-parallel -Xswiftc -disable-batch-mode
 ```
 
 如果命令行工具提示缺少 `Testing` 或 `XCTest` 模块，请先让 `xcode-select` 指向完整 Xcode。

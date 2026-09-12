@@ -163,5 +163,125 @@ struct LiveMusicExtrasTests {
         #expect(page.offset == 22)
         #expect(page.hasMore)
     }
+
+    @Test("Available-playlist pages preserve order, raw cursor, and all stop conditions")
+    func availablePlaylistAppending() {
+        let first = MusicAvailablePlaylistPage(
+            playlists: [availablePlaylist(1), availablePlaylist(2)],
+            offset: 20,
+            hasMore: true
+        )
+        let merged = first.appending(MusicAvailablePlaylistPage(
+            playlists: [availablePlaylist(2), availablePlaylist(3), availablePlaylist(3)],
+            offset: 24,
+            hasMore: true
+        ))
+
+        #expect(merged.playlists.map(\.id) == [1, 2, 3])
+        #expect(merged.offset == 24)
+        #expect(merged.hasMore)
+        #expect(!first.appending(.init(playlists: [], offset: 20, hasMore: true)).hasMore)
+        #expect(!first.appending(.init(
+            playlists: [availablePlaylist(2)],
+            offset: 21,
+            hasMore: true
+        )).hasMore)
+        #expect(!first.appending(.init(
+            playlists: [availablePlaylist(3)],
+            offset: 20,
+            hasMore: true
+        )).hasMore)
+        #expect(!first.appending(.init(
+            playlists: [availablePlaylist(3)],
+            offset: 21,
+            hasMore: false
+        )).hasMore)
+    }
+
+    @Test("Available-playlist picker loads one page and scopes retry to the failed cursor")
+    func availablePlaylistPickerLoadsOnePageAndStopsOnNoProgress() throws {
+        let view = try iosAddSongToPlaylistSource()
+        let body = try slice(view, from: "var body: some View {", to: "private var credentialRevision:")
+        let footer = try slice(view, from: "private var loadMoreFooter:", to: "private func loadInitialPage(")
+        let initial = try slice(view, from: "private func loadInitialPage(", to: "private func loadNextPage(")
+        let loadMore = try slice(view, from: "private func loadNextPage(", to: "private func add(")
+
+        #expect(!view.contains("while true"))
+        #expect(initial.components(separatedBy: "extras.availablePlaylists(").count == 2)
+        #expect(initial.contains("offset: 0"))
+        #expect(view.contains("case loaded(MusicAvailablePlaylistPage)"))
+        #expect(body.contains("let initialTaskIdentity = initialLoadIdentity"))
+        #expect(body.contains(".task(id: initialTaskIdentity)"))
+        #expect(body.contains("await loadInitialPage(initialTaskIdentity)"))
+        #expect(footer.contains("let loadMoreTaskIdentity = loadMoreIdentity"))
+        #expect(footer.contains(".task(id: loadMoreTaskIdentity)"))
+        #expect(footer.contains("await loadNextPage(loadMoreTaskIdentity)"))
+        #expect(view.components(separatedBy: "loadNextPage(").count == 3)
+        #expect(view.contains("@State private var loadMoreOwner: LoadMoreIdentity?"))
+        #expect(view.contains("private var isLoadingMore: Bool { loadMoreOwner != nil }"))
+        #expect(view.contains("@State private var loadMoreError: String?"))
+        #expect(view.contains("IOSInlineRetry(message: loadMoreError)"))
+        #expect(view.contains(".refreshable { retryRevision &+= 1 }"))
+        #expect(view.contains("_ = session.state"))
+        #expect(view.contains("return session.credentialRevision"))
+        #expect(view.contains("let userID: Int64"))
+        #expect(view.contains("let trackID: Int64"))
+        #expect(view.contains("let credentialRevision: UInt64"))
+        #expect(initial.contains("phase = .loading"))
+        #expect(initial.contains("loadMoreOwner = nil"))
+        #expect(initial.contains("loadMoreError = nil"))
+        #expect(initial.contains("MusicAvailablePlaylistPage(playlists: [], offset: 0, hasMore: true).appending(page)"))
+        #expect(loadMore.contains("loadMoreOwner != identity"))
+        #expect(loadMore.contains("loadMoreOwner = identity"))
+        #expect(loadMore.contains("if loadMoreOwner == identity { loadMoreOwner = nil }"))
+        #expect(loadMore.components(separatedBy: "loadMoreOwner == identity").count == 4)
+        #expect(loadMore.contains("let offset = page.offset"))
+        #expect(loadMore.contains("offset: offset"))
+        #expect(loadMore.contains("current.offset == offset"))
+        #expect(loadMore.contains("phase = .loaded(current.appending(next))"))
+        #expect(loadMore.contains("loadMoreError = error.localizedDescription"))
+        #expect(!loadMore.contains("phase = .failed"))
+        #expect(initial.contains("Task.checkCancellation()"))
+        #expect(loadMore.contains("Task.checkCancellation()"))
+        #expect(initial.contains("!Task.isCancelled"))
+        #expect(loadMore.contains("!Task.isCancelled"))
+    }
+
+    private func availablePlaylist(_ id: Int64) -> MusicAvailablePlaylist {
+        MusicAvailablePlaylist(
+            playlist: MusicLibraryPlaylist(
+                id: id,
+                name: "Playlist \(id)",
+                creatorID: 1,
+                creatorName: "Creator",
+                description: "",
+                coverURL: nil,
+                trackCount: 0,
+                playCount: 0,
+                isSubscribed: false,
+                subscriberCount: 0
+            ),
+            containsTrack: false
+        )
+    }
+
+    private func iosAddSongToPlaylistSource() throws -> String {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appending(path: "iOS/TinyCloudMusicIOS/UI/IOSRootView.swift"),
+            encoding: .utf8
+        )
+        let start = try #require(source.range(of: "private struct IOSAddSongToPlaylistView:")?.lowerBound)
+        return String(source[start...])
+    }
+
+    private func slice(_ source: String, from start: String, to end: String) throws -> String {
+        let lower = try #require(source.range(of: start)?.lowerBound)
+        let upper = try #require(source.range(of: end, range: lower..<source.endIndex)?.lowerBound)
+        return String(source[lower..<upper])
+    }
 }
 #endif

@@ -115,7 +115,7 @@ final class MusicDownloadManager {
 
     init(
         transport: EAPITransport = EAPITransport(),
-        session: URLSession = .shared,
+        session: URLSession = MusicDownloadSession.defaultSession(),
         maximumConcurrentDownloads: Int = 3,
         retryPolicy: MusicDownloadRetryPolicy = .standard,
         resumeStore: MusicDownloadResumeStore = .shared,
@@ -191,22 +191,48 @@ final class MusicDownloadManager {
                 continue
             }
             guard let context = cloudAccountContext, context.userID == userID else {
-                resumeStore.remove(songID: recovery.request.songID, onFailure: persistenceFailureHandler)
+                if recovery.restoredState == nil {
+                    resumeStore.remove(songID: recovery.request.songID, onFailure: persistenceFailureHandler)
+                } else {
+                    deferredCloudRecoveries.append(recovery)
+                }
                 continue
             }
             ready.append(MusicDownloadRecovery(
                 request: recovery.request.bindingCloudCredentialRevision(context.credentialRevision),
                 resumeData: recovery.resumeData,
-                savedAt: recovery.savedAt
+                savedAt: recovery.savedAt,
+                restoredState: recovery.restoredState
             ))
         }
-        for recovery in ready {
-            if let resumeData = recovery.resumeData {
-                resumeDataBySongID[recovery.request.songID] = resumeData
-            }
-        }
-        _ = enqueue(ready.map(\.request), persist: false)
+        restoreAudioDownloads(ready)
         enqueueRecoveredVideos(result.videos)
+    }
+
+    private func restoreAudioDownloads(_ recoveries: [MusicDownloadRecovery]) {
+        var queued: [MusicDownloadRequest] = []
+        for recovery in recoveries {
+            let request = recovery.request
+            guard requestsBySongID[request.songID] == nil, items[request.songID] == nil else { continue }
+            if let resumeData = recovery.resumeData {
+                resumeDataBySongID[request.songID] = resumeData
+            }
+            guard let state = recovery.restoredState else {
+                queued.append(request)
+                continue
+            }
+            requestsBySongID[request.songID] = request
+            states[request.songID] = state
+            items[request.songID] = MusicDownloadItem(
+                id: request.songID,
+                title: request.songName,
+                artist: request.artists,
+                quality: request.source == .catalog ? request.quality.rawValue : "原文件",
+                expectedBytes: request.expectedBytes
+            )
+            itemOrder.append(request.songID)
+        }
+        _ = enqueue(queued, persist: false)
     }
 
     private func enqueueRecoveredVideos(_ recoveries: [MusicDownloadVideoRecovery]) {
@@ -231,13 +257,17 @@ final class MusicDownloadManager {
                 quality: recovery.request.quality.rawValue
             )
             nextOrder.append(id)
+            if let state = recovery.restoredState {
+                nextStates[id] = state
+                continue
+            }
             let jobID = UUID()
             videoJobIDs[id] = jobID
             nextStates[id] = .queued
             pendingVideoRequests[id] = recovery.request
             pendings.append(.video(id: id, jobID: jobID))
         }
-        guard !pendings.isEmpty else { return }
+        guard !processed.isEmpty else { return }
         videoItemOrder = nextOrder
         videoStates = nextStates
         videoItems = nextItems
@@ -314,12 +344,26 @@ final class MusicDownloadManager {
             else { return songID }
             return nil
         }
-        staleIDs.forEach { cancel(songID: $0) }
+        for songID in staleIDs {
+            if case .completed? = states[songID], let request = requestsBySongID[songID] {
+                deferredCloudRecoveries.append(MusicDownloadRecovery(
+                    request: request, resumeData: nil, savedAt: Date(), restoredState: states[songID]
+                ))
+                cancelCompletedFileValidation(for: .music(songID))
+                requestsBySongID.removeValue(forKey: songID)
+                states.removeValue(forKey: songID)
+                items.removeValue(forKey: songID)
+                itemOrder.removeAll { $0 == songID }
+            } else {
+                cancel(songID: songID)
+            }
+        }
 
         let recoveries = deferredCloudRecoveries
         deferredCloudRecoveries.removeAll()
         guard let context = cloudAccountContext else {
-            recoveries.forEach {
+            deferredCloudRecoveries = recoveries.filter { $0.restoredState != nil }
+            recoveries.filter { $0.restoredState == nil }.forEach {
                 resumeStore.remove(songID: $0.request.songID, onFailure: persistenceFailureHandler)
             }
             return
@@ -329,19 +373,21 @@ final class MusicDownloadManager {
             guard case let .cloud(ownerID, _) = recovery.request.source,
                   ownerID == context.userID
             else {
-                resumeStore.remove(songID: recovery.request.songID, onFailure: persistenceFailureHandler)
+                if recovery.restoredState == nil {
+                    resumeStore.remove(songID: recovery.request.songID, onFailure: persistenceFailureHandler)
+                } else {
+                    deferredCloudRecoveries.append(recovery)
+                }
                 return nil
             }
             return MusicDownloadRecovery(
                 request: recovery.request.bindingCloudCredentialRevision(context.credentialRevision),
                 resumeData: recovery.resumeData,
-                savedAt: recovery.savedAt
+                savedAt: recovery.savedAt,
+                restoredState: recovery.restoredState
             )
         }
-        for recovery in matching where recovery.resumeData != nil {
-            resumeDataBySongID[recovery.request.songID] = recovery.resumeData
-        }
-        _ = enqueue(matching.map(\.request), persist: false)
+        restoreAudioDownloads(matching)
     }
 
     @discardableResult
@@ -685,6 +731,7 @@ final class MusicDownloadManager {
             resumeStore.save(
                 request,
                 resumeData: resumeDataBySongID[songID],
+                isPaused: true,
                 onFailure: persistenceFailureHandler
             )
         } else {
@@ -699,7 +746,7 @@ final class MusicDownloadManager {
         schedulePendingDownloads()
     }
 
-    func pauseAll() async {
+    func pauseAll(resumesOnLaunch: Bool = false) async {
         if let recoveryTask { await recoveryTask.value }
         isPausingAll = true
         let affected = Set(pendingRequests.keys).union(activeTasks.values.compactMap(\.songID))
@@ -719,11 +766,15 @@ final class MusicDownloadManager {
 
         let audio = ordered.compactMap { songID -> MusicDownloadResumeEntry? in
             guard let request = requestsBySongID[songID] else { return nil }
-            return MusicDownloadResumeEntry(request: request, resumeData: resumeDataBySongID[songID])
+            return MusicDownloadResumeEntry(
+                request: request, resumeData: resumeDataBySongID[songID], isPaused: !resumesOnLaunch
+            )
         }
         let videos = orderedVideos.compactMap { id -> MusicDownloadVideoResumeEntry? in
             guard let request = videoRequests[id] else { return nil }
-            return videoResumeEntry(for: request, id: id)
+            var entry = videoResumeEntry(for: request, id: id)
+            entry.isPaused = !resumesOnLaunch
+            return entry
         }
         resumeStore.save(
             audio: audio,
@@ -1014,7 +1065,10 @@ final class MusicDownloadManager {
         guard jobIDs[songID] == jobID else { return }
         pausingSongIDs.remove(songID)
         resumeAfterPauseSongIDs.remove(songID)
-        discardResumeData(songID: songID)
+        discardResumeData(songID: songID, persist: false)
+        if let request = requestsBySongID[songID] {
+            resumeStore.save(request, completion: result, onFailure: persistenceFailureHandler)
+        }
         retryAttempts[songID] = 0
         states[songID] = .completed(audioURL: result.audioURL, lyricURL: result.lyricURL)
         trimHistory()
@@ -1025,7 +1079,15 @@ final class MusicDownloadManager {
         pausingVideoIDs.remove(id)
         resumeAfterPauseVideoIDs.remove(id)
         videoRecoveryByID.removeValue(forKey: id)
-        resumeStore.remove(videoID: id, onFailure: persistenceFailureHandler)
+        if let request = videoRequests[id] {
+            resumeStore.save(
+                MusicDownloadVideoResumeEntry(
+                    request: request, resumeData: nil, resolution: nil, sourceURL: nil, sourceExpiresAt: nil,
+                    completion: MusicDownloadResult(audioURL: url, lyricURL: nil)
+                ),
+                onFailure: persistenceFailureHandler
+            )
+        }
         videoStates[id] = .completed(audioURL: url, lyricURL: nil)
         trimVideoHistory()
     }
@@ -1040,6 +1102,7 @@ final class MusicDownloadManager {
                 resumeStore.save(
                     request,
                     resumeData: resumeData,
+                    isPaused: true,
                     onFailure: persistenceFailureHandler
                 )
             }
@@ -1250,12 +1313,14 @@ final class MusicDownloadManager {
 
     private func videoResumeEntry(for request: VideoDownloadRequest, id: String) -> MusicDownloadVideoResumeEntry {
         let recovery = videoRecoveryByID[id]
+        let isPaused: Bool = if case .paused? = videoStates[id] { true } else { false }
         return MusicDownloadVideoResumeEntry(
             request: request,
             resumeData: recovery?.resumeData,
             resolution: recovery?.resolution,
             sourceURL: recovery?.sourceURL,
-            sourceExpiresAt: recovery?.sourceExpiresAt
+            sourceExpiresAt: recovery?.sourceExpiresAt,
+            isPaused: isPaused
         )
     }
 
@@ -1306,13 +1371,14 @@ final class MusicDownloadManager {
     }
 
     private func trimHistory(limit: Int = 500) {
+        // ponytail: completed entries retain export URLs in memory; paginate if large libraries need it.
         let excess = itemOrder.count - limit
         guard excess > 0 else { return }
         let victims = itemOrder.lazy.filter { songID in
             guard !self.isActive(songID: songID), let state = self.states[songID] else { return false }
             switch state {
-            case .completed, .failed, .cancelled: return true
-            case .queued, .running, .paused: return false
+            case .failed, .cancelled: return true
+            case .completed, .queued, .running, .paused: return false
             }
         }.prefix(excess)
         let victimIDs = Set(victims)
@@ -1334,8 +1400,8 @@ final class MusicDownloadManager {
         let victims = videoItemOrder.lazy.filter { id in
             guard !self.isVideoActive(id: id), let state = self.videoStates[id] else { return false }
             switch state {
-            case .completed, .failed, .cancelled: return true
-            case .queued, .running, .paused: return false
+            case .failed, .cancelled: return true
+            case .completed, .queued, .running, .paused: return false
             }
         }.prefix(excess)
         let victimIDs = Set(victims)
@@ -1828,6 +1894,9 @@ final class MusicDownloadManager {
             },
             allowsRequest: { redirectedRequest in
                 redirectedRequest.url.map(CloudMusicDecoder.isAllowedDownloadURL) == true
+            },
+            backgroundIdentifier: session.configuration.identifier.map {
+                _ in MusicDownloadSession.identifier(for: request.songID)
             }
         )
         defer { transfer.invalidate() }

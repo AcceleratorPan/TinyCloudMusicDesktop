@@ -14,11 +14,18 @@ private actor CacheLoadCounter {
     func count() -> Int { value }
 }
 
+private struct RepositoryDetailRequest: Equatable, Sendable {
+    let route: Route
+    let expectedCredentialRevision: UInt64?
+    let forceRefresh: Bool
+}
+
 private actor MutablePlaylistRepository: MusicRepository {
     nonisolated let homeDescriptors: [HomeSectionDescriptor] = []
     private var detailValue: DetailContent
     private var requestCount = 0
     private var cancellationsRemaining = 0
+    private var detailRequests: [RepositoryDetailRequest] = []
 
     init(detail: DetailContent) {
         detailValue = detail
@@ -27,6 +34,7 @@ private actor MutablePlaylistRepository: MusicRepository {
     func replaceDetail(_ detail: DetailContent) { detailValue = detail }
     func cancelNextDetailRequest() { cancellationsRemaining += 1 }
     func detailRequestCount() -> Int { requestCount }
+    func recordedDetailRequests() -> [RepositoryDetailRequest] { detailRequests }
 
     func detail(
         for route: Route,
@@ -38,6 +46,21 @@ private actor MutablePlaylistRepository: MusicRepository {
             throw CancellationError()
         }
         return detailValue
+    }
+
+    func detail(
+        for route: Route,
+        expectedCredentialRevision: UInt64?,
+        forceRefresh: Bool
+    ) async throws -> DetailContent {
+        detailRequests.append(
+            RepositoryDetailRequest(
+                route: route,
+                expectedCredentialRevision: expectedCredentialRevision,
+                forceRefresh: forceRefresh
+            )
+        )
+        return try await detail(for: route, expectedCredentialRevision: expectedCredentialRevision)
     }
 
     func homeSection(
@@ -98,8 +121,205 @@ private func waitForPlaylistTrackCount(
     Issue.record("Timed out waiting for playlist track count \(expected)")
 }
 
+private final class RepositoryDetailProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var capturedRequests: [URLRequest] = []
+
+    static func reset() {
+        lock.withLock { capturedRequests = [] }
+    }
+
+    static func requests(path: String) -> [URLRequest] {
+        lock.withLock { capturedRequests.filter { $0.url?.path == path } }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        var capturedRequest = request
+        if capturedRequest.httpBody == nil, capturedRequest.httpBodyStream != nil {
+            capturedRequest.httpBody = requestBody(capturedRequest)
+        }
+        Self.lock.withLock { Self.capturedRequests.append(capturedRequest) }
+
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Self.responseBody(for: request.url?.path ?? ""))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    private static func responseBody(for path: String) -> Data {
+        let body = switch path {
+        case "/eapi/v6/playlist/detail":
+            #"{"code":200,"playlist":{"id":11,"name":"List","trackCount":0,"creator":{"userId":14,"nickname":"Owner"},"trackIds":[],"tracks":[]}}"#
+        case "/eapi/artist/head/info/get":
+            #"{"code":200,"data":{"artist":{"id":12,"name":"Artist"}}}"#
+        case "/eapi/v1/artist/top/song":
+            #"{"code":200,"songs":[]}"#
+        case "/eapi/album/v3/detail":
+            #"{"code":200,"album":{"id":13,"name":"Album","artist":{"id":12,"name":"Artist"}},"songs":[]}"#
+        case "/eapi/v1/user/detail":
+            #"{"code":200,"profile":{"userId":14,"nickname":"User"}}"#
+        case "/eapi/user/playlist":
+            #"{"code":200,"more":false,"playlist":[]}"#
+        default:
+            #"{"code":500,"message":"unexpected fixture route"}"#
+        }
+        return Data(body.utf8)
+    }
+
+    private func requestBody(_ request: URLRequest) -> Data {
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open()
+        defer { stream.close() }
+        var body = Data()
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            body.append(buffer, count: count)
+        }
+        return body
+    }
+}
+
+private func repositoryDetailPayload(_ request: URLRequest) -> [String: Any]? {
+    guard let body = request.httpBody,
+          let text = String(data: body, encoding: .utf8),
+          text.hasPrefix("params=")
+    else { return nil }
+    let hex = text.dropFirst("params=".count)
+    var encrypted = Data(capacity: hex.count / 2)
+    var index = hex.startIndex
+    while index < hex.endIndex {
+        guard let next = hex.index(index, offsetBy: 2, limitedBy: hex.endIndex),
+              let byte = UInt8(hex[index..<next], radix: 16)
+        else { return nil }
+        encrypted.append(byte)
+        index = next
+    }
+    guard let envelope = try? EAPICodec.decrypt(encrypted),
+          let text = String(data: envelope, encoding: .utf8)
+    else { return nil }
+    let parts = text.components(separatedBy: "-36cd479b6b5-")
+    guard parts.count == 3,
+          let data = parts[1].data(using: .utf8),
+          let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else { return nil }
+    return payload
+}
+
 @Suite("Phase 0 core behavior")
 struct CoreTests {
+    @Test("Repository detail force refresh dynamically dispatches with legacy fallback")
+    func repositoryDetailForceRefreshDispatch() async throws {
+        let detail = DetailContent.playlist(
+            Playlist(
+                id: 42,
+                name: "List",
+                creator: "Owner",
+                description: "",
+                artwork: Artwork(symbol: "music.note.list", accent: .green)
+            ),
+            songs: [],
+            trackIDs: [],
+            loadedTrackCount: 0
+        )
+        let spy = MutablePlaylistRepository(detail: detail)
+        let repository: any MusicRepository = spy
+
+        _ = try await repository.detail(
+            for: .playlist(42),
+            expectedCredentialRevision: 7,
+            forceRefresh: true
+        )
+
+        let requests = await spy.recordedDetailRequests()
+        #expect(
+            requests == [
+                RepositoryDetailRequest(
+                    route: .playlist(42),
+                    expectedCredentialRevision: 7,
+                    forceRefresh: true
+                )
+            ]
+        )
+
+        let legacy: any MusicRepository = FixtureMusicRepository()
+        guard case .playlist = try await legacy.detail(
+            for: .playlist(301),
+            expectedCredentialRevision: 7,
+            forceRefresh: true
+        ) else {
+            Issue.record("Legacy repository did not use its two-argument detail implementation")
+            return
+        }
+    }
+
+    @Test("Live playlist force refresh maps only to its cached detail request")
+    func liveDetailRefreshRouting() async throws {
+        RepositoryDetailProtocol.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RepositoryDetailProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let repository: any MusicRepository = LiveMusicRepository(
+            transport: EAPITransport(session: session, cookie: "", musicU: "")
+        )
+
+        _ = try await repository.detail(for: .playlist(11), expectedCredentialRevision: nil)
+        #expect(RepositoryDetailProtocol.requests(path: "/eapi/v6/playlist/detail").count == 1)
+        _ = try await repository.detail(
+            for: .playlist(11),
+            expectedCredentialRevision: nil,
+            forceRefresh: false
+        )
+        #expect(RepositoryDetailProtocol.requests(path: "/eapi/v6/playlist/detail").count == 1)
+        _ = try await repository.detail(
+            for: .playlist(11),
+            expectedCredentialRevision: nil,
+            forceRefresh: true
+        )
+
+        let playlistRequests = RepositoryDetailProtocol.requests(path: "/eapi/v6/playlist/detail")
+        #expect(playlistRequests.count == 2)
+        #expect(
+            playlistRequests.compactMap(repositoryDetailPayload).compactMap { $0["n"] as? String }
+                == Array(repeating: String(PlaylistSongPaging.initialCount), count: 2)
+        )
+
+        for route in [Route.artist(12), .album(13), .user(14)] {
+            _ = try await repository.detail(
+                for: route,
+                expectedCredentialRevision: nil,
+                forceRefresh: true
+            )
+            _ = try await repository.detail(
+                for: route,
+                expectedCredentialRevision: nil,
+                forceRefresh: true
+            )
+        }
+
+        for path in [
+            "/eapi/artist/head/info/get",
+            "/eapi/v1/artist/top/song",
+            "/eapi/album/v3/detail",
+            "/eapi/v1/user/detail",
+            "/eapi/user/playlist"
+        ] {
+            #expect(RepositoryDetailProtocol.requests(path: path).count == 1)
+        }
+    }
+
     @Test("EAPI request and album cache-key golden vectors")
     func eapiGoldenVectors() throws {
         let path = "/api/search/song/list/page"
@@ -902,6 +1122,80 @@ struct CoreTests {
         )
         #expect(lines.map(\.timestampMilliseconds) == [1_120, 3_180, 5_000])
         #expect(lines.map(\.text) == ["第一行", "第二行", "普通回退"])
+    }
+
+    @Test("Cloud lyric parsing stays in the guarded response commit")
+    func cloudLyricParsingSourceBoundary() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appending(
+                path: "iOS/TinyCloudMusicIOS/UI/LibraryMedia/IOSLibraryView.swift"
+            ),
+            encoding: .utf8
+        )
+        let detailStart = try #require(
+            source.range(of: "private struct IOSCloudSongDetailView: View")?.lowerBound
+        )
+        let detailEnd = try #require(
+            source.range(
+                of: "private struct IOSRecommendationDatesTaskIdentity",
+                range: detailStart..<source.endIndex
+            )?.lowerBound
+        )
+        let detail = String(source[detailStart..<detailEnd])
+        let contentStart = try #require(detail.range(of: "private func lyricContent")?.lowerBound)
+        let loadStart = try #require(
+            detail.range(of: "private func load()", range: contentStart..<detail.endIndex)?.lowerBound
+        )
+        let content = String(detail[contentStart..<loadStart])
+        let load = String(detail[loadStart...])
+        let lyricsRequestStart = try #require(
+            load.range(of: "let value = try await library.cloudLyrics")?.lowerBound
+        )
+        let lyricsResponse = String(load[lyricsRequestStart...])
+        let cancellation = try #require(
+            lyricsResponse.range(of: "try Task.checkCancellation()")?.lowerBound
+        )
+        let revisionFence = try #require(
+            lyricsResponse.range(
+                of: "guard self.revision == revision else { return }",
+                range: cancellation..<lyricsResponse.endIndex
+            )?.lowerBound
+        )
+        let sourceChange = try #require(
+            lyricsResponse.range(of: "if lyrics != value", range: revisionFence..<lyricsResponse.endIndex)?.lowerBound
+        )
+        let parse = try #require(
+            lyricsResponse.range(of: "LRCParser.parseOffMain(value)", range: sourceChange..<lyricsResponse.endIndex)?.lowerBound
+        )
+        let pairedCommit = try #require(
+            lyricsResponse.range(
+                of: "(lyrics, lyricLines) = (value, lines)",
+                range: sourceChange..<lyricsResponse.endIndex
+            )?.lowerBound
+        )
+
+        #expect(detail.contains("@State private var lyrics: SongLyrics?"))
+        #expect(detail.contains("@State private var lyricLines: [LyricLine] = []"))
+        #expect(detail.contains("lyricContent(lyrics, lines: lyricLines)"))
+        #expect(content.contains("private func lyricContent(_ lyrics: SongLyrics, lines: [LyricLine])"))
+        #expect(!content.contains("LRCParser.parse"))
+        #expect(detail.components(separatedBy: "LRCParser.parse").count == 2)
+        #expect(cancellation < revisionFence)
+        #expect(revisionFence < sourceChange)
+        #expect(sourceChange < pairedCommit)
+        #expect(parse < pairedCommit)
+        #expect(lyricsResponse.components(separatedBy: "(lyrics, lyricLines) =").count == 2)
+        #expect(content.contains("if lines.isEmpty"))
+        #expect(content.contains("lyrics.lineLyrics.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty"))
+        #expect(content.contains("IOSLibraryEmptyRow(title: \"暂无歌词\", symbol: \"text.quote\")"))
+        #expect(content.contains("Text(lyrics.lineLyrics)"))
+        #expect(load.contains(#"failures.append("详情：\(error.localizedDescription)")"#))
+        #expect(load.contains(#"failures.append("歌词：\(error.localizedDescription)")"#))
+        #expect(load.contains(#"failures.joined(separator: "\n")"#))
     }
 
     @Test("Current word keeps the previous highlight through timing gaps")

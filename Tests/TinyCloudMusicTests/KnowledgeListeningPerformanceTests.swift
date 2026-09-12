@@ -2,6 +2,7 @@ import AppKit
 import CoreGraphics
 import Foundation
 import ImageIO
+import OSLog
 import PDFKit
 import SwiftUI
 import Testing
@@ -48,6 +49,7 @@ private final class MusicSheetFixtureProtocol: URLProtocol, @unchecked Sendable 
     }
 
     static var requestCount: Int { lock.withLock { requests.count } }
+    static var pendingCount: Int { lock.withLock { pending.count } }
     static func requestCount(path: String) -> Int {
         lock.withLock { requests.count(where: { $0.url?.path == path }) }
     }
@@ -135,6 +137,74 @@ private enum KnowledgeFixtureError: Error {
 
 @Suite("Knowledge, sheet, and listening performance", .serialized)
 struct KnowledgeListeningPerformanceTests {
+    @Test("Sheet exports preserve invalid existing files and concurrent exports")
+    func sheetExportsDoNotOverwrite() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "source.pdf")
+        let pdf = Data("%PDF-1.7\nfixture\n%%EOF".utf8)
+        try pdf.write(to: source)
+        let song = annualSong(88, name: "Existing", complete: true)
+        let sheet = MusicSheetSummary(id: 7, title: "Existing", instrument: nil, pageCount: 1)
+        let destination = root.appending(path: MusicSheetFiles.fileName(song: song, sheet: sheet))
+        let sentinel = Data("existing user document".utf8)
+        try sentinel.write(to: destination)
+
+        let firstWorker = MusicSheetWorker(temporaryRoot: root.appending(path: "first"))
+        let secondWorker = MusicSheetWorker(temporaryRoot: root.appending(path: "second"))
+        async let first = firstWorker.savePDF(at: source, song: song, sheet: sheet, to: root)
+        async let second = secondWorker.savePDF(at: source, song: song, sheet: sheet, to: root)
+        let results = try await [first, second]
+        #expect(results.allSatisfy { $0.saved })
+        #expect(Set(results.map(\.url)).count == 2)
+        #expect(try Data(contentsOf: destination) == sentinel)
+        for result in results {
+            #expect(result.url != destination)
+            #expect(try Data(contentsOf: result.url) == pdf)
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path)
+            .allSatisfy { !$0.hasSuffix(".part") })
+    }
+
+    @Test("Remote PDF staging uses the shared helper and retains atomic final installation")
+    func remotePDFStagingStructure() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appending(path: "Sources/TinyCloudMusic/MusicSheetWorker.swift"),
+            encoding: .utf8
+        )
+        let downloadStart = try #require(source.range(of: "private func download("))
+        let downloadEnd = try #require(source.range(
+            of: "private func temporaryURL",
+            range: downloadStart.upperBound..<source.endIndex
+        ))
+        let installStart = try #require(source.range(of: "private static func installPDF("))
+        let installEnd = try #require(source.range(
+            of: "private static func valid(",
+            range: installStart.upperBound..<source.endIndex
+        ))
+        let download = String(source[downloadStart.lowerBound..<downloadEnd.lowerBound])
+        let install = String(source[installStart.lowerBound..<installEnd.lowerBound])
+
+        #expect(download.contains("MusicDownloadFiles.stageDownloadedFile(downloaded, at: destination)"))
+        #expect(!download.contains("copyItem(at: downloaded"))
+        #expect(download.range(of: "try Task.checkCancellation()")!.lowerBound
+            < download.range(of: "let downloadedSize")!.lowerBound)
+        #expect(download.range(of: "let downloadedSize")!.lowerBound
+            < download.range(of: "let destination = try temporaryURL")!.lowerBound)
+        #expect(download.range(of: "let destination = try temporaryURL")!.lowerBound
+            < download.range(of: "MusicDownloadFiles.stageDownloadedFile")!.lowerBound)
+
+        #expect(install.contains("defer { try? FileManager.default.removeItem(at: part) }"))
+        #expect(install.contains("copyItem(at: source, to: part)"))
+        #expect(install.contains("try Task.checkCancellation()"))
+        #expect(install.contains("replaceItemAt(destination, withItemAt: part)"))
+        #expect(install.contains("moveItem(at: part, to: destination)"))
+    }
+
     @Test("Image sheets stream 1, 50, and 100 pages in order")
     func imageSheetPageCounts() async throws {
         let oddImage = try fixturePNG(width: 3, height: 5)
@@ -264,6 +334,46 @@ struct KnowledgeListeningPerformanceTests {
         MusicSheetFixtureProtocol.releaseAll()
         let secondURL = try await second.value
         #expect(await worker.cachedPDF(sheetID: 7, cacheRoot: root) == secondURL)
+    }
+
+    @Test("Blocked sheet activity publishes only inside the controlled Sheets cache")
+    func controlledSheetCacheActivity() async throws {
+        let pdf = Data("%PDF-1.7\ncontrolled fixture\n%%EOF".utf8)
+        MusicSheetFixtureProtocol.reset { _, _ in .init(body: pdf, blocked: true) }
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let worker = fixtureWorker(temporaryRoot: root.appending(path: "temporary"))
+        let task = Task {
+            try await worker.preparePDF(
+                sheetID: 15,
+                preview: .pdf(URL(string: "https://p1.music.126.net/sheet/perf-a15.pdf")!),
+                cacheRoot: root
+            )
+        }
+        defer {
+            task.cancel()
+            MusicSheetFixtureProtocol.releaseAll()
+        }
+
+        #expect(await eventually {
+            MusicSheetFixtureProtocol.requestCount == 1
+                && MusicSheetFixtureProtocol.pendingCount == 1
+        })
+        #expect(await worker.cachedPDF(sheetID: 15, cacheRoot: root) == nil)
+        #expect(!FileManager.default.fileExists(
+            atPath: root.appending(path: "DownloadCache/Sheets/15.pdf").path
+        ))
+        SheetMeasurementSignposts.markActiveJob()
+
+        MusicSheetFixtureProtocol.releaseAll()
+        let cached = try await SheetMeasurementSignposts.asyncInterval("PERF-A15.Sheets.Commit") {
+            try await task.value
+        }
+        let sheets = root.appending(path: "DownloadCache/Sheets", directoryHint: .isDirectory)
+            .standardizedFileURL
+        #expect(cached.deletingLastPathComponent().standardizedFileURL == sheets)
+        #expect(await worker.cachedPDF(sheetID: 15, cacheRoot: root) == cached)
+        #expect(MusicSheetFixtureProtocol.pendingCount == 0)
     }
 
     @Test("Cancelling page N stops later pages and removes temporary files")
@@ -1566,6 +1676,27 @@ private func annualSong(_ id: Int64, name: String, complete: Bool = false) -> So
         ),
         duration: .seconds(1)
     )
+}
+
+private enum SheetMeasurementSignposts {
+    private static let signposter = OSSignposter(
+        subsystem: "com.tinycloudmusic.app.tests",
+        category: "W5-FX2A"
+    )
+
+    static func markActiveJob() {
+        signposter.emitEvent("PERF-A15.Sheets.ActiveJob")
+    }
+
+    @MainActor
+    static func asyncInterval<T>(
+        _ name: StaticString,
+        _ operation: () async throws -> T
+    ) async rethrows -> T {
+        let state = signposter.beginInterval(name)
+        defer { signposter.endInterval(name, state) }
+        return try await operation()
+    }
 }
 
 private func fixtureWorker(

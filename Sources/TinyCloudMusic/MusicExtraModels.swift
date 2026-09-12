@@ -73,6 +73,17 @@ struct MusicAvailablePlaylistPage: Equatable, Sendable {
     let playlists: [MusicAvailablePlaylist]
     let offset: Int
     let hasMore: Bool
+
+    func appending(_ next: Self) -> Self {
+        var ids = Set(playlists.map(\.id))
+        let additions = next.playlists.filter { ids.insert($0.id).inserted }
+        let progressed = next.offset > offset
+        return Self(
+            playlists: playlists + additions,
+            offset: max(offset, next.offset),
+            hasMore: next.hasMore && progressed && !additions.isEmpty
+        )
+    }
 }
 
 struct MusicRecommendedUser: Identifiable, Equatable, Sendable {

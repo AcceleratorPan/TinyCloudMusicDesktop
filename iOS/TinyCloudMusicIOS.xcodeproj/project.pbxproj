@@ -64,6 +64,7 @@
 		E219EA5E54266B539E0C7100 /* IOSPlayerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5799816B2706A6EB0C34D0ED /* IOSPlayerViews.swift */; };
 		E4379CC21FC020853410878B /* LiveListenTogetherService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F8ACAED260F2B7864FCD541 /* LiveListenTogetherService.swift */; };
 		E7DCB6F2C51EDDF1FA8C1A50 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = FDD1E960A7373EC7A423CB40 /* Assets.xcassets */; };
+		B918F0123A0D44019ED17410 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B918F0123A0D44019ED17411 /* PrivacyInfo.xcprivacy */; };
 		EE0F6351808F9C7EB2032E2B /* PlaylistImageUpload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 177FB6C5B4F7056EE6CCCE03 /* PlaylistImageUpload.swift */; };
 		F08115745A542E50ADC14906 /* AudioRangeResourceLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DC6AD23EC1D0C394F40011A /* AudioRangeResourceLoader.swift */; };
 		F3379EC4E0004CEC1C529199 /* MusicKnowledgeModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = E28C42CC0F5EFF325DAE7538 /* MusicKnowledgeModels.swift */; };
@@ -97,6 +98,7 @@
 		1DF238C9882A0935DDF6BEAB /* LiveMusicRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveMusicRepository.swift; sourceTree = "<group>"; };
 		1F98BE751C2ADC7C1D05E079 /* ListeningReportModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListeningReportModels.swift; sourceTree = "<group>"; };
 		1FC5C1687718827203B94330 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		B918F0123A0D44019ED17411 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		209E7600D6DDC940D31B7D40 /* TrackCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackCache.swift; sourceTree = "<group>"; };
 		237372F2DC585A7BA88E44F1 /* NOSAudioUpload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NOSAudioUpload.swift; sourceTree = "<group>"; };
 		271D0A55A44A681923079BA0 /* Pods-TinyCloudMusicIOS.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-TinyCloudMusicIOS.debug.xcconfig"; path = "Target Support Files/Pods-TinyCloudMusicIOS/Pods-TinyCloudMusicIOS.debug.xcconfig"; sourceTree = "<group>"; };
@@ -283,6 +285,7 @@
 			children = (
 				FDD1E960A7373EC7A423CB40 /* Assets.xcassets */,
 				1FC5C1687718827203B94330 /* Info.plist */,
+				B918F0123A0D44019ED17411 /* PrivacyInfo.xcprivacy */,
 				962C3DF5323669C9D6DE46BA /* App */,
 				6325E0C6FDDC27855171B6FA /* Platform */,
 				7F3A1DC4FC808DB14634DC1B /* SharedOverrides */,
@@ -482,6 +485,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				E7DCB6F2C51EDDF1FA8C1A50 /* Assets.xcassets in Resources */,
+				B918F0123A0D44019ED17410 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

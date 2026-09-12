@@ -1,0 +1,61 @@
+{
+  "date": "2026-09-12",
+  "environment": {
+    "macOS": "15.7.3 (24G419)",
+    "Xcode": "26.3 (17C519)",
+    "Swift": "6.2.4"
+  },
+  "macos_offline_tests": {
+    "command": "swift test --jobs 1 --no-parallel -Xswiftc -disable-batch-mode --filter 'AuditRemediationTests|MusicDownloadInfrastructureTests'",
+    "exit_code": 0,
+    "passed": 14,
+    "suites": 2,
+    "log": "macos-tests.log"
+  },
+  "ios_build_for_testing": {
+    "working_directory": "iOS",
+    "command": "xcodebuild -workspace TinyCloudMusicIOS.xcworkspace -scheme TinyCloudMusicIOS -destination 'generic/platform=iOS Simulator' -derivedDataPath DerivedData -jobs 1 -parallel-testing-enabled NO SWIFT_ENABLE_BATCH_MODE=NO 'OTHER_SWIFT_FLAGS=$(inherited) -j 1' CODE_SIGNING_ALLOWED=NO build-for-testing -quiet",
+    "exit_code": 0,
+    "tests_executed": false,
+    "app_launched": false,
+    "log": "ios-build.log",
+    "note": "quiet build completed successfully with empty stdout/stderr log"
+  },
+  "isolated_probes": {
+    "command": "python3 docs/macos-ios-audit-2026-09-12/reproduce-findings.py",
+    "exit_code": 0,
+    "cloud_offsets": [
+      0,
+      30,
+      90,
+      180
+    ],
+    "expected_offsets": [
+      0,
+      30,
+      60,
+      90
+    ],
+    "existing_sheet_file_preserved": false,
+    "expected_preserved": true,
+    "log": "probes.log"
+  },
+  "static_checks": {
+    "plutil_lint": "Info.plist, PrivacyInfo.xcprivacy, project.pbxproj: OK",
+    "git_diff_check": "passed",
+    "source_snapshot_changed_files": []
+  },
+  "safety": {
+    "production_credentials_accessed": false,
+    "authenticated_live_checks": false,
+    "concurrent_compiler_commands": false,
+    "memory_pressure_samples": "normal (1)",
+    "source_changes_made_by_audit": false
+  },
+  "report_checks": {
+    "local_links": "all exist",
+    "line_anchors": "all within source bounds",
+    "implementation_findings": 12,
+    "ios_peer_review": "passed"
+  }
+}

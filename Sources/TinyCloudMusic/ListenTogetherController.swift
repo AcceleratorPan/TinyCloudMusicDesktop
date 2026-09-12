@@ -843,8 +843,9 @@ final class ListenTogetherController {
             statusMessage = "新成员已加入"
             requestReconciliation(reconnect: false)
             sendHostSnapshot(includePlaylist: true)
-        case let .roomEnded(reason):
-            finishSession(reason: reason)
+        case .roomEnded:
+            // Chat payloads are hints; only the authenticated room status may end our session.
+            requestReconciliation(reconnect: false)
         case let .heartbeatRequested(ignoredUserIDs):
             guard let currentUserID, !ignoredUserIDs.contains(currentUserID) else { return }
             sendHostSnapshot(includePlaylist: false)

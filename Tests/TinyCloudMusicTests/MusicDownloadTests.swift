@@ -7,6 +7,8 @@ import Testing
 
 private enum MusicDownloadCheckError: Error {
     case failed
+    case moveFailed
+    case copyFailed
 }
 
 private final class DownloadProgressProbe: @unchecked Sendable {
@@ -614,6 +616,180 @@ private func verifyMusicDownloadFiles() throws {
     ) == nil else { throw MusicDownloadCheckError.failed }
 }
 
+private func verifyDownloadedFileStagingStateMachine() throws {
+    let manager = FileManager.default
+    let root = manager.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+    defer { try? manager.removeItem(at: root) }
+    try manager.createDirectory(at: root, withIntermediateDirectories: true)
+    let payload = Data("fLaC-staging".utf8)
+
+    var moveCount = 0
+    var copyCount = 0
+    let movedSource = root.appending(path: "move-source")
+    let movedDestination = root.appending(path: "move-destination")
+    try payload.write(to: movedSource)
+    try Data("old".utf8).write(to: movedDestination)
+    try MusicDownloadFiles.stageDownloadedFile(
+        movedSource,
+        at: movedDestination,
+        moveItem: { manager, source, destination in
+            moveCount += 1
+            try manager.moveItem(at: source, to: destination)
+        },
+        copyItem: { manager, source, destination in
+            copyCount += 1
+            try manager.copyItem(at: source, to: destination)
+        }
+    )
+    guard moveCount == 1,
+          copyCount == 0,
+          !manager.fileExists(atPath: movedSource.path),
+          try Data(contentsOf: movedDestination) == payload
+    else { throw MusicDownloadCheckError.failed }
+
+    moveCount = 0
+    copyCount = 0
+    let copiedSource = root.appending(path: "copy-source")
+    let copiedDestination = root.appending(path: "copy-destination")
+    try payload.write(to: copiedSource)
+    try MusicDownloadFiles.stageDownloadedFile(
+        copiedSource,
+        at: copiedDestination,
+        moveItem: { _, _, destination in
+            moveCount += 1
+            try Data("partial move".utf8).write(to: destination)
+            throw MusicDownloadCheckError.moveFailed
+        },
+        copyItem: { manager, source, destination in
+            copyCount += 1
+            guard !manager.fileExists(atPath: destination.path) else {
+                throw MusicDownloadCheckError.failed
+            }
+            try manager.copyItem(at: source, to: destination)
+        }
+    )
+    guard moveCount == 1,
+          copyCount == 1,
+          !manager.fileExists(atPath: copiedSource.path),
+          try Data(contentsOf: copiedDestination) == payload
+    else { throw MusicDownloadCheckError.failed }
+
+    moveCount = 0
+    copyCount = 0
+    let emptySource = root.appending(path: "empty-move-source")
+    let emptyDestination = root.appending(path: "empty-move-destination")
+    try payload.write(to: emptySource)
+    do {
+        try MusicDownloadFiles.stageDownloadedFile(
+            emptySource,
+            at: emptyDestination,
+            moveItem: { manager, source, destination in
+                moveCount += 1
+                try manager.moveItem(at: source, to: destination)
+                try Data().write(to: destination)
+            },
+            copyItem: { _, _, _ in
+                copyCount += 1
+                throw MusicDownloadCheckError.copyFailed
+            }
+        )
+        throw MusicDownloadCheckError.failed
+    } catch MusicDownloadError.emptyFile {
+    }
+    guard moveCount == 1,
+          copyCount == 0,
+          !manager.fileExists(atPath: emptyDestination.path)
+    else { throw MusicDownloadCheckError.failed }
+
+    moveCount = 0
+    copyCount = 0
+    let missingSource = root.appending(path: "missing-move-source")
+    let missingDestination = root.appending(path: "missing-move-destination")
+    try payload.write(to: missingSource)
+    do {
+        try MusicDownloadFiles.stageDownloadedFile(
+            missingSource,
+            at: missingDestination,
+            moveItem: { manager, source, destination in
+                moveCount += 1
+                try manager.moveItem(at: source, to: destination)
+                try manager.removeItem(at: destination)
+            },
+            copyItem: { _, _, _ in
+                copyCount += 1
+                throw MusicDownloadCheckError.copyFailed
+            }
+        )
+        throw MusicDownloadCheckError.failed
+    } catch MusicDownloadCheckError.copyFailed {
+        throw MusicDownloadCheckError.failed
+    } catch {
+    }
+    guard moveCount == 1,
+          copyCount == 0,
+          !manager.fileExists(atPath: missingDestination.path)
+    else { throw MusicDownloadCheckError.failed }
+
+    moveCount = 0
+    copyCount = 0
+    let failedSource = root.appending(path: "failed-source")
+    let failedDestination = root.appending(path: "failed-destination")
+    try payload.write(to: failedSource)
+    do {
+        try MusicDownloadFiles.stageDownloadedFile(
+            failedSource,
+            at: failedDestination,
+            moveItem: { _, _, destination in
+                moveCount += 1
+                try Data("partial move".utf8).write(to: destination)
+                throw MusicDownloadCheckError.moveFailed
+            },
+            copyItem: { manager, _, destination in
+                copyCount += 1
+                guard !manager.fileExists(atPath: destination.path) else {
+                    throw MusicDownloadCheckError.failed
+                }
+                try Data("partial copy".utf8).write(to: destination)
+                throw MusicDownloadCheckError.copyFailed
+            }
+        )
+        throw MusicDownloadCheckError.failed
+    } catch MusicDownloadCheckError.copyFailed {
+    }
+    guard moveCount == 1,
+          copyCount == 1,
+          manager.fileExists(atPath: failedSource.path),
+          !manager.fileExists(atPath: failedDestination.path)
+    else { throw MusicDownloadCheckError.failed }
+
+    moveCount = 0
+    copyCount = 0
+    let invalidCopySource = root.appending(path: "invalid-copy-source")
+    let invalidCopyDestination = root.appending(path: "invalid-copy-destination")
+    try payload.write(to: invalidCopySource)
+    do {
+        try MusicDownloadFiles.stageDownloadedFile(
+            invalidCopySource,
+            at: invalidCopyDestination,
+            moveItem: { _, _, _ in
+                moveCount += 1
+                throw MusicDownloadCheckError.moveFailed
+            },
+            copyItem: { _, _, destination in
+                copyCount += 1
+                try Data().write(to: destination)
+            }
+        )
+        throw MusicDownloadCheckError.failed
+    } catch MusicDownloadError.emptyFile {
+    }
+    guard moveCount == 1,
+          copyCount == 1,
+          manager.fileExists(atPath: invalidCopySource.path),
+          !manager.fileExists(atPath: invalidCopyDestination.path)
+    else { throw MusicDownloadCheckError.failed }
+}
+
 private func verifyRetryPolicyAndResumeStore() async throws {
     let policy = MusicDownloadRetryPolicy(maximumAttempts: 4, baseDelay: 0.5, maximumDelay: 1.5)
     guard policy.maximumRetryCount == 3,
@@ -825,12 +1001,17 @@ private func verifyManagerRecoveryAndPause() async throws {
         resumeStore: store,
         targetAllocator: MusicDownloadTargetAllocator()
     )
+    for _ in 0..<200 where restarted.states[request.songID] == nil {
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    guard case .paused? = restarted.states[request.songID], !restarted.isActive(songID: request.songID) else {
+        throw MusicDownloadCheckError.failed
+    }
+    restarted.retry(songID: request.songID)
     for _ in 0..<200 where !restarted.isActive(songID: request.songID) {
         try await Task.sleep(for: .milliseconds(5))
     }
-    guard restarted.isActive(songID: request.songID) else {
-        throw MusicDownloadCheckError.failed
-    }
+    guard restarted.isActive(songID: request.songID) else { throw MusicDownloadCheckError.failed }
     await restarted.pauseAll()
     restarted.cancel(songID: request.songID)
     guard store.recoverableDownloads().isEmpty else {
@@ -844,6 +1025,7 @@ private enum MusicDownloadCheck {
     @MainActor
     static func main() async throws {
         try verifyMusicDownloadFiles()
+        try verifyDownloadedFileStagingStateMachine()
         try await verifyRetryPolicyAndResumeStore()
         try verifyDuplicateQualityIsSkipped()
         try await verifyPersistenceFailurePublishesWithoutFlush()
@@ -861,6 +1043,11 @@ struct MusicDownloadTests {
     @Test("Filename cleanup and atomic finalization")
     func filenameAndAtomicFinalization() throws {
         try verifyMusicDownloadFiles()
+    }
+
+    @Test("Downloaded files move first, copy once on move failure, and clean every failed destination")
+    func downloadedFileStagingStateMachine() throws {
+        try verifyDownloadedFileStagingStateMachine()
     }
 
     @MainActor

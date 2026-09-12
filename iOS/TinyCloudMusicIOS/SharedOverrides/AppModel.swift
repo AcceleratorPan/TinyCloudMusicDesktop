@@ -82,7 +82,7 @@ private actor ArtworkFileWriter {
         let hasSecurityScope = folder.startAccessingSecurityScopedResource()
         defer { if hasSecurityScope { folder.stopAccessingSecurityScopedResource() } }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try data.write(to: destination, options: .atomic)
+        try MusicDownloadFiles.writeUnique(data, to: destination)
     }
 }
 
@@ -197,6 +197,7 @@ final class AppModel {
     @ObservationIgnored private var favoriteTaskID: UUID?
     @ObservationIgnored private var interactionMessageTask: Task<Void, Never>?
     @ObservationIgnored private let artworkFileWriter = ArtworkFileWriter()
+    @ObservationIgnored let audioSession = IOSAudioSessionCoordinator()
     @ObservationIgnored private var savingArtworkDestinations: Set<URL> = []
     @ObservationIgnored private var resolvedDownloadFolder: URL?
     @ObservationIgnored private var resolvedVideoDownloadFolder: URL?
@@ -449,7 +450,58 @@ final class AppModel {
         search(offset: 0)
     }
 
-    func refreshAccountState(whenAccountReady: @MainActor () -> Void = {}) async {
+    @discardableResult
+    func refreshLikedSongIDs(
+        userID: Int64,
+        playlists: [Playlist],
+        credentialRevision: UInt64
+    ) async -> Bool {
+        let generation = accountRefreshGeneration
+        guard let library, let extras,
+              accountContextMatches(
+                  generation: generation,
+                  userID: userID,
+                  credentialRevision: credentialRevision,
+                  transport: library.transport
+              )
+        else { return false }
+        do {
+            try Task.checkCancellation()
+            let values = Set(try await extras.favoriteSongIDs(
+                userID: userID,
+                playlists: playlists,
+                expectedCredentialRevision: credentialRevision
+            ))
+            try Task.checkCancellation()
+            guard accountContextMatches(
+                generation: generation,
+                userID: userID,
+                credentialRevision: credentialRevision,
+                transport: library.transport
+            ) else { return false }
+            if likedSongIDs != values { likedSongIDs = values }
+            libraryMessage = nil
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            guard !Task.isCancelled,
+                  accountContextMatches(
+                      generation: generation,
+                      userID: userID,
+                      credentialRevision: credentialRevision,
+                      transport: library.transport
+                  )
+            else { return false }
+            libraryMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func refreshAccountState(
+        confirmedAccount: ValidatedMusicLibraryAccount? = nil,
+        whenAccountReady: @MainActor () -> Void = {}
+    ) async {
         var didNotifyAccountReady = false
         func notifyAccountReady() {
             guard !didNotifyAccountReady else { return }
@@ -465,7 +517,7 @@ final class AppModel {
         }
         let credentialRevision = library.transport.credentialSnapshotValue().revision
         invalidateAccountDomainIfNeeded(forCredentialRevision: credentialRevision)
-        guard let extras else { return }
+        guard extras != nil else { return }
         accountRefreshGeneration += 1
         var generation = accountRefreshGeneration
         if let session, session.state != .authenticated {
@@ -478,9 +530,17 @@ final class AppModel {
             return
         }
         do {
-            let login = try await library.loginState(
-                expectedCredentialRevision: credentialRevision
-            )
+            let login: MusicLibraryLoginState
+            if let confirmedAccount,
+               confirmedAccount.credentialRevision == credentialRevision,
+               session?.credentialRevision == credentialRevision,
+               session?.state == .authenticated {
+                login = .loggedIn(confirmedAccount.user)
+            } else {
+                login = try await library.loginState(
+                    expectedCredentialRevision: credentialRevision
+                )
+            }
             try Task.checkCancellation()
             guard accountRefreshGeneration == generation,
                   library.transport.credentialSnapshotValue().revision == credentialRevision
@@ -497,10 +557,6 @@ final class AppModel {
                 return
             }
             if currentUserID != user.id || accountCredentialRevision != credentialRevision {
-                await library.invalidateAllCachedResponses()
-                guard accountRefreshGeneration == generation,
-                      library.transport.credentialSnapshotValue().revision == credentialRevision
-                else { return }
                 generation = installConfirmedAccount(
                     userID: user.id,
                     credentialRevision: credentialRevision
@@ -516,21 +572,14 @@ final class AppModel {
                   currentUserID == user.id,
                   library.transport.credentialSnapshotValue().revision == credentialRevision
             else { return }
-            let favorites = try await extras.favoriteSongIDs(
+            guard await refreshLikedSongIDs(
                 userID: user.id,
                 playlists: playlists,
-                expectedCredentialRevision: credentialRevision
-            )
-            try Task.checkCancellation()
-            guard accountRefreshGeneration == generation,
-                  currentUserID == user.id,
-                  library.transport.credentialSnapshotValue().revision == credentialRevision
-            else { return }
-            likedSongIDs = Set(favorites)
+                credentialRevision: credentialRevision
+            ) else { return }
             if librarySnapshot?.user.id == user.id {
                 _ = storeCachedPlaylists(playlists, playlistRevision: playlistContentRevision)
             }
-            libraryMessage = nil
         } catch is CancellationError {
         } catch {
             guard accountRefreshGeneration == generation,
@@ -615,10 +664,12 @@ final class AppModel {
         )
     }
 
-    func loadDetail(_ route: Route, reload: Bool = false) {
+    func loadDetail(_ route: Route, reload: Bool = false, now: Date = Date()) {
         guard path.last == route else { return }
+        let cached = detailCache[route]
         let needsRefresh = reload || staleDetailRoutes.contains(route)
-        if !needsRefresh, case .loaded? = detailLoads[route] { return }
+            || (cached.map { now.timeIntervalSince($0.loadedAt) >= 5 * 60 } ?? false)
+        if !needsRefresh, detailTasks[route] != nil { return }
 
         if needsRefresh, case let .playlist(id) = route {
             playlistLoadMoreTasks[id]?.cancel()
@@ -628,9 +679,7 @@ final class AppModel {
             playlistLoadMoreErrors[id] = nil
         }
 
-        let now = Date()
-        let cached = detailCache[route]
-        if !needsRefresh, var cached, now.timeIntervalSince(cached.loadedAt) < 5 * 60 {
+        if !needsRefresh, var cached {
             cached.lastAccess = now
             detailCache[route] = cached
             detailLoads[route] = .loaded(cached.content)
@@ -648,19 +697,12 @@ final class AppModel {
         detailGenerations[route] = generation
         detailTasks[route]?.cancel()
         detailLoads[route] = cached.map { .loaded($0.content) } ?? .loading
-        detailTasks[route] = Task { @MainActor [weak self, repository, library] in
+        detailTasks[route] = Task { @MainActor [weak self, repository] in
             do {
-                if needsRefresh,
-                   case let .playlist(id) = route,
-                   let credentialRevision {
-                    try await library?.refreshPlaylistDetail(
-                        id,
-                        expectedCredentialRevision: credentialRevision
-                    )
-                }
                 let detail = try await repository.detail(
                     for: route,
-                    expectedCredentialRevision: credentialRevision
+                    expectedCredentialRevision: credentialRevision,
+                    forceRefresh: needsRefresh
                 )
                 try Task.checkCancellation()
                 guard let self,
@@ -716,14 +758,10 @@ final class AppModel {
         detailGenerations[route] = generation
         detailTasks[route]?.cancel()
         detailTasks[route] = nil
-        try await library?.refreshPlaylistDetail(
-            playlistID,
-            expectedCredentialRevision: credentialRevision
-        )
-
         let detail = try await repository.detail(
             for: route,
-            expectedCredentialRevision: credentialRevision
+            expectedCredentialRevision: credentialRevision,
+            forceRefresh: true
         )
         try Task.checkCancellation()
         guard detailGenerations[route] == generation,
@@ -1534,6 +1572,12 @@ final class AppModel {
         pendingMutations.subtract(keys)
     }
 
+    func accountContextIsCurrent(userID: Int64, credentialRevision: UInt64, transport: EAPITransport) -> Bool {
+        currentUserID == userID
+            && accountCredentialRevision == credentialRevision
+            && transport.credentialSnapshotValue().revision == credentialRevision
+    }
+
     private func accountContextMatches(
         generation: Int,
         userID: Int64,
@@ -1541,9 +1585,7 @@ final class AppModel {
         transport: EAPITransport
     ) -> Bool {
         accountRefreshGeneration == generation
-            && currentUserID == userID
-            && accountCredentialRevision == credentialRevision
-            && transport.credentialSnapshotValue().revision == credentialRevision
+            && accountContextIsCurrent(userID: userID, credentialRevision: credentialRevision, transport: transport)
     }
 
     private func startHomeTask(id: String, generation: Int) {
@@ -1763,7 +1805,9 @@ final class AppModel {
     }
 
     private func folderBookmark(for url: URL) throws -> Data {
-        try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+        let hasSecurityScope = url.startAccessingSecurityScopedResource()
+        defer { if hasSecurityScope { url.stopAccessingSecurityScopedResource() } }
+        return try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
     }
 
     private func restoreBookmarkedFolders() {

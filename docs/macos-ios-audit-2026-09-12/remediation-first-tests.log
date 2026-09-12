@@ -1,0 +1,140 @@
+Building for debugging...
+[0/6] Write swift-version--58304C5D6DBC2206.txt
+[1/6] Write sources
+[4/7] Emitting module TinyCloudMusic
+[5/8] Compiling TinyCloudMusic PlayerController.swift
+[6/9] Compiling TinyCloudMusic MusicKnowledgeViews.swift
+[7/10] Compiling TinyCloudMusic ListeningFootprintsView.swift
+[8/11] Compiling TinyCloudMusic TinyCloudMusicApp.swift
+[9/12] Compiling TinyCloudMusic AudioContentViews.swift
+[10/13] Compiling TinyCloudMusic ListenTogetherController.swift
+[11/14] Compiling TinyCloudMusic NowPlayingDetailView.swift
+[12/15] Compiling TinyCloudMusic VideoViews.swift
+[13/16] Compiling TinyCloudMusic PersonalFMView.swift
+[14/17] Compiling TinyCloudMusic RecommendationHistoryView.swift
+[15/18] Compiling TinyCloudMusic LibraryFeatureViews.swift
+[16/19] Compiling TinyCloudMusic ListenTogetherView.swift
+[17/20] Compiling TinyCloudMusic Views.swift
+[18/21] Compiling TinyCloudMusic DetailExtrasViews.swift
+[18/23] Write Objects.LinkFileList
+[19/23] Linking TinyCloudMusic
+[21/24] Emitting module TinyCloudMusicTests
+[22/25] Compiling TinyCloudMusicTests AppShellPerformanceTests.swift
+[23/26] Compiling TinyCloudMusicTests AudioRangeIntegrationTests.swift
+[24/27] Compiling TinyCloudMusicTests CoreTests.swift
+[25/28] Compiling TinyCloudMusicTests KnowledgeListeningPerformanceTests.swift
+[26/29] Compiling TinyCloudMusicTests LibraryMutationPerformanceTests.swift
+[27/30] Compiling TinyCloudMusicTests ListenTogetherTests.swift
+[28/31] Compiling TinyCloudMusicTests ListeningReportTests.swift
+[29/32] Compiling TinyCloudMusicTests LiveMusicExtrasTests.swift
+[30/33] Compiling TinyCloudMusicTests LiveMusicLibraryTests.swift
+[31/34] Compiling TinyCloudMusicTests MediaLifecyclePerformanceTests.swift
+[32/35] Compiling TinyCloudMusicTests MusicDownloadInfrastructureTests.swift
+[33/36] Compiling TinyCloudMusicTests MusicDownloadTests.swift
+[34/37] Compiling TinyCloudMusicTests MusicDownloadTransferTests.swift
+[35/38] Compiling TinyCloudMusicTests MusicKnowledgeTests.swift
+[36/39] Compiling TinyCloudMusicTests NIMRuntimeBoundaryTests.swift
+[37/40] Compiling TinyCloudMusicTests PlaybackAvailabilityTests.swift
+[38/41] Compiling TinyCloudMusicTests PlayerCachePerformanceTests.swift
+[39/42] Compiling TinyCloudMusicTests QRLoginLifecycleTests.swift
+[40/43] Compiling TinyCloudMusicTests RecommendationMemoryTests.swift
+[41/44] Compiling TinyCloudMusicTests SearchAssistanceTests.swift
+[42/45] Compiling TinyCloudMusicTests SearchRepositoryTests.swift
+[43/46] Compiling TinyCloudMusicTests StreamingByteRangeTests.swift
+[44/47] Compiling TinyCloudMusicTests TrackCacheTests.swift
+[45/48] Compiling TinyCloudMusicTests TrackRangeCacheTests.swift
+[46/49] Compiling TinyCloudMusicTests TransportSessionPerformanceTests.swift
+[47/50] Compiling TinyCloudMusicTests VideoTests.swift
+[48/51] Compiling TinyCloudMusicTests resource_bundle_accessor.swift
+[48/51] Applying TinyCloudMusic
+[49/51] Write Objects.LinkFileList
+[50/51] Linking TinyCloudMusicPackageTests
+Build complete! (162.41s)
+Test Suite 'Selected tests' started at 2026-09-12 11:21:28.525.
+Test Suite 'TinyCloudMusicPackageTests.xctest' started at 2026-09-12 11:21:28.527.
+Test Suite 'TinyCloudMusicPackageTests.xctest' passed at 2026-09-12 11:21:28.527.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-12 11:21:28.527.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.002) seconds
+◇ Test run started.
+↳ Testing Library Version: 1501
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "iOS audit remediation" started.
+◇ Test "Malformed lyric timestamps cannot overflow and valid boundary values remain intact" started.
+✔ Test "Malformed lyric timestamps cannot overflow and valid boundary values remain intact" passed after 0.002 seconds.
+◇ Test "Off-main lyrics retain results, bound oversized inputs and propagate cancellation" started.
+✔ Test "Off-main lyrics retain results, bound oversized inputs and propagate cancellation" passed after 0.026 seconds.
+◇ Test "Unique artwork saves preserve existing files, including concurrent saves" started.
+✔ Test "Unique artwork saves preserve existing files, including concurrent saves" passed after 0.002 seconds.
+◇ Test "Paused and completed audio/video records survive restart without transfer" started.
+✔ Test "Paused and completed audio/video records survive restart without transfer" passed after 0.026 seconds.
+◇ Test "Legacy records with unknown pause intent require explicit resume" started.
+✔ Test "Legacy records with unknown pause intent require explicit resume" passed after 0.006 seconds.
+◇ Test "Completed cloud downloads wait for their owner and survive logout" started.
+✔ Test "Completed cloud downloads wait for their owner and survive logout" passed after 0.003 seconds.
+◇ Test "Same-account credential replacement notifies observers without a state change" started.
+✔ Test "Same-account credential replacement notifies observers without a state change" passed after 0.001 seconds.
+◇ Test "Video subscription writes invalidate cached subscription lists" started.
+✔ Test "Video subscription writes invalidate cached subscription lists" passed after 0.006 seconds.
+✔ Suite "iOS audit remediation" passed after 0.074 seconds.
+◇ Suite "Knowledge, sheet, and listening performance" started.
+◇ Test "Sheet exports preserve invalid existing files and concurrent exports" started.
+✔ Test "Sheet exports preserve invalid existing files and concurrent exports" passed after 0.002 seconds.
+✔ Suite "Knowledge, sheet, and listening performance" passed after 0.002 seconds.
+◇ Suite "Library mutation ownership and cache" started.
+◇ Test "Loaded details honor expiry and macOS evicts inactive payloads" started.
+✔ Test "Loaded details honor expiry and macOS evicts inactive payloads" passed after 0.590 seconds.
+✔ Suite "Library mutation ownership and cache" passed after 0.590 seconds.
+◇ Suite "Audio, FM, and video lifecycle" started.
+◇ Test "macOS media ownership handles music, native video resume, and stale cleanup" started.
+✔ Test "macOS media ownership handles music, native video resume, and stale cleanup" passed after 0.007 seconds.
+◇ Test "Broadcast readiness does not imply playback and waiting distinguishes connection from buffering" started.
+✔ Test "Broadcast readiness does not imply playback and waiting distinguishes connection from buffering" passed after 0.001 seconds.
+◇ Test "Delayed broadcast item callbacks cannot revive stopped playback or stop a replacement" started.
+✔ Test "Delayed broadcast item callbacks cannot revive stopped playback or stop a replacement" passed after 0.082 seconds.
+✔ Suite "Audio, FM, and video lifecycle" passed after 0.090 seconds.
+◇ Suite "Music download infrastructure" started.
+◇ Test "Retry delay honors server backoff and paused resume data" started.
+✔ Test "Retry delay honors server backoff and paused resume data" passed after 0.001 seconds.
+◇ Test "Allocator reserves lyric targets across audio extensions" started.
+✔ Test "Allocator reserves lyric targets across audio extensions" passed after 0.001 seconds.
+◇ Test "Pending requests and resume data survive a new store instance" started.
+✔ Test "Pending requests and resume data survive a new store instance" passed after 0.007 seconds.
+◇ Test "Enumeration prunes expired records" started.
+✔ Test "Enumeration prunes expired records" passed after 0.002 seconds.
+◇ Test "Resume updates preserve original FIFO order" started.
+✔ Test "Resume updates preserve original FIFO order" passed after 0.045 seconds.
+◇ Test "Stale cleanup only removes UUID part files" started.
+✔ Test "Stale cleanup only removes UUID part files" passed after 0.001 seconds.
+✔ Suite "Music download infrastructure" passed after 0.058 seconds.
+◇ Suite "Music knowledge" started.
+◇ Test "Sheet and knowledge content are safely decoded" started.
+✔ Test "Sheet and knowledge content are safely decoded" passed after 0.006 seconds.
+✔ Suite "Music knowledge" passed after 0.006 seconds.
+◇ Suite "Player queue and bounded work" started.
+◇ Test "Paused tail seeks and in-flight seeks do not advance the queue" started.
+✔ Test "Paused tail seeks and in-flight seeks do not advance the queue" passed after 0.248 seconds.
+◇ Test "Queue replacement settles the outgoing media identity" started.
+◇ Test case passing 1 argument outgoingIsPodcast → true to "Queue replacement settles the outgoing media identity" started.
+◇ Test case passing 1 argument outgoingIsPodcast → false to "Queue replacement settles the outgoing media identity" started.
+✔ Test "Queue replacement settles the outgoing media identity" with 2 test cases passed after 2.692 seconds.
+◇ Test "A corrupt full cache recovers once for active and standby items" started.
+◇ Test case passing 1 argument useStandby → false to "A corrupt full cache recovers once for active and standby items" started.
+✘ Test "A corrupt full cache recovers once for active and standby items" recorded an issue with 1 argument useStandby → false at PlayerCachePerformanceTests.swift:2161:62: Issue recorded
+↳ Direct recovery must stop after failure
+◇ Test case passing 1 argument useStandby → true to "A corrupt full cache recovers once for active and standby items" started.
+✘ Test "A corrupt full cache recovers once for active and standby items" recorded an issue with 1 argument useStandby → true at PlayerCachePerformanceTests.swift:2161:62: Issue recorded
+↳ Direct recovery must stop after failure
+✘ Test "A corrupt full cache recovers once for active and standby items" with 2 test cases failed after 0.094 seconds with 2 issues.
+✘ Suite "Player queue and bounded work" failed after 3.034 seconds with 2 issues.
+◇ Suite "Recommendation history" started.
+◇ Test "Only the latest selector request can update state" started.
+✔ Test "Only the latest selector request can update state" passed after 0.001 seconds.
+◇ Test "Delayed account requests cannot update the current account" started.
+✔ Test "Delayed account requests cannot update the current account" passed after 0.001 seconds.
+✔ Suite "Recommendation history" passed after 0.001 seconds.
+◇ Suite "Track cache" started.
+◇ Test "Only a non-empty finalized file is a cache hit" started.
+✔ Test "Only a non-empty finalized file is a cache hit" passed after 0.843 seconds.
+✔ Suite "Track cache" passed after 0.843 seconds.
+✘ Test run with 26 tests in 9 suites failed after 4.701 seconds with 2 issues.

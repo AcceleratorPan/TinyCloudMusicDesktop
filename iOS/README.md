@@ -47,7 +47,7 @@ pod install
 
 ## 无签名构建
 
-无需启动 Simulator，也不会读取 App 会话凭据：
+无需启动 Simulator，也不会读取 App 会话凭据。开始前确认没有其他 Swift/Xcode 编译进程；所有构建／测试按下列单任务设置串行执行，复用现有 `DerivedData`：
 
 ```bash
 cd /Users/acceleratorpan/Downloads/Proj/TCM/iOS
@@ -55,7 +55,8 @@ xcodebuild \
   -workspace TinyCloudMusicIOS.xcworkspace \
   -scheme TinyCloudMusicIOS \
   -destination 'generic/platform=iOS Simulator' \
-  -derivedDataPath DerivedData \
+  -derivedDataPath DerivedData -jobs 1 -parallel-testing-enabled NO \
+  SWIFT_ENABLE_BATCH_MODE=NO 'OTHER_SWIFT_FLAGS=$(inherited) -j 1' \
   CODE_SIGNING_ALLOWED=NO \
   build -quiet
 ```
@@ -68,7 +69,8 @@ xcodebuild \
   -workspace TinyCloudMusicIOS.xcworkspace \
   -scheme TinyCloudMusicIOS \
   -destination 'generic/platform=iOS Simulator' \
-  -derivedDataPath DerivedData \
+  -derivedDataPath DerivedData -jobs 1 -parallel-testing-enabled NO \
+  SWIFT_ENABLE_BATCH_MODE=NO 'OTHER_SWIFT_FLAGS=$(inherited) -j 1' \
   CODE_SIGNING_ALLOWED=NO \
   build-for-testing -quiet
 ```
@@ -93,7 +95,7 @@ iOS 18 与 iOS 26 都由同一最低部署版本为 18.0 的 target 构建。真
 
 ## iOS 18 Simulator runtime
 
-已通过 `xcodebuild -downloadPlatform iOS -buildVersion 18.0` 从 Apple 官方目录安装 iOS 18.0 Universal Simulator（22A3351），无需降级 Xcode。对应 iPhone 13 Pro 模拟器已创建但未启动；运行态和截图验收仍需单独执行。
+已通过 `xcodebuild -downloadPlatform iOS -buildVersion 18.0 -jobs 1` 从 Apple 官方目录安装 iOS 18.0 Universal Simulator（22A3351），无需降级 Xcode。对应 iPhone 13 Pro 模拟器已创建但未启动；运行态和截图验收仍需单独执行。
 
 ## 凭据与检查安全
 

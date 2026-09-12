@@ -128,6 +128,8 @@ actor TrackRangeCache {
         let requestedRange: Range<Int64>
         let task: Task<DownloadedResponse, Error>
         var waiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+        var isAwaitingHandoff = false
+        var isCancellationDraining = false
         var isSuperseded = false
     }
 
@@ -173,6 +175,7 @@ actor TrackRangeCache {
     private enum ControlError: Error {
         case expired(URL)
         case unresolvedRange(URL)
+        case retryAfterCancellation
         case localComplete
     }
 
@@ -207,6 +210,12 @@ actor TrackRangeCache {
 
     nonisolated static func shared(trackCache: TrackCache) -> TrackRangeCache {
         registry.cache(for: trackCache)
+    }
+
+    func inFlightWaiterCountForTesting() -> Int {
+        entriesByID.values.reduce(0) { total, entry in
+            total + entry.inFlight.values.reduce(0) { $0 + $1.waiters.count }
+        }
     }
 
     deinit {
@@ -593,6 +602,8 @@ actor TrackRangeCache {
                 guard rangeRefreshes == 0 else { throw TrackRangeCacheError.rejectedResponse }
                 try await refreshSource(entryID: entryID, replacing: sourceURL, allowSameURL: true)
                 rangeRefreshes += 1
+            } catch ControlError.retryAfterCancellation {
+                continue
             } catch ControlError.localComplete {
                 return
             }
@@ -624,6 +635,12 @@ actor TrackRangeCache {
         let flightKey = entry.rangeValidatedURL == source.url
             ? blockLower
             : Self.discoveryFlightKey
+        if let existingKey = entry.inFlight.first(where: {
+            $0.value.isAwaitingHandoff || $0.value.isCancellationDraining
+        })?.key {
+            try await waitForRequest(entryID: entryID, blockLower: existingKey)
+            return
+        }
         if let existingKey = entry.inFlight.first(where: {
             $0.value.requestedRange.contains(targetOffset)
         })?.key {
@@ -734,13 +751,14 @@ actor TrackRangeCache {
                 }
                 guard !Task.isCancelled else {
                     if request.waiters.isEmpty {
-                        entry.inFlight[blockLower] = nil
-                        request.task.cancel()
+                        abandon(&request, in: entry)
+                        entry.inFlight[blockLower] = request
                         entriesByID[entryID] = entry
                     }
                     continuation.resume(throwing: CancellationError())
                     return
                 }
+                request.isAwaitingHandoff = false
                 request.waiters[waiterID] = continuation
                 entry.inFlight[blockLower] = request
                 entriesByID[entryID] = entry
@@ -770,13 +788,22 @@ actor TrackRangeCache {
               let continuation = request.waiters.removeValue(forKey: waiterID)
         else { return }
         if request.waiters.isEmpty {
-            entry.inFlight[blockLower] = nil
-            request.task.cancel()
-        } else {
-            entry.inFlight[blockLower] = request
+            abandon(&request, in: entry)
         }
+        entry.inFlight[blockLower] = request
         entriesByID[entryID] = entry
         continuation.resume(throwing: CancellationError())
+    }
+
+    private func abandon(_ request: inout InFlight, in entry: Entry) {
+        if request.isCancellationDraining
+            || !entry.publications.values.contains(where: \.contentInfo) {
+            request.isAwaitingHandoff = false
+            request.isCancellationDraining = true
+            request.task.cancel()
+        } else {
+            request.isAwaitingHandoff = true
+        }
     }
 
     private func completeDownload(
@@ -804,9 +831,20 @@ actor TrackRangeCache {
         let settled: Result<Void, Error>
         switch result {
         case let .failure(error):
-            settled = .failure(error)
+            if request.isAwaitingHandoff || request.isCancellationDraining {
+                settled = .failure(ControlError.retryAfterCancellation)
+            } else {
+                settled = .failure(error)
+            }
         case let .success(downloaded):
             defer { try? FileManager.default.removeItem(at: downloaded.temporaryURL) }
+            let statusCode = downloaded.response.statusCode
+            guard !request.isCancellationDraining || statusCode == 200,
+                  !request.isAwaitingHandoff || statusCode == 200 || statusCode == 206
+            else {
+                settled = .failure(ControlError.retryAfterCancellation)
+                break
+            }
             guard downloaded.context.epoch == entry.epoch else {
                 settled = .failure(TrackRangeCacheError.inconsistentRepresentation)
                 break
@@ -926,11 +964,13 @@ actor TrackRangeCache {
             }
         }
 
+        // ponytail: partial cache bytes are rebuildable; defer fsync until final install.
         try Self.write(
             downloaded.temporaryURL,
             to: entry.bodyURL,
             at: responseRange.lowerBound,
-            expectedCount: Int64(responseRange.count)
+            expectedCount: Int64(responseRange.count),
+            synchronize: false
         )
         entry.contentLength = completeLength
         entry.mimeType = Self.mimeType(response) ?? entry.mimeType
@@ -1772,7 +1812,8 @@ actor TrackRangeCache {
         _ source: URL,
         to destination: URL,
         at offset: Int64,
-        expectedCount: Int64
+        expectedCount: Int64,
+        synchronize: Bool
     ) throws {
         let reader = try FileHandle(forReadingFrom: source)
         let writer = try FileHandle(forWritingTo: destination)
@@ -1787,7 +1828,7 @@ actor TrackRangeCache {
             written += Int64(data.count)
         }
         guard written == expectedCount else { throw TrackRangeCacheError.rejectedResponse }
-        try writer.synchronize()
+        if synchronize { try writer.synchronize() }
     }
 
     private nonisolated static func replaceBody(

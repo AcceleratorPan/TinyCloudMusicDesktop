@@ -130,6 +130,11 @@ protocol MusicRepository: Sendable {
         for route: Route,
         expectedCredentialRevision: UInt64?
     ) async throws -> DetailContent
+    func detail(
+        for route: Route,
+        expectedCredentialRevision: UInt64?,
+        forceRefresh: Bool
+    ) async throws -> DetailContent
     func songs(ids: [Int64]) async throws -> [Song]
     func lyrics(for songID: Int64) async throws -> SongLyrics
     func playbackSource(for songID: Int64, quality: AudioQuality) async throws -> PlaybackSource
@@ -162,6 +167,14 @@ extension MusicRepository {
 
     func detail(for route: Route) async throws -> DetailContent {
         try await detail(for: route, expectedCredentialRevision: nil)
+    }
+
+    func detail(
+        for route: Route,
+        expectedCredentialRevision: UInt64?,
+        forceRefresh: Bool
+    ) async throws -> DetailContent {
+        try await detail(for: route, expectedCredentialRevision: expectedCredentialRevision)
     }
 
     func audioURL(for songID: Int64, quality: AudioQuality) async throws -> URL {

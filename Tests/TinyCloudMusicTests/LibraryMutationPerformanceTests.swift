@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import Testing
 @testable import TinyCloudMusic
 
@@ -32,38 +33,83 @@ private actor LibraryMutationGate {
     func waiterCount() -> Int { continuations.count }
 }
 
+private actor LibraryMutationStepGate {
+    private var enteredCallCount = 0
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        enteredCallCount += 1
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func releaseNext() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    func hasEntered(_ count: Int) -> Bool { enteredCallCount >= count }
+}
+
+private final class LibraryObservationCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func increment() { lock.withLock { count += 1 } }
+    var value: Int { lock.withLock { count } }
+}
+
 private final class LibraryMutationProtocol: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var counts: [String: Int] = [:]
+    nonisolated(unsafe) private static var recordedBodies: [String: [Data]] = [:]
     nonisolated(unsafe) private static var failedPaths: Set<String> = []
     nonisolated(unsafe) private static var failedCalls: [String: Set<Int>] = [:]
+    nonisolated(unsafe) private static var blockedResponse: (path: String, call: Int)?
+    nonisolated(unsafe) private static var responseGate: DispatchSemaphore?
 
     static func reset() {
         lock.withLock {
             counts = [:]
+            recordedBodies = [:]
             failedPaths = []
             failedCalls = [:]
+            blockedResponse = nil
+            responseGate = nil
         }
     }
     static func fail(_ path: String) { lock.withLock { _ = failedPaths.insert(path) } }
     static func fail(_ path: String, onCall call: Int) {
         lock.withLock { _ = failedCalls[path, default: []].insert(call) }
     }
+    static func blockResponse(_ path: String, onCall call: Int) {
+        lock.withLock {
+            blockedResponse = (path, call)
+            responseGate = DispatchSemaphore(value: 0)
+        }
+    }
+    static func releaseBlockedResponse() { lock.withLock { responseGate }?.signal() }
     static func count(_ path: String) -> Int { lock.withLock { counts[path, default: 0] } }
+    static func bodies(_ path: String) -> [Data] { lock.withLock { recordedBodies[path, default: []] } }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
         let path = request.url?.path ?? ""
-        let (count, shouldFail) = Self.lock.withLock {
+        let requestBody = requestBody()
+        let (count, shouldFail, responseGate) = Self.lock.withLock {
             Self.counts[path, default: 0] += 1
+            if !requestBody.isEmpty { Self.recordedBodies[path, default: []].append(requestBody) }
             let count = Self.counts[path, default: 0]
             return (
                 count,
-                Self.failedPaths.contains(path) || Self.failedCalls[path]?.contains(count) == true
+                Self.failedPaths.contains(path) || Self.failedCalls[path]?.contains(count) == true,
+                Self.blockedResponse.map { $0.path == path && $0.call == count } == true
+                    ? Self.responseGate
+                    : nil
             )
         }
+        responseGate?.wait()
         let body = if shouldFail {
             #"{"code":500,"message":"fixture failure"}"#
         } else if path == "/eapi/v1/user/info" {
@@ -72,6 +118,8 @@ private final class LibraryMutationProtocol: URLProtocol, @unchecked Sendable {
             #"{"code":200,"profile":{"userId":\#(count.isMultiple(of: 2) ? 7 : 8),"nickname":"fixture"}}"#
         } else if path == "/eapi/user/playlist" {
             #"{"code":200,"playlist":[{"id":900,"name":"Liked","specialType":5,"creator":{"userId":8,"nickname":"fixture"}}],"more":false}"#
+        } else if path == "/eapi/v6/playlist/detail" {
+            #"{"code":200,"playlist":{"id":900,"name":"Liked","specialType":5,"trackCount":0,"creator":{"userId":8,"nickname":"fixture"},"trackIds":[],"tracks":[]}}"#
         } else if path == "/weapi/djradio/get/subed" {
             count == 1
                 ? #"{"code":200,"djRadios":[{"id":1,"name":"Existing","subed":true}],"more":false}"#
@@ -97,22 +145,66 @@ private final class LibraryMutationProtocol: URLProtocol, @unchecked Sendable {
     }
 
     override func stopLoading() {}
+
+    private func requestBody() -> Data {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open()
+        defer { stream.close() }
+        var body = Data()
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            body.append(buffer, count: count)
+        }
+        return body
+    }
+}
+
+private enum LibraryPaginationTail: Equatable, Sendable {
+    case exhausted
+    case duplicate
+    case empty
+    case repeatedCursor
 }
 
 private final class LibraryPaginationProtocol: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var counts: [String: Int] = [:]
+    nonisolated(unsafe) private static var recordedBodies: [String: [Data]] = [:]
     nonisolated(unsafe) private static var tailGate: DispatchSemaphore?
     nonisolated(unsafe) private static var usesLargePlaylist = false
+    nonisolated(unsafe) private static var dataPageCount: Int?
+    nonisolated(unsafe) private static var tail: LibraryPaginationTail = .exhausted
 
     static func reset(largePlaylist: Bool = false) {
         lock.withLock {
             counts = [:]
+            recordedBodies = [:]
             tailGate = DispatchSemaphore(value: 0)
             usesLargePlaylist = largePlaylist
+            dataPageCount = nil
+            tail = .exhausted
+        }
+    }
+
+    static func reset(
+        dataPages: Int,
+        tail: LibraryPaginationTail = .exhausted,
+        gateTail: Bool = false
+    ) {
+        lock.withLock {
+            counts = [:]
+            recordedBodies = [:]
+            tailGate = gateTail ? DispatchSemaphore(value: 0) : nil
+            usesLargePlaylist = false
+            dataPageCount = dataPages
+            self.tail = tail
         }
     }
     static func count(_ path: String) -> Int { lock.withLock { counts[path, default: 0] } }
+    static func bodies(_ path: String) -> [Data] { lock.withLock { recordedBodies[path, default: []] } }
     static func releaseTail() { lock.withLock { tailGate }?.signal() }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -120,17 +212,52 @@ private final class LibraryPaginationProtocol: URLProtocol, @unchecked Sendable 
 
     override func startLoading() {
         let path = request.url?.path ?? ""
-        let (count, tailGate, usesLargePlaylist) = Self.lock.withLock {
+        let requestBody = requestBody()
+        let (count, tailGate, usesLargePlaylist, dataPageCount, tail) = Self.lock.withLock {
             Self.counts[path, default: 0] += 1
-            return (Self.counts[path, default: 0], Self.tailGate, Self.usesLargePlaylist)
+            if !requestBody.isEmpty { Self.recordedBodies[path, default: []].append(requestBody) }
+            return (
+                Self.counts[path, default: 0],
+                Self.tailGate,
+                Self.usesLargePlaylist,
+                Self.dataPageCount,
+                Self.tail
+            )
         }
         if count == 2, !usesLargePlaylist { tailGate?.wait() }
-        let ids: [Int64] = if usesLargePlaylist, path == "/eapi/user/playlist" {
+        let ids: [Int64] = if let dataPageCount, count <= dataPageCount {
+            Array(Int64((count - 1) * 100 + 1)...Int64(count * 100))
+        } else if let dataPageCount, count == dataPageCount + 1, tail == .duplicate {
+            Array(1...100).map(Int64.init)
+        } else if dataPageCount != nil {
+            []
+        } else if usesLargePlaylist, path == "/eapi/user/playlist" {
             count <= 10
                 ? Array(Int64((count - 1) * 100 + 1)...Int64(count * 100))
                 : count == 11 ? [1_001] : []
         } else {
             count == 1 ? [1, 2] : [3, 2]
+        }
+        let claimsMore: Bool = if let dataPageCount {
+            switch tail {
+            case .exhausted:
+                path == "/eapi/user/playlist" ? count < dataPageCount : count <= dataPageCount
+            case .duplicate, .empty:
+                count <= dataPageCount + 1
+            case .repeatedCursor:
+                true
+            }
+        } else if path == "/eapi/user/playlist" {
+            usesLargePlaylist ? count < 11 : count == 1
+        } else {
+            true
+        }
+        let nextCursor = if tail == .repeatedCursor,
+                            let dataPageCount,
+                            count == dataPageCount {
+            "cursor-\(max(1, count - 1))"
+        } else {
+            "cursor-\(count)"
         }
         let body: [String: Any]
         switch path {
@@ -140,7 +267,7 @@ private final class LibraryPaginationProtocol: URLProtocol, @unchecked Sendable 
                 "playlist": ids.map {
                     ["id": $0, "name": "Playlist \($0)", "creator": ["userId": 7, "nickname": "Fixture"]]
                 },
-                "more": usesLargePlaylist ? count < 11 : count == 1
+                "more": claimsMore
             ]
         case "/eapi/user/follow/users/mixed/get/v2":
             body = [
@@ -149,8 +276,8 @@ private final class LibraryPaginationProtocol: URLProtocol, @unchecked Sendable 
                     "records": ids.map {
                         ["type": 1, "userProfile": ["userId": $0, "nickname": "User \($0)"]]
                     },
-                    "hasMore": true,
-                    "nextCursor": "cursor-\(count)"
+                    "hasMore": claimsMore,
+                    "nextCursor": nextCursor
                 ]
             ]
         case "/eapi/user/v3/follows/get":
@@ -160,8 +287,8 @@ private final class LibraryPaginationProtocol: URLProtocol, @unchecked Sendable 
                     "records": ids.map {
                         ["userProfile": ["userId": $0, "nickname": "User \($0)"]]
                     },
-                    "hasMore": true,
-                    "nextCursor": "cursor-\(count)"
+                    "hasMore": claimsMore,
+                    "nextCursor": nextCursor
                 ]
             ]
         case "/eapi/user/sub/artist/get":
@@ -169,7 +296,7 @@ private final class LibraryPaginationProtocol: URLProtocol, @unchecked Sendable 
                 "code": 200,
                 "data": [
                     "artists": ids.map { ["id": $0, "name": "Artist \($0)"] },
-                    "hasMore": true
+                    "hasMore": claimsMore
                 ]
             ]
         default:
@@ -187,6 +314,21 @@ private final class LibraryPaginationProtocol: URLProtocol, @unchecked Sendable 
     }
 
     override func stopLoading() {}
+
+    private func requestBody() -> Data {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open()
+        defer { stream.close() }
+        var body = Data()
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            body.append(buffer, count: count)
+        }
+        return body
+    }
 }
 
 @MainActor
@@ -196,6 +338,29 @@ private final class LibraryPageRecorder<Value> {
 
     func record(_ values: [Value]) { updates.append(values) }
     func finish() { completed = true }
+}
+
+private enum LibraryPaginationEntry: CaseIterable, Equatable, Sendable {
+    case playlists
+    case mixedFollowing
+    case followingUsers
+    case followedArtists
+
+    var path: String {
+        switch self {
+        case .playlists: "/eapi/user/playlist"
+        case .mixedFollowing: "/eapi/user/follow/users/mixed/get/v2"
+        case .followingUsers: "/eapi/user/v3/follows/get"
+        case .followedArtists: "/eapi/user/sub/artist/get"
+        }
+    }
+}
+
+private enum LikedSongTupleChange: CaseIterable, Sendable {
+    case generation
+    case user
+    case accountRevision
+    case transportRevision
 }
 
 private final class AppModelAccountReadRepository: MusicRepository, @unchecked Sendable {
@@ -213,6 +378,7 @@ private final class AppModelAccountReadRepository: MusicRepository, @unchecked S
     private let lock = NSLock()
     private var homeRevision: UInt64?
     private var detailRevision: UInt64?
+    private var detailForceRefreshes: [Bool] = []
     private var completedReads = 0
 
     init(
@@ -232,6 +398,7 @@ private final class AppModelAccountReadRepository: MusicRepository, @unchecked S
     }
 
     func completedReadCount() -> Int { lock.withLock { completedReads } }
+    func capturedDetailForceRefreshes() -> [Bool] { lock.withLock { detailForceRefreshes } }
 
     func homeSection(
         id: String,
@@ -250,6 +417,21 @@ private final class AppModelAccountReadRepository: MusicRepository, @unchecked S
         lock.withLock { detailRevision = expectedCredentialRevision }
         await detailGate.wait()
         lock.withLock { completedReads += 1 }
+        if case let .playlist(id) = route {
+            return .playlist(
+                Playlist(
+                    id: id,
+                    name: "Playlist \(id)",
+                    creator: "Fixture",
+                    description: "",
+                    artwork: Artwork(symbol: "music.note.list", accent: .blue),
+                    trackCount: 0
+                ),
+                songs: [],
+                trackIDs: [],
+                loadedTrackCount: 0
+            )
+        }
         return .user(
             UserProfile(
                 id: 7,
@@ -260,6 +442,15 @@ private final class AppModelAccountReadRepository: MusicRepository, @unchecked S
             playlists: [],
             hasMore: false
         )
+    }
+
+    func detail(
+        for route: Route,
+        expectedCredentialRevision: UInt64?,
+        forceRefresh: Bool
+    ) async throws -> DetailContent {
+        lock.withLock { detailForceRefreshes.append(forceRefresh) }
+        return try await detail(for: route, expectedCredentialRevision: expectedCredentialRevision)
     }
 
     func search(query: String, scope: SearchScope, offset: Int, limit: Int) async throws -> SearchPage {
@@ -505,6 +696,381 @@ struct LibraryMutationPerformanceTests {
         #expect(playlists.map(\.id) == [900])
         #expect(LibraryMutationProtocol.count("/eapi/user/playlist") == 1)
         #expect(LibraryMutationProtocol.count("/eapi/v6/playlist/detail") == 1)
+    }
+
+    @Test("Known account tuple refreshes liked songs without account bootstrap requests")
+    func likedSongRefreshUsesKnownAccountTuple() async throws {
+        LibraryMutationProtocol.reset()
+        let fixture = try likedSongFixture("known-tuple")
+        fixture.model.likedSongIDs = [42]
+        fixture.model.libraryMessage = "old"
+
+        #expect(await fixture.model.refreshLikedSongIDs(
+            userID: 8,
+            playlists: fixture.playlists,
+            credentialRevision: fixture.revision
+        ))
+        #expect(fixture.model.likedSongIDs.isEmpty)
+        #expect(fixture.model.libraryMessage == nil)
+        #expect(LibraryMutationProtocol.count("/eapi/v6/playlist/detail") == 1)
+        #expect(LibraryMutationProtocol.count("/eapi/v1/user/info") == 0)
+        #expect(LibraryMutationProtocol.count("/eapi/v1/user/detail") == 0)
+        #expect(LibraryMutationProtocol.count("/eapi/user/playlist") == 0)
+    }
+
+    @Test("Equal liked-song Set does not publish an Observation change")
+    func equalLikedSongSetDoesNotPublish() async throws {
+        LibraryMutationProtocol.reset()
+        let fixture = try likedSongFixture("equal-set")
+        fixture.model.libraryMessage = "old"
+
+        await confirmation("likedSongIDs remains unpublished", expectedCount: 0) { changed in
+            _ = withObservationTracking {
+                fixture.model.likedSongIDs
+            } onChange: {
+                changed()
+            }
+            #expect(await fixture.model.refreshLikedSongIDs(
+                userID: 8,
+                playlists: fixture.playlists,
+                credentialRevision: fixture.revision
+            ))
+        }
+
+        #expect(fixture.model.likedSongIDs.isEmpty)
+        #expect(fixture.model.libraryMessage == nil)
+        #expect(LibraryMutationProtocol.count("/eapi/v6/playlist/detail") == 1)
+    }
+
+    @Test(
+        "Liked-song refresh rejects stale generation, user, account, and transport revisions",
+        arguments: LikedSongTupleChange.allCases
+    )
+    fileprivate func likedSongRefreshRejectsStaleTuple(_ change: LikedSongTupleChange) async throws {
+        LibraryMutationProtocol.reset()
+        let gate = LibraryMutationGate()
+        let fixture = try likedSongFixture("stale-\(change)") { await gate.wait() }
+        fixture.model.likedSongIDs = [42]
+        fixture.model.libraryMessage = "old"
+
+        let refresh = Task {
+            await fixture.model.refreshLikedSongIDs(
+                userID: 8,
+                playlists: fixture.playlists,
+                credentialRevision: fixture.revision
+            )
+        }
+        #expect(await eventually { await gate.hasEntered() })
+
+        switch change {
+        case .generation:
+            fixture.model.installConfirmedAccount(userID: 8, credentialRevision: fixture.revision)
+        case .user:
+            fixture.model.currentUserID = 9
+        case .accountRevision:
+            fixture.model.installConfirmedAccount(userID: 8, credentialRevision: fixture.revision &+ 1)
+        case .transportRevision:
+            _ = fixture.snapshot.store(.authenticated(try credentials("stale-transport-current")))
+        }
+        fixture.model.likedSongIDs = [99]
+        fixture.model.libraryMessage = "current"
+        await gate.release()
+
+        #expect(!(await refresh.value))
+        #expect(fixture.model.likedSongIDs == [99])
+        #expect(fixture.model.libraryMessage == "current")
+    }
+
+    @Test("Canceled liked-song refresh preserves state and message")
+    func canceledLikedSongRefreshPreservesState() async throws {
+        LibraryMutationProtocol.reset()
+        let gate = LibraryMutationGate()
+        let fixture = try likedSongFixture("cancel-liked") { await gate.wait() }
+        fixture.model.likedSongIDs = [42]
+        fixture.model.libraryMessage = "old"
+
+        let refresh = Task {
+            await fixture.model.refreshLikedSongIDs(
+                userID: 8,
+                playlists: fixture.playlists,
+                credentialRevision: fixture.revision
+            )
+        }
+        #expect(await eventually { await gate.hasEntered() })
+        refresh.cancel()
+        await gate.release()
+
+        #expect(!(await refresh.value))
+        #expect(fixture.model.likedSongIDs == [42])
+        #expect(fixture.model.libraryMessage == "old")
+    }
+
+    @Test("Liked-song refresh errors publish only for the current tuple")
+    func likedSongRefreshErrorPublication() async throws {
+        LibraryMutationProtocol.reset()
+        LibraryMutationProtocol.fail("/eapi/v6/playlist/detail")
+        let current = try likedSongFixture("current-error")
+        current.model.likedSongIDs = [42]
+        current.model.libraryMessage = "old"
+
+        #expect(!(await current.model.refreshLikedSongIDs(
+            userID: 8,
+            playlists: current.playlists,
+            credentialRevision: current.revision
+        )))
+        #expect(current.model.likedSongIDs == [42])
+        #expect(current.model.libraryMessage != nil)
+        #expect(current.model.libraryMessage != "old")
+
+        LibraryMutationProtocol.reset()
+        LibraryMutationProtocol.fail("/eapi/v6/playlist/detail")
+        let gate = LibraryMutationGate()
+        let stale = try likedSongFixture("stale-error") { await gate.wait() }
+        stale.model.likedSongIDs = [42]
+        stale.model.libraryMessage = "old"
+        let refresh = Task {
+            await stale.model.refreshLikedSongIDs(
+                userID: 8,
+                playlists: stale.playlists,
+                credentialRevision: stale.revision
+            )
+        }
+        #expect(await eventually { await gate.hasEntered() })
+        stale.model.currentUserID = 9
+        stale.model.likedSongIDs = [99]
+        stale.model.libraryMessage = "current"
+        await gate.release()
+
+        #expect(!(await refresh.value))
+        #expect(stale.model.likedSongIDs == [99])
+        #expect(stale.model.libraryMessage == "current")
+    }
+
+    @Test("Cold start reuses the revision-tagged account validation exactly once")
+    func coldStartReusesValidatedUserInfoExactlyOnce() async throws {
+        LibraryMutationProtocol.reset()
+        let snapshot = CredentialSnapshot(.authenticated(try credentials("cold-start")))
+        let transport = transport(snapshot: snapshot)
+        let library = LiveMusicLibrary(transport: transport)
+        let session = session(snapshot: snapshot, transport: transport)
+        let model = AppModel(
+            repository: LiveMusicRepository(transport: transport),
+            library: library,
+            extras: LiveMusicExtras(transport: transport),
+            session: session
+        )
+
+        let confirmedAccount = await session.restore(accountValidator: { _ in
+            guard case let .loggedIn(user) = try await library.loginState(
+                expectedCredentialRevision: snapshot.load().revision
+            ) else { return nil }
+            return user
+        })
+        await model.refreshAccountState(confirmedAccount: confirmedAccount)
+
+        #expect(model.currentUserID == 8)
+        #expect(model.confirmedAccountCredentialRevision == snapshot.load().revision)
+        #expect(LibraryMutationProtocol.count("/eapi/v1/user/info") == 1)
+        #expect(LibraryMutationProtocol.count("/eapi/v1/user/detail") == 1)
+    }
+
+    @Test("Confirmed account mismatch falls back without installing the stale user")
+    func confirmedAccountMismatchFallsBack() async throws {
+        LibraryMutationProtocol.reset()
+        let transportSnapshot = CredentialSnapshot(.authenticated(try credentials("fallback-transport")))
+        let sessionSnapshot = CredentialSnapshot(.authenticated(try credentials("fallback-session")))
+        _ = sessionSnapshot.store(.authenticated(try credentials("fallback-session-current")))
+        let libraryTransport = transport(snapshot: transportSnapshot)
+        let model = AppModel(
+            repository: FixtureMusicRepository(),
+            library: LiveMusicLibrary(transport: libraryTransport),
+            extras: LiveMusicExtras(transport: libraryTransport),
+            session: session(
+                snapshot: sessionSnapshot,
+                transport: transport(snapshot: sessionSnapshot)
+            )
+        )
+
+        await model.refreshAccountState(confirmedAccount: ValidatedMusicLibraryAccount(
+            user: accountUser(99),
+            credentialRevision: transportSnapshot.load().revision
+        ))
+
+        #expect(model.currentUserID == 8)
+        #expect(model.currentUserID != 99)
+        #expect(model.confirmedAccountCredentialRevision == transportSnapshot.load().revision)
+        #expect(LibraryMutationProtocol.count("/eapi/v1/user/info") == 1)
+        #expect(LibraryMutationProtocol.count("/eapi/v1/user/detail") == 1)
+    }
+
+    @Test("Account install preserves fresh login cache and rejects a stale result")
+    func accountInstallPreservesFreshLoginCache() async throws {
+        LibraryMutationProtocol.reset()
+        let snapshot = CredentialSnapshot(.authenticated(try credentials("cache-account-a")))
+        let transport = transport(snapshot: snapshot)
+        let library = LiveMusicLibrary(transport: transport)
+        let session = session(snapshot: snapshot, transport: transport)
+        let model = AppModel(
+            repository: FixtureMusicRepository(),
+            library: library,
+            extras: LiveMusicExtras(transport: transport),
+            session: session
+        )
+
+        await model.refreshAccountState()
+        let revisionA = snapshot.load().revision
+        _ = try await library.loginState(expectedCredentialRevision: revisionA)
+        #expect(LibraryMutationProtocol.count("/eapi/v1/user/info") == 1)
+        #expect(LibraryMutationProtocol.count("/eapi/v1/user/detail") == 1)
+
+        let revisionB = snapshot.store(.authenticated(try credentials("cache-account-b"))).revision
+        await model.refreshAccountState(confirmedAccount: ValidatedMusicLibraryAccount(
+            user: accountUser(99),
+            credentialRevision: revisionA
+        ))
+
+        #expect(model.currentUserID == 7)
+        #expect(model.currentUserID != 99)
+        #expect(model.confirmedAccountCredentialRevision == revisionB)
+    }
+
+    @Test("Credential issue accepts a matching revision only once")
+    func credentialIssueInvalidationAcceptsMatchingRevisionOnce() throws {
+        let snapshot = CredentialSnapshot(.authenticated(try credentials("credential-issue")))
+        let controller = session(snapshot: snapshot, transport: transport(snapshot: snapshot))
+        let revision = snapshot.load().revision
+        let event = SessionCredentialIssueEvent(issue: .cookie, credentialRevision: revision)
+
+        #expect(controller.invalidate(event))
+        let invalidated = snapshot.load()
+        #expect(controller.state == .invalid)
+        #expect(invalidated.revision == revision + 1)
+        #expect(!controller.invalidate(event))
+        #expect(!controller.invalidate(SessionCredentialIssueEvent(
+            issue: .musicU,
+            credentialRevision: revision
+        )))
+        #expect(snapshot.load() == invalidated)
+    }
+
+    @Test("Loaded details honor expiry and macOS evicts inactive payloads")
+    func detailExpiryAndRetention() async throws {
+        let repository = AppModelAccountReadRepository(
+            snapshot: CredentialSnapshot(.guest),
+            homeGate: LibraryMutationGate(blockedCalls: []),
+            detailGate: LibraryMutationGate(blockedCalls: [])
+        )
+        let suiteName = "TinyCloudMusicTests.\(UUID())"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = AppModel(repository: repository, defaults: defaults)
+        let first = Route.playlist(1)
+        model.path = [first]
+        model.loadDetail(first)
+        #expect(await eventually {
+            guard case .loaded? = model.detailLoads[first] else { return false }
+            return true
+        })
+        model.path = []
+        model.path = [first]
+        model.loadDetail(first)
+        #expect(repository.capturedDetailForceRefreshes() == [false])
+        model.loadDetail(first, now: Date().addingTimeInterval(301))
+        #expect(await eventually { repository.capturedDetailForceRefreshes() == [false, true] })
+
+        for id in 2...80 {
+            let route = Route.playlist(Int64(id))
+            model.path = [route]
+            model.loadDetail(route)
+            #expect(await eventually {
+                guard case .loaded? = model.detailLoads[route] else { return false }
+                return true
+            })
+        }
+        model.path = []
+        #expect(model.detailLoads.count <= 64)
+        #expect(model.detailLoads[first] == nil)
+        #expect(model.detailLoads[.playlist(80)] != nil)
+    }
+
+    @Test("Playlist read and reload each send one accepted detail payload")
+    func playlistRefreshSendsOneDetailPayload() async throws {
+        LibraryMutationProtocol.reset()
+        let snapshot = CredentialSnapshot(.authenticated(try credentials("playlist-detail")))
+        let transport = transport(snapshot: snapshot)
+        let model = AppModel(
+            repository: LiveMusicRepository(transport: transport),
+            library: LiveMusicLibrary(transport: transport)
+        )
+        let route = Route.playlist(900)
+        model.path = [route]
+
+        model.loadDetail(route)
+        #expect(await eventually {
+            guard LibraryMutationProtocol.count("/eapi/v6/playlist/detail") == 1,
+                  case .loaded? = model.detailLoads[route]
+            else { return false }
+            return true
+        })
+        model.loadDetail(route, reload: true)
+        #expect(await eventually {
+            guard LibraryMutationProtocol.count("/eapi/v6/playlist/detail") == 2,
+                  case .loaded? = model.detailLoads[route]
+            else { return false }
+            return true
+        })
+
+        let counts = LibraryMutationProtocol.bodies("/eapi/v6/playlist/detail")
+            .compactMap(libraryMutationPayload)
+            .compactMap { $0["n"] as? String }
+        #expect(counts == Array(repeating: String(PlaylistSongPaging.initialCount), count: 2))
+
+        let forceRepository = AppModelAccountReadRepository(
+            snapshot: CredentialSnapshot(.guest),
+            homeGate: LibraryMutationGate(blockedCalls: []),
+            detailGate: LibraryMutationGate(blockedCalls: [])
+        )
+        let forceModel = AppModel(repository: forceRepository)
+        forceModel.path = [route]
+        forceModel.loadDetail(route)
+        #expect(await eventually {
+            guard forceRepository.capturedDetailForceRefreshes() == [false],
+                  case .loaded? = forceModel.detailLoads[route]
+            else { return false }
+            return true
+        })
+        forceModel.loadDetail(route, reload: true)
+        #expect(await eventually {
+            guard forceRepository.capturedDetailForceRefreshes() == [false, true],
+                  case .loaded? = forceModel.detailLoads[route]
+            else { return false }
+            return true
+        })
+    }
+
+    @Test("Playlist mutation reload keeps one request and rejects the old generation")
+    func playlistMutationRefreshPreservesGenerationFence() async throws {
+        let detailGate = LibraryMutationGate()
+        let repository = AppModelAccountReadRepository(
+            snapshot: CredentialSnapshot(.guest),
+            homeGate: LibraryMutationGate(),
+            detailGate: detailGate
+        )
+        let model = AppModel(repository: repository)
+
+        let stale = Task { try await model.reloadPlaylist(900) }
+        #expect(await eventually { await detailGate.hasEntered() })
+        let current = try await model.reloadPlaylist(900)
+        #expect(current.id == 900)
+        await detailGate.release()
+
+        do {
+            _ = try await stale.value
+            Issue.record("The older playlist generation committed")
+        } catch is CancellationError {
+        }
+        #expect(repository.capturedDetailForceRefreshes() == [true, true])
+        #expect(repository.completedReadCount() == 2)
     }
 
     @Test("Post-install revision change clears the stale account and its mutation owner")
@@ -843,6 +1409,80 @@ struct LibraryMutationPerformanceTests {
         #expect(LibraryMutationProtocol.count("/weapi/playlist/cover/update") == 1)
     }
 
+    @Test("Prepared playlist cover reuses its preview and uploads the original cover")
+    func preparedPlaylistCoverPreviewBoundary() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appending(
+                path: "iOS/TinyCloudMusicIOS/UI/DiscoverSearch/IOSRouteDestinationView.swift"
+            ),
+            encoding: .utf8
+        )
+        let prepare = try slice(
+            source,
+            from: "    private func prepareCover",
+            to: "    @MainActor\n    private func updateCover"
+        )
+        let detached = try slice(
+            prepare,
+            from: "let worker = Task.detached",
+            to: "            do {"
+        )
+        let update = try slice(
+            source,
+            from: "    @MainActor\n    private func updateCover",
+            to: "    private func makePublic()"
+        )
+        let item = try slice(
+            source,
+            from: "private struct IOSPreparedPlaylistCover",
+            to: "private struct IOSDetailOperationError"
+        )
+        let sheet = try slice(
+            source,
+            from: "private struct IOSPlaylistCoverUpdateSheet",
+            to: "    private func submit()"
+        )
+        let workerValue = try #require(
+            prepare.range(of: "try await worker.value")?.lowerBound
+        )
+        let cancellationGuard = try #require(
+            prepare.range(of: "try Task.checkCancellation()")?.lowerBound
+        )
+        let contextGuard = try #require(
+            prepare.range(of: "guard let library = model.library, context.matches")?.lowerBound
+        )
+        let previewConstruction = try #require(
+            prepare.range(of: "UIImage(data: cover.jpegData)")?.lowerBound
+        )
+        let preparedItemInstall = try #require(
+            prepare.range(of: "preparedCover = IOSPreparedPlaylistCover")?.lowerBound
+        )
+
+        #expect(prepare.contains("coverTask = Task { @MainActor in"))
+        #expect(!detached.contains("UIImage(data:"))
+        #expect(workerValue < cancellationGuard)
+        #expect(cancellationGuard < contextGuard)
+        #expect(contextGuard < previewConstruction)
+        #expect(previewConstruction < preparedItemInstall)
+        #expect(prepare.components(separatedBy: "UIImage(data:").count == 2)
+        #expect(prepare.contains("previewImage: previewImage"))
+        #expect(item.contains("let cover: ProcessedPlaylistCover"))
+        #expect(item.contains("let context: IOSPlaylistMutationContext"))
+        #expect(item.contains("let previewImage: UIImage?"))
+        #expect(sheet.contains("if let image = item.previewImage"))
+        #expect(sheet.contains("ContentUnavailableView(\"无法预览封面\""))
+        #expect(!sheet.contains("UIImage(data:"))
+        #expect(update.contains("cover: item.cover"))
+        #expect(update.contains("expectedCredentialRevision: item.context.credentialRevision"))
+        #expect(update.components(separatedBy: "item.context.matches").count == 3)
+        #expect(!update.contains("previewImage"))
+        #expect(!update.contains("jpegData"))
+    }
+
     @Test("Recommendation force refresh replaces the regular cache entry")
     func recommendationRefreshReplacement() async throws {
         LibraryMutationProtocol.reset()
@@ -1067,6 +1707,174 @@ struct LibraryMutationPerformanceTests {
         #expect(downloadCacheRoots.last == defaultCacheRoot)
     }
 
+    @Test("PERF-B02 pagination entries preserve scale, order, and request progress")
+    func perfB02PaginationScaleMatrix() async throws {
+        for entry in LibraryPaginationEntry.allCases {
+            for dataPages in [1, 10, 50, 100] {
+                LibraryPaginationProtocol.reset(dataPages: dataPages)
+                let recorder = LibraryPageRecorder<Int64>()
+                let library = try paginationLibrary()
+                let values = try await paginationIDs(entry, library: library) { recorder.record($0) }
+                let expected = (1...(dataPages * 100)).map(Int64.init)
+
+                #expect(values == expected)
+                #expect(recorder.updates.count == dataPages)
+                #expect(recorder.updates.first == Array(expected.prefix(100)))
+                #expect(recorder.updates.last == expected)
+                #expect(LibraryPaginationProtocol.count(entry.path) == expectedPaginationRequestCount(
+                    entry,
+                    dataPages: dataPages
+                ))
+                #expect(paginationRequestProgress(entry) == expectedPaginationProgress(
+                    entry,
+                    dataPages: dataPages
+                ))
+            }
+        }
+    }
+
+    @Test("PERF-B02 each entry publishes its first page before a gated tail")
+    func perfB02FirstPageBeforeTail() async throws {
+        let firstPage = (1...100).map(Int64.init)
+        for entry in LibraryPaginationEntry.allCases {
+            LibraryPaginationProtocol.reset(dataPages: 10, gateTail: true)
+            let recorder = LibraryPageRecorder<Int64>()
+            let library = try paginationLibrary()
+            let task = Task { @MainActor in
+                let values = try await paginationIDs(entry, library: library) { recorder.record($0) }
+                recorder.finish()
+                return values
+            }
+
+            #expect(await eventually { LibraryPaginationProtocol.count(entry.path) == 2 })
+            #expect(recorder.updates == [firstPage])
+            #expect(!recorder.completed)
+            LibraryPaginationProtocol.releaseTail()
+
+            #expect(try await task.value == (1...1_000).map(Int64.init))
+            #expect(recorder.completed)
+        }
+    }
+
+    @Test("PERF-B02 duplicate, empty, and repeated-cursor tails terminate independently")
+    func perfB02TerminationFences() async throws {
+        let firstPage = (1...100).map(Int64.init)
+        for entry in LibraryPaginationEntry.allCases {
+            LibraryPaginationProtocol.reset(dataPages: 1, tail: .duplicate)
+            let duplicateLibrary = try paginationLibrary()
+            #expect(try await paginationIDs(entry, library: duplicateLibrary) == firstPage)
+            #expect(LibraryPaginationProtocol.count(entry.path) == 2)
+
+            LibraryPaginationProtocol.reset(dataPages: 1, tail: .empty)
+            let emptyLibrary = try paginationLibrary()
+            #expect(try await paginationIDs(entry, library: emptyLibrary) == firstPage)
+            #expect(LibraryPaginationProtocol.count(entry.path) == 2)
+        }
+
+        for entry in [LibraryPaginationEntry.mixedFollowing, .followingUsers] {
+            LibraryPaginationProtocol.reset(dataPages: 2, tail: .repeatedCursor)
+            let library = try paginationLibrary()
+            #expect(try await paginationIDs(entry, library: library) == (1...200).map(Int64.init))
+            #expect(LibraryPaginationProtocol.count(entry.path) == 2)
+        }
+    }
+
+    @Test("PERF-B04 large favorite batch records serial requests and Observation phases")
+    func perfB04LargeBatchObservationPhases() async throws {
+        LibraryMutationProtocol.reset()
+        let stepGate = LibraryMutationStepGate()
+        let fixture = try likedSongFixture("perf-b04-scale") { await stepGate.wait() }
+        let songIDs = (1...1_000).map(Int64.init)
+        let invalidations = LibraryObservationCounter()
+        var phaseInvalidations: [Int] = []
+        var phaseRequests: [Int] = []
+        let task = Task { try await fixture.model.favoriteSongs(songIDs) }
+
+        for expectedCount in 1...songIDs.count {
+            #expect(await eventually { await stepGate.hasEntered(expectedCount) })
+            withObservationTracking {
+                _ = fixture.model.likedSongIDs
+            } onChange: {
+                invalidations.increment()
+            }
+            await stepGate.releaseNext()
+            #expect(await eventually { fixture.model.likedSongIDs.count == expectedCount })
+            if expectedCount.isMultiple(of: 100) {
+                phaseInvalidations.append(invalidations.value)
+                phaseRequests.append(LibraryMutationProtocol.count("/eapi/song/like"))
+            }
+        }
+
+        #expect(try await task.value == songIDs.count)
+        #expect(fixture.model.likedSongIDs == Set(songIDs))
+        #expect(invalidations.value == songIDs.count)
+        #expect(phaseInvalidations == Array(stride(from: 100, through: 1_000, by: 100)))
+        #expect(phaseRequests == phaseInvalidations)
+        #expect(LibraryMutationProtocol.count("/eapi/song/like") == songIDs.count)
+        #expect(favoriteRequestIDs() == songIDs)
+        #expect(fixture.model.pendingMutations.isEmpty)
+    }
+
+    @Test("PERF-B04 large favorite failure, cancellation, and revision fences preserve exact prefixes")
+    func perfB04FailureCancellationRevisionFences() async throws {
+        let songIDs = (1...100).map(Int64.init)
+
+        LibraryMutationProtocol.reset()
+        LibraryMutationProtocol.fail("/eapi/song/like", onCall: 51)
+        let partial = try likedSongFixture("perf-b04-partial")
+        do {
+            _ = try await partial.model.favoriteSongs(songIDs)
+            Issue.record("The configured favorite request should fail")
+        } catch let failure as FavoriteSongsFailure {
+            #expect(failure.successfulIDs == Array(songIDs.prefix(50)))
+            #expect(failure.failedID == 51)
+            #expect(failure.unattemptedIDs == Array(songIDs.dropFirst(51)))
+        }
+        #expect(partial.model.likedSongIDs == Set(songIDs.prefix(50)))
+        #expect(favoriteRequestIDs() == Array(songIDs.prefix(51)))
+        #expect(partial.model.pendingMutations.isEmpty)
+
+        LibraryMutationProtocol.reset()
+        LibraryMutationProtocol.blockResponse("/eapi/song/like", onCall: 2)
+        let cancellation = try likedSongFixture("perf-b04-cancel")
+        let cancelledTask = Task { try await cancellation.model.favoriteSongs(songIDs) }
+        #expect(await eventually {
+            cancellation.model.likedSongIDs == [1]
+                && LibraryMutationProtocol.count("/eapi/song/like") == 2
+        })
+        cancelledTask.cancel()
+        LibraryMutationProtocol.releaseBlockedResponse()
+        do {
+            _ = try await cancelledTask.value
+            Issue.record("The cancelled favorite batch should not complete")
+        } catch is CancellationError {
+        }
+        let cancelledRequests = favoriteRequestIDs()
+        #expect(cancelledRequests == Array(songIDs.prefix(2)))
+        #expect(cancellation.model.likedSongIDs == [1])
+        #expect(cancellation.model.pendingMutations.isEmpty)
+
+        LibraryMutationProtocol.reset()
+        LibraryMutationProtocol.blockResponse("/eapi/song/like", onCall: 2)
+        let revision = try likedSongFixture("perf-b04-revision")
+        let staleTask = Task { try await revision.model.favoriteSongs(songIDs) }
+        #expect(await eventually {
+            revision.model.likedSongIDs == [1]
+                && LibraryMutationProtocol.count("/eapi/song/like") == 2
+        })
+        _ = revision.snapshot.store(.authenticated(try credentials("perf-b04-revision-current")))
+        LibraryMutationProtocol.releaseBlockedResponse()
+        do {
+            _ = try await staleTask.value
+            Issue.record("The stale-revision favorite batch should not complete")
+        } catch is CancellationError {
+        }
+        let revisionRequests = favoriteRequestIDs()
+        #expect(revisionRequests == Array(songIDs.prefix(2)))
+        #expect(revision.model.likedSongIDs == [1])
+        #expect(revision.model.pendingMutations.isEmpty)
+    }
+
     @Test("User playlists publish the first page before the tail and preserve final order")
     func userPlaylistsPublishProgressively() async throws {
         LibraryPaginationProtocol.reset()
@@ -1218,6 +2026,89 @@ struct LibraryMutationPerformanceTests {
         #expect(!cloudMerged.page.hasMore)
     }
 
+    private func paginationIDs(
+        _ entry: LibraryPaginationEntry,
+        library: LiveMusicLibrary,
+        onUpdate: (@MainActor @Sendable ([Int64]) -> Void)? = nil
+    ) async throws -> [Int64] {
+        switch entry {
+        case .playlists:
+            let values = try await library.userPlaylists(
+                userID: 7,
+                expectedCredentialRevision: library.transport.credentialSnapshotValue().revision
+            ) { onUpdate?($0.map(\.id)) }
+            return values.map(\.id)
+        case .mixedFollowing:
+            let values = try await library.myFollowing(
+                expectedCredentialRevision: library.transport.credentialSnapshotValue().revision
+            ) { onUpdate?($0.map(\.resourceID)) }
+            return values.map(\.resourceID)
+        case .followingUsers:
+            let values = try await library.followingUsers(userID: 7) { onUpdate?($0.map(\.id)) }
+            return values.map(\.id)
+        case .followedArtists:
+            let values = try await library.followedArtists(userID: 7) { onUpdate?($0.map(\.id)) }
+            return values.map(\.id)
+        }
+    }
+
+    private func expectedPaginationRequestCount(
+        _ entry: LibraryPaginationEntry,
+        dataPages: Int
+    ) -> Int {
+        entry == .playlists ? dataPages : dataPages + 1
+    }
+
+    private func paginationRequestProgress(_ entry: LibraryPaginationEntry) -> [String] {
+        LibraryPaginationProtocol.bodies(entry.path)
+            .compactMap(libraryMutationPayload)
+            .map { payload in
+                switch entry {
+                case .playlists:
+                    return "\(payloadString(payload["offset"])):\(payloadString(payload["limit"]))"
+                case .followedArtists:
+                    return "\(payloadString(payload["offset"])):\(payloadString(payload["limit"]))"
+                case .mixedFollowing, .followingUsers:
+                    guard let page = payload["page"] as? String,
+                          let data = page.data(using: .utf8),
+                          let object = try? JSONSerialization.jsonObject(with: data),
+                          let values = object as? [String: Any]
+                    else { return "invalid" }
+                    return "\(payloadString(values["cursor"])):\(payloadString(values["size"]))"
+                }
+            }
+    }
+
+    private func expectedPaginationProgress(
+        _ entry: LibraryPaginationEntry,
+        dataPages: Int
+    ) -> [String] {
+        switch entry {
+        case .playlists:
+            (0..<dataPages).map { "\($0 * 100):100" }
+        case .followedArtists:
+            (0...dataPages).map { "\($0 * 100):100" }
+        case .mixedFollowing, .followingUsers:
+            [":100"] + (1...dataPages).map { "cursor-\($0):100" }
+        }
+    }
+
+    private func payloadString(_ value: Any?) -> String {
+        if let value = value as? String { return value }
+        if let value = value as? NSNumber { return value.stringValue }
+        return ""
+    }
+
+    private func favoriteRequestIDs() -> [Int64] {
+        LibraryMutationProtocol.bodies("/eapi/song/like")
+            .compactMap(libraryMutationPayload)
+            .compactMap { payload in
+                if let value = payload["trackId"] as? NSNumber { return value.int64Value }
+                if let value = payload["trackId"] as? String { return Int64(value) }
+                return nil
+            }
+    }
+
     private func transport(
         snapshot: CredentialSnapshot,
         beforeSendingRequest: (@Sendable () async -> Void)? = nil
@@ -1240,11 +2131,75 @@ struct LibraryMutationPerformanceTests {
         ))
     }
 
+    private func session(
+        snapshot: CredentialSnapshot,
+        transport: EAPITransport
+    ) -> SessionController {
+        SessionController(
+            store: CredentialStore(service: "TinyCloudMusicTests.\(UUID())"),
+            credentialSnapshot: snapshot,
+            transport: transport,
+            validator: { _ in true },
+            vipValidator: { _ in true },
+            persistCredentials: { _ in }
+        )
+    }
+
+    private func likedSongFixture(
+        _ token: String,
+        beforeSendingRequest: (@Sendable () async -> Void)? = nil
+    ) throws -> (
+        model: AppModel,
+        snapshot: CredentialSnapshot,
+        revision: UInt64,
+        playlists: [Playlist]
+    ) {
+        let snapshot = CredentialSnapshot(.authenticated(try credentials(token)))
+        let transport = transport(
+            snapshot: snapshot,
+            beforeSendingRequest: beforeSendingRequest
+        )
+        let model = AppModel(
+            repository: FixtureMusicRepository(),
+            library: LiveMusicLibrary(transport: transport),
+            extras: LiveMusicExtras(transport: transport)
+        )
+        let revision = snapshot.load().revision
+        model.installConfirmedAccount(userID: 8, credentialRevision: revision)
+        var playlist = Playlist(
+            id: 900,
+            name: "Liked",
+            creator: "Fixture",
+            description: "",
+            artwork: Artwork(symbol: "heart.fill", accent: .red)
+        )
+        playlist.creatorID = 8
+        playlist.specialType = 5
+        return (model, snapshot, revision, [playlist])
+    }
+
     private func credentials(_ token: String) throws -> SessionCredentials {
         try SessionCredentials(
             cookie: "MUSIC_U=fixture-\(token); __csrf=fixture",
             musicU: "vip-fixture-\(token)",
             deviceID: String(repeating: "D", count: 52)
+        )
+    }
+
+    private func accountUser(_ id: Int64) -> MusicLibraryUser {
+        MusicLibraryUser(
+            id: id,
+            nickname: "Fixture",
+            signature: "",
+            detail: "",
+            avatarURL: nil,
+            gender: 0,
+            level: 0,
+            listenedSongCount: 0,
+            followerCount: 0,
+            followingCount: 0,
+            isFollowed: false,
+            followsCurrentUser: false
         )
     }
 
@@ -1274,4 +2229,33 @@ struct LibraryMutationPerformanceTests {
         }
         return false
     }
+
+    private func slice(_ source: String, from start: String, to end: String) throws -> String {
+        let lower = try #require(source.range(of: start)?.lowerBound)
+        let upper = try #require(source.range(of: end, range: lower..<source.endIndex)?.lowerBound)
+        return String(source[lower..<upper])
+    }
+}
+
+private func libraryMutationPayload(_ body: Data) -> [String: Any]? {
+    guard let text = String(data: body, encoding: .utf8), text.hasPrefix("params=") else { return nil }
+    let hex = text.dropFirst("params=".count)
+    var encrypted = Data(capacity: hex.count / 2)
+    var index = hex.startIndex
+    while index < hex.endIndex {
+        guard let next = hex.index(index, offsetBy: 2, limitedBy: hex.endIndex),
+              let byte = UInt8(hex[index..<next], radix: 16)
+        else { return nil }
+        encrypted.append(byte)
+        index = next
+    }
+    guard let envelope = try? EAPICodec.decrypt(encrypted),
+          let text = String(data: envelope, encoding: .utf8)
+    else { return nil }
+    let parts = text.components(separatedBy: "-36cd479b6b5-")
+    guard parts.count == 3,
+          let data = parts[1].data(using: .utf8),
+          let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else { return nil }
+    return payload
 }

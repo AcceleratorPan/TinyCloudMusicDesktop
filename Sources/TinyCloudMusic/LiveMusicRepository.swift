@@ -302,6 +302,7 @@ struct LiveMusicRepository: MusicRepository {
         vipCredential: VIPRequesterCredential? = nil,
         iPhoneClient: Bool = false,
         cache: EAPIReadCache? = nil,
+        refreshCache: Bool = false,
         expectedCredentialRevision: UInt64? = nil
     ) async throws -> [String: Any] {
         try await transport.requestJSONObject(
@@ -310,6 +311,7 @@ struct LiveMusicRepository: MusicRepository {
             vip: vipCredential != nil,
             useStoredCookieForVIP: vipCredential == .storedCookie,
             cache: cache,
+            refreshCache: refreshCache,
             expectedCredentialRevision: expectedCredentialRevision,
             iPhoneClient: iPhoneClient
         )

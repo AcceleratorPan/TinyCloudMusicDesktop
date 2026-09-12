@@ -1,0 +1,240 @@
+{
+  "date": "2026-09-12",
+  "scope": "F01-F12 and E01 from report.md; changes made over existing uncommitted workspace",
+  "head": "e97eefac09cf2c059d090956dd7db46363fb8e08",
+  "checks": [
+    {
+      "kind": "macos_offline_tests",
+      "cwd": "/Users/acceleratorpan/Downloads/Proj/TCM",
+      "argv": [
+        "swift",
+        "test",
+        "--jobs",
+        "1",
+        "--no-parallel",
+        "-Xswiftc",
+        "-disable-batch-mode",
+        "--filter",
+        "AuditRemediationTests|MusicDownloadInfrastructureTests|detailExpiryAndRetention|sheetExportsDoNotOverwrite|sheetsAndKnowledge|pausedTailSeekKeepsQueue|playbackSettlementKeepsOutgoingIdentity|corruptFullCacheRecoversOnce|finalizationAndHitValidation|macMediaPlaybackOwnership|broadcastPlaybackStates|broadcastStaleItemCallbacks|latestRequestWins|accountRace|playbackStallRecovery|activeSeekChasing|pendingSeekUntilReady|queueIdentity|fullAndBestCacheRouting|invalidDirectFallbackStopsBeforeInstallation|unverifiableRangeFallsBackOnce|pauseDuringStandbyHandoff|failedQualityStandbyKeepsActivePlayback|playbackReportRevision|podcastReportOwnership|settlementKeepsStartOwned|settlementPreservesStartFailure|clearCacheOwnerUnion|activeRangeFallbackResumesPosition|playlistRefreshSendsOneDetailPayload|playlistMutationRefreshPreservesGenerationFence|remotePDFStagingStructure|clearCacheBarrier"
+      ],
+      "exit_code": 0,
+      "tests": 46,
+      "suites": 11,
+      "execution_seconds": 30.284,
+      "log": "remediation-tests.log",
+      "parameterized_cases": {
+        "activeRangeFallbackResumesPosition": 3,
+        "playbackSettlementKeepsOutgoingIdentity": 2,
+        "corruptFullCacheRecoversOnce": 2
+      }
+    },
+    {
+      "kind": "extracted_source_probes",
+      "cwd": "/Users/acceleratorpan/Downloads/Proj/TCM",
+      "argv": [
+        "python3",
+        "docs/macos-ios-audit-2026-09-12/reproduce-findings.py",
+        "--expect-fixed"
+      ],
+      "exit_code": 0,
+      "log": "remediation-probes.log",
+      "observed_cloud_offsets": [
+        0,
+        30,
+        60,
+        90
+      ],
+      "existing_sheet_file_preserved": true
+    },
+    {
+      "kind": "ios_build_for_testing",
+      "cwd": "/Users/acceleratorpan/Downloads/Proj/TCM/iOS",
+      "argv": [
+        "xcodebuild",
+        "-workspace",
+        "TinyCloudMusicIOS.xcworkspace",
+        "-scheme",
+        "TinyCloudMusicIOS",
+        "-destination",
+        "generic/platform=iOS Simulator",
+        "-derivedDataPath",
+        "DerivedData",
+        "-jobs",
+        "1",
+        "-parallel-testing-enabled",
+        "NO",
+        "SWIFT_ENABLE_BATCH_MODE=NO",
+        "OTHER_SWIFT_FLAGS=$(inherited) -j 1",
+        "CODE_SIGNING_ALLOWED=NO",
+        "build-for-testing",
+        "-quiet"
+      ],
+      "exit_code": 0,
+      "log": "remediation-ios-build.log",
+      "log_empty": true,
+      "test_host_launched": false,
+      "ios_tests_executed": false
+    },
+    {
+      "kind": "static_checks",
+      "exit_code": 0,
+      "log": "remediation-static-checks.log",
+      "shell_syntax_files": 2,
+      "single_job_compiler_entries": [
+        18,
+        2
+      ],
+      "plist_files": 3,
+      "git_diff_check": "passed"
+    }
+  ],
+  "intermediate_attempts": [
+    {
+      "log": "remediation-first-compile.log",
+      "exit_code": 1,
+      "reason": "Swift Testing allSatisfy key-path macro compile error; changed to closure"
+    },
+    {
+      "log": "remediation-first-tests.log",
+      "exit_code": 1,
+      "tests": 26,
+      "failed_test_definitions": 1,
+      "failed_parameter_cases": 2,
+      "reason": "Late AVPlayer callbacks overwrote terminal failed state after successful corrupt-cache recovery; fixed and final expanded run passed"
+    }
+  ],
+  "safety": {
+    "compiler_parallelism": 1,
+    "only_root_compiled": true,
+    "stable_build_caches": [
+      ".build",
+      "iOS/DerivedData"
+    ],
+    "production_keychain_accessed": false,
+    "secret_environment_inspected": false,
+    "application_launched": false,
+    "live_api_checks_run": false,
+    "remote_mutations_run": false,
+    "memory_pressure_event": "Level 2 observed after a completed build; no compiler was active. Subsequent builds waited until level 1."
+  },
+  "limitations": [
+    "iOS app and test bundles were compiled but tests and device interactions were not run.",
+    "Generation unit checks do not execute complete SwiftUI video/cloud lifecycles.",
+    "Unknown media duration fallback is protected by the timing snapshot but has no stable AVPlayer runtime fixture.",
+    "Exclusive PDF publication fails safely on unsupported filesystems; repeated exports beside an invalid base file create numbered copies."
+  ],
+  "source_changes_compared_with_audit": [
+    {
+      "path": "Sources/TinyCloudMusic/AppModel.swift",
+      "audit_sha256": "e03db2e699eebdfbc752b831bf0e44c824cd6aed2c19fec13604ac56e5cb9ac6",
+      "remediated_sha256": "a9bea44adf536c7de2ee482f36575e0859ca12ed63c913af2e49a659f864d465"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/AudioContentViews.swift",
+      "audit_sha256": "c78aa48af48698902fed09c5a35c538d6b22858bede834accb2417a579f450fb",
+      "remediated_sha256": "42e07315d213a82c615c21bbc6c162a39f8aaa94b826140f0bc0abe04f20878d"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/MusicSheetWorker.swift",
+      "audit_sha256": "33683144742fc2409d69f3138621b179e160fb09479f3a531ea7d57f61e7d68a",
+      "remediated_sha256": "f81c75f592d1c0c66147f369a6c7310398335328b05f818d8dca2b63a8b9bcff"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/PlayerController.swift",
+      "audit_sha256": "998f8b9761e99a518f0dfdcfc649b9598f67b78d17e73635e9fe60e293a362fc",
+      "remediated_sha256": "ff57d19ee881f8ffa8790353cbee6de1b0f2d4ba06acbdc193b359c7b329d3e3"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/TinyCloudMusicApp.swift",
+      "audit_sha256": "5c2b98b768ca561b8cba3ae5db243c6625efb40916a7b3c7011c02cce028617b",
+      "remediated_sha256": "6c278378879f7d889a95abc0bca1c2d372af7ce20366894e97216df9dce6b280"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/TrackCache.swift",
+      "audit_sha256": "39d55c3ad9c7d094616b7ed7e9e1fc5d74666cd0b79af9517b0e3d04440c4941",
+      "remediated_sha256": "544cee948c98e446fefaeaae1bdd932ea6e62f2aa8ea26dd4d948fbf34c908f1"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/VideoViews.swift",
+      "audit_sha256": "5b3639ebbfeb3b245041e7be1e6a4a203e45389b94e1bddf697d65cb6ea17713",
+      "remediated_sha256": "ac55587f567005750a2ea95e0af67710ff04a49148e5580a018f00648c39015e"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/KnowledgeListeningPerformanceTests.swift",
+      "audit_sha256": "fbbbb2189816410957b2a54739eae6dfcbeeff54371f81535a9af67cc7d4c5e3",
+      "remediated_sha256": "e206e46a6c123c892510f437051b188d633330ead140b23b7e927f333da5d2c0"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/LibraryMutationPerformanceTests.swift",
+      "audit_sha256": "3c08c68095cb1a518224b1817d9676570ea1a5594c17c07bf8eb914262c51649",
+      "remediated_sha256": "d061ff22f68980ec5b493764894b082e385725eb96b8bee58f8f11c212aeac76"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/MediaLifecyclePerformanceTests.swift",
+      "audit_sha256": "2f41b06c8e1b1daf017b21175a327c4a92b61a19c2fd14f641ea13f6c4498360",
+      "remediated_sha256": "e3e93032458dff38d4361f232c948e49d5dc717dbb71644078525b1bbbd0c9a4"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/MusicKnowledgeTests.swift",
+      "audit_sha256": "992d925ed1375ed53709c29ec2c77ccae7653eb8049b8e4cb840ac4e64250239",
+      "remediated_sha256": "3efcac6d7cd6fa736b664bb0aac66632244cc1534f3d2ed7ff31fdff09b0db65"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/PlayerCachePerformanceTests.swift",
+      "audit_sha256": "5a3221c5fbe2d8c57d33800444cbb0f5f2f74e390bf30c92d4e07e925c5ff4bc",
+      "remediated_sha256": "1ca97a7f38c2719c82a93bcee13f31d6ff6033c136d4be1f224b9af562266662"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/TrackCacheTests.swift",
+      "audit_sha256": "ea864bd37d58dcf294a568fb6c14ddfef6f88034b0ff8286d2a1d71a633d98ff",
+      "remediated_sha256": "660960435eb3ae495e908f9632eb99b9dd29263b0eb104d26a2e8308853f371f"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/SharedOverrides/AppModel.swift",
+      "audit_sha256": "5f15da8498d918b3b03229debe015ea62699444cac2144be5a4838097b7afd4b",
+      "remediated_sha256": "818ea1caaaa3383b39a7c19c6098b56d73f5e6e9c2cf0701ab60429605aef806"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/UI/DiscoverSearch/IOSDiscoverSearchComponents.swift",
+      "audit_sha256": "d58450b739c2412765d00b65fae5ea6c5faced33374524a78eda52b7eaae21af",
+      "remediated_sha256": "83673f00fa91ba3952bca3eb75cc80c7db86fc361b5b20c71411df92cf609bb7"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/UI/LibraryMedia/IOSLibraryView.swift",
+      "audit_sha256": "70f27eb92f9427cbaf9ba0d960caf224222520f8d326fcac3be4fc08734cc980",
+      "remediated_sha256": "3afc1cfc7517db615f08e76d0291c7f4bf6ebf080b000a8da2671a1416fe1101"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/UI/LibraryMedia/IOSMediaView.swift",
+      "audit_sha256": "25e8519d71023a1d33b74d01669dd9430aed7b38843432ad29a272f931f87d63",
+      "remediated_sha256": "ae0675e31b9be2c56b860bc938dce9b6c7b65b33a67240c755ea0ba1a8c4a6d2"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOSTests/IOSNavigationTests.swift",
+      "audit_sha256": "bce2dce60fbb064d64dc7a79f66b4aa92ded7ce946ed3f538db71359858ed31f",
+      "remediated_sha256": "9bfd3b283dd3aaa5ca552012303a88b62b40a686ec55444318bff82251a2e004"
+    }
+  ],
+  "additional_file_fingerprints": [
+    {
+      "path": "Checks/run-api-checks.sh",
+      "sha256": "f54489d798f4349eba027b74dd4c2b1f82595d0de8584ba394a3c87c2a8a25c4"
+    },
+    {
+      "path": "Checks/run-listen-together-live-smoke.sh",
+      "sha256": "1287c0120f55b56c1002ec96e4839ba9b099a8a16eca1ade0afe62ccf36317d8"
+    },
+    {
+      "path": "README.md",
+      "sha256": "3eea26b4fa7fc3fa37af289a81556874ef763f13699f716fb06fb7b8210c0d15"
+    },
+    {
+      "path": "iOS/README.md",
+      "sha256": "f9ad9f5d864ac592babf0f8cd213fca0748eef96f43e73dd297a249129fc301c"
+    },
+    {
+      "path": "docs/macos-ios-audit-2026-09-12/reproduce-findings.py",
+      "sha256": "48c67f3029a69ea8e3b8a74ab08692c7e2a641b6966c7851bde185fc1c5f636f"
+    }
+  ]
+}

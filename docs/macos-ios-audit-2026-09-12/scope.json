@@ -1,0 +1,651 @@
+{
+  "head": "e97eefac09cf2c059d090956dd7db46363fb8e08",
+  "scope_note": "文件清单用于固定审计依据，不表示逐行等深审查",
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "lines": 61,
+      "sha256": "1e8fa647ea4438d2d24808f584907acfb2446eba1981924d8f87bc5ce73d9b7a"
+    },
+    {
+      "path": "Package.resolved",
+      "lines": 15,
+      "sha256": "c6b617fa6e30b13e08f904e00e170cf9798968af660fd2198a6ea4a597b6bf74"
+    },
+    {
+      "path": "Package.swift",
+      "lines": 30,
+      "sha256": "3f104df4d1169b253debc10e00c0966005d1b7c3f077228c532b027f5f4378a4"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/AppModel.swift",
+      "lines": 1880,
+      "sha256": "e03db2e699eebdfbc752b831bf0e44c824cd6aed2c19fec13604ac56e5cb9ac6"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/AudioContentModels.swift",
+      "lines": 703,
+      "sha256": "c3443e49e748a583e218a234635b10bb4cec1ba0fd1af12b5db5aab1c7e8d5a9"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/AudioContentViews.swift",
+      "lines": 1574,
+      "sha256": "c78aa48af48698902fed09c5a35c538d6b22858bede834accb2417a579f450fb"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/AudioRangeResourceLoader.swift",
+      "lines": 338,
+      "sha256": "dd98ef1228a47140ff08d4b6780e98ec10295c6c1ee03c0c043b14a812a5590b"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/AudioUploadAPI.swift",
+      "lines": 355,
+      "sha256": "d97c61cbb00928f992ac27eb707cb6f83f113ee43d5a2e89e222993774145b1d"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/AudioUploadManager.swift",
+      "lines": 1200,
+      "sha256": "f3cb00a69bf07e129f4f49e1e0034f0eab606ad96d5c04d687fbe8b01eeca0d4"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/AudioUploadModels.swift",
+      "lines": 593,
+      "sha256": "79850525a15062cfe996c93f1b1635f888d7c6f8fb6485f942ad1a77466067b9"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/AudioUploadViews.swift",
+      "lines": 396,
+      "sha256": "052ed2da6bbd5bb834452f1e0af26deed8659e0d757c9bea12314f1a412e465d"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/CachedAsyncImage.swift",
+      "lines": 412,
+      "sha256": "d3a683cb20add3b9ca43374c58c2437b4069c75eaaf3e86b8c897bbddb985571"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/CloudMusicModels.swift",
+      "lines": 162,
+      "sha256": "f5cff550ed660094d8af85df2c00cb6add81eced7e40df63ee43d8be171ebed9"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/CloudMusicView.swift",
+      "lines": 398,
+      "sha256": "4c1576b34c19bf307b61239dbfa5371d03c7e1834b7c090380036984190b0fd5"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/CommentEmojiText.swift",
+      "lines": 261,
+      "sha256": "378aa7e3a754f681759da77bbadcdb634d6ad7acec052023f7ccb1ebb765a6d5"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/CredentialSnapshot.swift",
+      "lines": 33,
+      "sha256": "cb3af8e7153ec78b6b58193db2163a7eeaf30e187a24c52e734c7caacf328e0f"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/CredentialStore.swift",
+      "lines": 175,
+      "sha256": "81a860df684995ced1f1bfa002e58d2c7762fa7572a219ffd5469a884f2b9ecf"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/DetailExtrasViews.swift",
+      "lines": 991,
+      "sha256": "408215e060882607bbd0b8552723752cec4fbb2d3896ab8cf7df58bd7dfd6f9d"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/EAPITransport.swift",
+      "lines": 2676,
+      "sha256": "b86f7017445053956dce50874da5895a22c921a4a7e7ba31ab44cbb0d04fcd8d"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/LibraryFeatureViews.swift",
+      "lines": 3353,
+      "sha256": "833e150efcb565f116c41ef21dc8c81dcdab4e6748b105d2011aa3b4c3e7ee1e"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/ListenTogetherController.swift",
+      "lines": 1594,
+      "sha256": "0212afa31a5da117cfe90ac83f1649aabd98eb46df7e4afb30c22e5da1baeb67"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/ListenTogetherModels.swift",
+      "lines": 620,
+      "sha256": "dd991478a4b9043c6fe61429ca2b1eb130a1452b854da8b081e6c28a2aeec9d4"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/ListenTogetherView.swift",
+      "lines": 347,
+      "sha256": "d6e6205c94ec0d2791877f46b0b930b6463a0990a40df90d8ab6f9ee909bd6e5"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/ListeningFootprintsView.swift",
+      "lines": 2496,
+      "sha256": "de725d0b96406bc9e050f13be130831750c2d7fda6ddc544980b6e7cd2a3e6a2"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/ListeningReportModels.swift",
+      "lines": 1112,
+      "sha256": "65a16e1ca59c769a3c3e9271ddc518a97d596c709769822292f517320bbcc65b"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/LiveAudioContentLibrary.swift",
+      "lines": 273,
+      "sha256": "1c6cbd9c00c8b67918233d80dbf34ba03072b36c0bfdb8ef814ce394b911e746"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/LiveListenTogetherService.swift",
+      "lines": 341,
+      "sha256": "eb4e9d17eb6b3e72b0dc6caa12816da5315b275b008c382b7a33e4643937f607"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/LiveMusicExtras.swift",
+      "lines": 314,
+      "sha256": "25aea21455502ebe07f39c79d58d1860436bafbd62860837ff0db3c3da087e57"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/LiveMusicKnowledgeLibrary.swift",
+      "lines": 214,
+      "sha256": "e7794a16bb3e72a0c9715923ac9b498a6e5b9a90c57dfb62ba92ea2d7f58b095"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/LiveMusicLibrary.swift",
+      "lines": 1538,
+      "sha256": "e2b8daefdbbb1f3678ed1840e494f6b00080ecd77215757b2d2a7c6eacf53df7"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/LiveMusicRepository+Detail.swift",
+      "lines": 269,
+      "sha256": "1702f669a669a09aba0da3cdd09003a3b3230aa0d3093c91c301369151b77195"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/LiveMusicRepository+Home.swift",
+      "lines": 391,
+      "sha256": "7b76180998956804e05ce20526505663bcbb704794a9c56f3810be7d69abcdf2"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/LiveMusicRepository+Search.swift",
+      "lines": 242,
+      "sha256": "0becc6d60e5ac9092a1e16dd1567ceb57dfa39929ae7388379ee4466419017a0"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/LiveMusicRepository.swift",
+      "lines": 540,
+      "sha256": "e08aa09fbb8006c672bcb16d4ba11ca27acb22cf9fd8c62d647146b86dab1748"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/LiveVideoLibrary.swift",
+      "lines": 311,
+      "sha256": "57371fe320ebeff14ce7af07b239bf4a3090d0aa6fc884a66b9197b8e0f4e917"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/Models.swift",
+      "lines": 962,
+      "sha256": "24e32dd8bdf48c89dc88f86e581f947e6a36624d46e9b1c4f073341a80f7d4a5"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/MusicDownload.swift",
+      "lines": 2360,
+      "sha256": "87fa64cc0066cc1bc7960b4c83392098b51818b00238469747042ab749e62fd8"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/MusicDownloadInfrastructure.swift",
+      "lines": 967,
+      "sha256": "7ab50025936f9fb661c09342c7356d552e166e5cbf0509f4c128bfa77c243078"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/MusicDownloadModels.swift",
+      "lines": 625,
+      "sha256": "14cae1e079924742e27d82541cfeafe969b9d3cd17f436b9cebd46f3e615432c"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/MusicDownloadTransfer.swift",
+      "lines": 304,
+      "sha256": "b7f92cc668f377255ff3dbcd6a3a2ba974a45d4ef8f9a7be572337de9cf191c9"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/MusicExtraModels.swift",
+      "lines": 253,
+      "sha256": "4a550013b7730698757de13675664ce08ef071fe60d5ab8150aecddb4b2a883b"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/MusicKnowledgeModels.swift",
+      "lines": 618,
+      "sha256": "688e1e01497fe9d1b7181a376e042e5ed84b952e773fe453b8ac87dc3738d6c3"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/MusicKnowledgeViews.swift",
+      "lines": 946,
+      "sha256": "6efff66be8b17d3a332d889aa7236713c91fac8d2f7388733bb2f004511ebf4b"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/MusicLibraryModels.swift",
+      "lines": 696,
+      "sha256": "e9aeb0634a23284e3d738c3ce7cf09e853dfd67740503399e63dab8bf46e914e"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/MusicSheetWorker.swift",
+      "lines": 639,
+      "sha256": "33683144742fc2409d69f3138621b179e160fb09479f3a531ea7d57f61e7d68a"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/NIMChatroomTransport.swift",
+      "lines": 1463,
+      "sha256": "5391787b7ed717039ac9bce80e83b2f43083e8b41d7c79334542cd3f6896f70b"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/NOSAudioUpload.swift",
+      "lines": 401,
+      "sha256": "ec4eeb77fc06da7e7ce5cf29b7ef4457fd163ee7cc997f31bb165c8cd9ebc59b"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/NativeQRLoginView.swift",
+      "lines": 309,
+      "sha256": "5860e6ab700c1b15314579385282061a530b76a2715c0d08e0941469c5297efa"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/NeteaseWebLoginView.swift",
+      "lines": 230,
+      "sha256": "aaaf56da7c20ea0531c01aef52db01a81960458dd2529fecdad1b20afe893088"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/NowPlayingDetailView.swift",
+      "lines": 1034,
+      "sha256": "0fe9f3059fa55fe0a58c9c297107248067aca7a0da3dd6aec7c7aece2f9bfd0d"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/PersonalFMView.swift",
+      "lines": 604,
+      "sha256": "1c11962df3b2b425694a65fd922c13197d844c9b58d6e52c43a344848892531e"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/PlayerController.swift",
+      "lines": 3751,
+      "sha256": "998f8b9761e99a518f0dfdcfc649b9598f67b78d17e73635e9fe60e293a362fc"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/PlaylistImageUpload.swift",
+      "lines": 202,
+      "sha256": "50af82a419a5a5752aec43c881e6dd8622865fdbd136a1f9a523df83ff26d11d"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/RecommendationHistoryView.swift",
+      "lines": 359,
+      "sha256": "44939723df058af1cce319e2a23ca74e098d0f11c1499771d9ce8618d4a9ce53"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/RecommendationMemoryModels.swift",
+      "lines": 86,
+      "sha256": "e1c755e03bf26986863243d3719c291cb8fb13e2c3c5d4c15878b94fc32baed7"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/Repository.swift",
+      "lines": 431,
+      "sha256": "70c859c2347a5a600cc9fbe911c549f3cba33450fada0b8f6733fe3f80f8bd61"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/SessionController.swift",
+      "lines": 601,
+      "sha256": "57ab040c2c009c6e620b5d23d9902e2cdad87daed9cf2ec63c71cbdc97134aa7"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/SongPlaylistViews.swift",
+      "lines": 288,
+      "sha256": "40897ba920585c5d9631a039a9291e3013ce7e54abca34d36d56027da23cfaca"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/StreamingByteRange.swift",
+      "lines": 111,
+      "sha256": "f82c7df08903395213f76555ff01d1b2ca32093be1e1ebab4b8848f5a709c816"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/TinyCloudMusicApp.swift",
+      "lines": 1028,
+      "sha256": "5c2b98b768ca561b8cba3ae5db243c6625efb40916a7b3c7011c02cce028617b"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/TrackCache.swift",
+      "lines": 787,
+      "sha256": "39d55c3ad9c7d094616b7ed7e9e1fc5d74666cd0b79af9517b0e3d04440c4941"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/TrackRangeCache.swift",
+      "lines": 1904,
+      "sha256": "9ad12aef5533a3d17ce15541756b81d57dcdfd86f250f1f91a73010ee699275a"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/VideoDownload.swift",
+      "lines": 282,
+      "sha256": "f8b552df0ff52700c8e476efb3c9c4b38ae6b041ee3fa49686792d6d333fdc8f"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/VideoModels.swift",
+      "lines": 530,
+      "sha256": "318d520b174c1a563ff0b04d59613666fd4c6f282646c66e28d5b3afda88871f"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/VideoViews.swift",
+      "lines": 1602,
+      "sha256": "5b3639ebbfeb3b245041e7be1e6a4a203e45389b94e1bddf697d65cb6ea17713"
+    },
+    {
+      "path": "Sources/TinyCloudMusic/Views.swift",
+      "lines": 3826,
+      "sha256": "20ee5819c21ce1e0fb3cbb96d470a3958abd4ce1a1a2b8887f14d421e7b5be42"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/AppShellPerformanceTests.swift",
+      "lines": 825,
+      "sha256": "03133b55958c8ad478b26ebb05c4300bb6dcfa2dd4d1180d1c85dc568a6ca27d"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/AudioContentTests.swift",
+      "lines": 237,
+      "sha256": "96003e509616496cdca7e29d7c336f0ce864acfc73e2dcbe5be490e9bb1f2101"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/AudioRangeFeasibilityTests.swift",
+      "lines": 897,
+      "sha256": "84504d322d4365652343e6120aa573b74fb79c77c2a5744f2047c76d2a3f29c8"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/AudioRangeIntegrationTests.swift",
+      "lines": 3473,
+      "sha256": "f36d7d68ffffd574d44d6139bd1f48c79b639af5cc32d787f50a52dec2b41fca"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/AudioRangeResourceLoaderTests.swift",
+      "lines": 675,
+      "sha256": "e8966f1a0d7ff7d2c261d55c8c08d230e76241de421ee4655f34cb1a4d497c4c"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/AudioUploadIntegrityTests.swift",
+      "lines": 1384,
+      "sha256": "798a78294d40921fd16f17b943eafedc14cd8dee06bef8b0c998e3651ec207fa"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/AudioUploadTests.swift",
+      "lines": 265,
+      "sha256": "6257879377013fc4e13b860a2215c7ede105140481c940fbcb6d157b79d45653"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/AuditRemediationTests.swift",
+      "lines": 282,
+      "sha256": "f097b4e69c5b7608cc420269e308b9828cdf1844e886a7f2c7c17178c8ba71ec"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/CloudMusicTests.swift",
+      "lines": 639,
+      "sha256": "76ee55d2917a63e0523bec53af97323201df548b664fff834bb1627c6cf2a91c"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/CoreTests.swift",
+      "lines": 1229,
+      "sha256": "b3da9c92ef58bf12cc33203b00b90ed7116621663c0822d8615739eb530cb06f"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/CredentialStoreTests.swift",
+      "lines": 112,
+      "sha256": "4814d638338f5ff024c5224e6f3682e324a6d24989529f90f2cb78bcae4d4dad"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/DownloadTransferPerformanceTests.swift",
+      "lines": 1881,
+      "sha256": "0158ee79693ae627eac8bb599788f1c8ae72265eebf670cf40b62d6a55f37df4"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/HomeRepositoryTests.swift",
+      "lines": 86,
+      "sha256": "2ec5d11d8daaa68ec8f630b94e8ce474668bdeae5ba1f483eecc494e49fe84fd"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/KnowledgeListeningPerformanceTests.swift",
+      "lines": 1861,
+      "sha256": "fbbbb2189816410957b2a54739eae6dfcbeeff54371f81535a9af67cc7d4c5e3"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/LibraryMutationPerformanceTests.swift",
+      "lines": 2221,
+      "sha256": "3c08c68095cb1a518224b1817d9676570ea1a5594c17c07bf8eb914262c51649"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/ListenTogetherTests.swift",
+      "lines": 2287,
+      "sha256": "069a27d44e02ac34a370d81acbd9706e674d3c20cff897fd0d647026beb0c8c7"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/ListeningReportTests.swift",
+      "lines": 393,
+      "sha256": "dbae9ea7ebf0d9b2b27c0013d75e69f9c18f2288a1e4f1331fd0987227317d97"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/LiveMusicExtrasTests.swift",
+      "lines": 287,
+      "sha256": "6b49708333307d20878408cc34f227b2552a860051d03a2b95c0c72d5e79118e"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/LiveMusicLibraryTests.swift",
+      "lines": 388,
+      "sha256": "439619e6f6c9e2158d1f9df241400e96f8514f2b004410d6524902fbbf6c6e54"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/MediaLifecyclePerformanceTests.swift",
+      "lines": 1158,
+      "sha256": "2f41b06c8e1b1daf017b21175a327c4a92b61a19c2fd14f641ea13f6c4498360"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/MusicDownloadInfrastructureTests.swift",
+      "lines": 152,
+      "sha256": "661370366861167ec57eee5269047ebbdcb88322592baf8a6738c7ab6d866a4c"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/MusicDownloadTests.swift",
+      "lines": 1098,
+      "sha256": "52ac051faae6d02b2a773654c972034a84846e513fc3aa2a68f58757c0a07fd4"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/MusicDownloadTransferTests.swift",
+      "lines": 133,
+      "sha256": "5d9dc307e558e06523b07f9958b50c08230f4c5bafff6a2f1d4729f59ec373e6"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/MusicKnowledgeTests.swift",
+      "lines": 407,
+      "sha256": "992d925ed1375ed53709c29ec2c77ccae7653eb8049b8e4cb840ac4e64250239"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/NIMRuntimeBoundaryTests.swift",
+      "lines": 1151,
+      "sha256": "f6f954faae52bce33c51f14f75149b7955db701398653fd31f6fd9d29b346993"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/PlaybackAvailabilityTests.swift",
+      "lines": 497,
+      "sha256": "799706e4f7f7d268806db65af9f2022199d3ab2abbe5eb70b2d827bcc21e0086"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/PlayerCachePerformanceTests.swift",
+      "lines": 2975,
+      "sha256": "5a3221c5fbe2d8c57d33800444cbb0f5f2f74e390bf30c92d4e07e925c5ff4bc"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/QRLoginLifecycleTests.swift",
+      "lines": 275,
+      "sha256": "330ad856c0f08187a87336c71c82d85e47bb0681cc4e469755c7f450dee538ca"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/RecommendationMemoryTests.swift",
+      "lines": 672,
+      "sha256": "20a93b123c89071a895b067d693b35a69507238dcffe36fe30156fc2d2285bbf"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/SearchAssistanceTests.swift",
+      "lines": 136,
+      "sha256": "b1088bce8bb1b83dde62f53dffe11f8874a819b60742357b8bfede48f713831e"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/SearchRepositoryTests.swift",
+      "lines": 271,
+      "sha256": "f1e7a9d1bf6a34c93695f0942a015461a0c2149d931ec382763a93eb518d199a"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/StreamingByteRangeTests.swift",
+      "lines": 74,
+      "sha256": "e47ef5817ed4397e0ae08a09acbc5c50a3b9efb44221fe08b71074293f977fa3"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/TrackCacheTests.swift",
+      "lines": 994,
+      "sha256": "ea864bd37d58dcf294a568fb6c14ddfef6f88034b0ff8286d2a1d71a633d98ff"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/TrackRangeCacheTests.swift",
+      "lines": 2216,
+      "sha256": "3134a57201b3490db47d62c87782da71a3e3762837380661ec7e4a6783fa1aad"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/TransportSessionPerformanceTests.swift",
+      "lines": 2825,
+      "sha256": "28fcd877813146f7377caf10e498592aa4a3c99f97500d7dbd31a1442c752a3e"
+    },
+    {
+      "path": "Tests/TinyCloudMusicTests/VideoTests.swift",
+      "lines": 1030,
+      "sha256": "fb96548495df6b9d9a9fdef96f4ff15b06715936847e7123a92dac3838d7af1d"
+    },
+    {
+      "path": "iOS/Podfile.lock",
+      "lines": 20,
+      "sha256": "82cfde8a7734945ae7d425ea11c97e5d16e77bb4cfad7765f8aead17ca764ea2"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/App/IOSAppContainer.swift",
+      "lines": 269,
+      "sha256": "162fc0433d6a1b1c207eb690f9fecf6b111ad5e73b0de01ff4b2a3781cd9fe04"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/App/LibrarySnapshot.swift",
+      "lines": 7,
+      "sha256": "5441188da278cd3384a433dc635eb5d78a02040965ddd06d57753ff9a2907339"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/App/TinyCloudMusicIOSApp.swift",
+      "lines": 29,
+      "sha256": "ba258074f8e24df16875b7d66152ecc468d393028a93964e0eeca26901f4dbee"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/Info.plist",
+      "lines": 34,
+      "sha256": "a92a47dbc1a03ad5a939f8b8ca4954aa53a07b776c54cd0a1719093ad447e304"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/Platform/IOSAudioSessionCoordinator.swift",
+      "lines": 311,
+      "sha256": "04b18026a423b9d44eadb9ecf8d914887fe0cf44f23d414b7f380d0982d82b48"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/Platform/IOSNIMChatroomTransport.swift",
+      "lines": 467,
+      "sha256": "54a8807e9eee54ab07f87e769ace484d6e4c1db57508088c1db514959229b84d"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/PrivacyInfo.xcprivacy",
+      "lines": 33,
+      "sha256": "2284a41be305eb09f7326370983afb65fc481076803a8478896b906ffb657e54"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/SharedOverrides/AppModel.swift",
+      "lines": 1858,
+      "sha256": "5f15da8498d918b3b03229debe015ea62699444cac2144be5a4838097b7afd4b"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/SharedOverrides/AudioUploadModels.swift",
+      "lines": 593,
+      "sha256": "38307ffd2d0778ae6dfdbf36545d629d4aae6cd236e5baa10d0e1ad266705a05"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/SharedOverrides/MusicDownloadInfrastructure.swift",
+      "lines": 967,
+      "sha256": "52dad09292ca4caab5e5edfd4b65e027362a5349de6896c72c9dc87bda583b37"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/SharedOverrides/NOSAudioUpload.swift",
+      "lines": 413,
+      "sha256": "4b82ec666c1d9a666c2b91f937d5989bf17aab906c724095fbfbffc7150cde89"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/SharedOverrides/PersonalFMController.swift",
+      "lines": 487,
+      "sha256": "7ffea7a09a79516ac7d3f8e3e470da412e4d52035b4366c91de3bfd73eb356cc"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/UI/DiscoverSearch/IOSDiscoverSearchComponents.swift",
+      "lines": 226,
+      "sha256": "d58450b739c2412765d00b65fae5ea6c5faced33374524a78eda52b7eaae21af"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/UI/DiscoverSearch/IOSDiscoverView.swift",
+      "lines": 206,
+      "sha256": "e76fe908c306264ae5d0cd0a86325c555792c215b5f13525b819518bd06c43d7"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/UI/DiscoverSearch/IOSRouteDestinationView.swift",
+      "lines": 2509,
+      "sha256": "c15c7932c505c0d84017e5a49aa96a42ffbacd30fba2562a4e97294f2dc542b3"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/UI/DiscoverSearch/IOSSearchView.swift",
+      "lines": 407,
+      "sha256": "f0c1598fbcdfc66936bc1cc8c5f1e1b4c0ae6681b574f0219c72a9e2bb67e08f"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/UI/IOSRootView.swift",
+      "lines": 505,
+      "sha256": "40f72a666da5441f84bc981824e2e0fbdb258f8cd7b66b53a5d9b79d940688cb"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/UI/LibraryMedia/IOSAccountView.swift",
+      "lines": 1249,
+      "sha256": "3b7d4318a60730d8e77555dd086204a523c9cf854085c402cbf1fe0832bd9f88"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/UI/LibraryMedia/IOSLibraryView.swift",
+      "lines": 2770,
+      "sha256": "70f27eb92f9427cbaf9ba0d960caf224222520f8d326fcac3be4fc08734cc980"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/UI/LibraryMedia/IOSMediaView.swift",
+      "lines": 2932,
+      "sha256": "25e8519d71023a1d33b74d01669dd9430aed7b38843432ad29a272f931f87d63"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/UI/Player/IOSDesignSupport.swift",
+      "lines": 86,
+      "sha256": "44b0ab9e73432a81c5d8988d839485a54023a593423f35ba6f313071c8818548"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/UI/Player/IOSListenTogetherView.swift",
+      "lines": 166,
+      "sha256": "1da521c3ab3517a19ebd0133802db3886c73a49b43974c6313b8557dfbd4d7ed"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS/UI/Player/IOSPlayerViews.swift",
+      "lines": 1282,
+      "sha256": "e201e59957838e788e005da1415b64ab97cf90cc25631911335def5341ca1ded"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOS.xcodeproj/project.pbxproj",
+      "lines": 920,
+      "sha256": "10ec5b95c46a2b9fdd1183be3af4c89a3725f4722a7958098741b17a5b55d82c"
+    },
+    {
+      "path": "iOS/TinyCloudMusicIOSTests/IOSNavigationTests.swift",
+      "lines": 2032,
+      "sha256": "bce2dce60fbb064d64dc7a79f66b4aa92ded7ce946ed3f538db71359858ed31f"
+    },
+    {
+      "path": "iOS/project.yml",
+      "lines": 98,
+      "sha256": "b0298d98b3367b04f0b08538a518bc8284a5cac2b14181a977e9f436e5b77519"
+    }
+  ]
+}

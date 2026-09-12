@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Foundation
 import SwiftUI
 import Testing
@@ -6,6 +7,83 @@ import Testing
 
 @Suite("Audio, FM, and video lifecycle", .serialized)
 struct MediaLifecyclePerformanceTests {
+    @MainActor
+    @Test("macOS media ownership handles music, native video resume, and stale cleanup")
+    func macMediaPlaybackOwnership() {
+        let coordinator = MacMediaPlaybackCoordinator()
+        var musicPauseCount = 0
+        coordinator.pauseMusic = { musicPauseCount += 1 }
+        let video = AVPlayer()
+        let broadcast = AVPlayer()
+
+        coordinator.beginExternalPlayback(video)
+        #expect(musicPauseCount == 1)
+        #expect(coordinator.ownsExternalPlayback)
+        coordinator.musicPlaybackWillStart()
+        #expect(!coordinator.ownsExternalPlayback)
+        #expect(video.rate == 0)
+
+        // The native AVPlayerView resumes through the same handoff as initial playback.
+        coordinator.externalPlaybackWillStart(video)
+        #expect(musicPauseCount == 2)
+        coordinator.externalPlaybackWillStart(video)
+        #expect(musicPauseCount == 2)
+
+        coordinator.beginExternalPlayback(broadcast, shouldPlay: false)
+        #expect(video.rate == 0)
+        #expect(!coordinator.ownsExternalPlayback)
+        #expect(musicPauseCount == 2)
+        coordinator.externalPlaybackWillStart(broadcast)
+        #expect(musicPauseCount == 3)
+        coordinator.endExternalPlayback(video)
+        coordinator.externalPlaybackWillStart(video)
+        #expect(coordinator.externalPlayer === broadcast)
+        #expect(coordinator.ownsExternalPlayback)
+        #expect(musicPauseCount == 3)
+        coordinator.endExternalPlayback(broadcast)
+        #expect(coordinator.externalPlayer == nil)
+        #expect(!coordinator.ownsExternalPlayback)
+    }
+
+    @Test("Broadcast readiness does not imply playback and waiting distinguishes connection from buffering")
+    func broadcastPlaybackStates() {
+        #expect(BroadcastPlaybackState.current(itemStatus: .unknown, timeControlStatus: .waitingToPlayAtSpecifiedRate) == .connecting)
+        #expect(BroadcastPlaybackState.current(itemStatus: .readyToPlay, timeControlStatus: .waitingToPlayAtSpecifiedRate) == .buffering)
+        #expect(BroadcastPlaybackState.current(itemStatus: .readyToPlay, timeControlStatus: .playing) == .playing)
+        #expect(BroadcastPlaybackState.current(itemStatus: .readyToPlay, timeControlStatus: .paused) == .paused)
+    }
+
+    @MainActor
+    @Test("Delayed broadcast item callbacks cannot revive stopped playback or stop a replacement")
+    func broadcastStaleItemCallbacks() {
+        let player = AVPlayer()
+        let coordinator = MacMediaPlaybackCoordinator()
+        let broadcast = BroadcastPagePlayer(player: player, mediaPlayback: coordinator)
+        let oldItem = AVPlayerItem(asset: AVMutableComposition())
+        let replacement = AVPlayerItem(asset: AVMutableComposition())
+        player.replaceCurrentItem(with: oldItem)
+        broadcast.stop()
+        broadcast.refreshState(for: oldItem)
+        broadcast.fail("Late old failure", for: oldItem)
+        #expect(broadcast.state == .idle)
+        #expect(player.currentItem == nil)
+
+        player.replaceCurrentItem(with: replacement)
+        coordinator.beginExternalPlayback(player, shouldPlay: false)
+        broadcast.refreshState(for: replacement)
+        #expect(broadcast.state == .paused)
+        broadcast.refreshState(for: oldItem)
+        broadcast.fail("Late old failure", for: oldItem)
+        #expect(player.currentItem === replacement)
+        #expect(coordinator.externalPlayer === player)
+        #expect(broadcast.state == .paused)
+        broadcast.fail("Current failure", for: replacement)
+        #expect(broadcast.state == .failed("Current failure"))
+        #expect(player.currentItem == nil)
+        #expect(coordinator.externalPlayer == nil)
+        #expect(!broadcast.resume())
+    }
+
     @Test("Only active media trees load and on-demand sections stay lazy")
     func viewStructure() throws {
         let audio = try source("AudioContentViews.swift")
@@ -72,6 +150,60 @@ struct MediaLifecyclePerformanceTests {
         #expect(fm.contains("trashTaskID == taskID"))
         #expect(!fm.contains("Task.sleep"))
         #expect(!fm.contains("while !Task.isCancelled"))
+    }
+
+    @Test("iOS audio filters use result task identities and cancel load-more before reset")
+    func audioFilterTaskStructure() throws {
+        let source = try iosSource("TinyCloudMusicIOS/UI/LibraryMedia/IOSMediaView.swift")
+        let discovery = try slice(
+            source,
+            from: "private struct IOSAudioDiscoveryView",
+            to: "struct IOSPodcastLabel"
+        )
+        let bootstrap = try slice(discovery, from: "private func load(identity:", to: "private func loadPodcasts")
+        let channelLoad = try slice(discovery, from: "private func loadChannels", to: "private func cancelLoadMore")
+        let cancelLoadMore = try slice(discovery, from: "private func cancelLoadMore", to: "private func startLoadMore")
+        let podcastIdentity = try slice(
+            source,
+            from: "private struct IOSPodcastResultTaskIdentity",
+            to: "private struct IOSBroadcastResultTaskIdentity"
+        )
+        let broadcastIdentity = try slice(
+            source,
+            from: "private struct IOSBroadcastResultTaskIdentity",
+            to: "private struct IOSAudioDiscoveryView"
+        )
+
+        #expect(!discovery.contains(".onChange(of: selectedCategoryID)"))
+        #expect(!discovery.contains(".onChange(of: categoryID)"))
+        #expect(!discovery.contains(".onChange(of: regionID)"))
+        #expect(discovery.contains(".task(id: filterIdentity)"))
+        #expect(discovery.contains(".task(id: taskIdentity)"))
+        #expect(discovery.components(separatedBy: ".task(id: taskIdentity)").count == 3)
+        #expect(!bootstrap.contains("loadPodcasts("))
+        #expect(!bootstrap.contains("loadChannels("))
+        #expect(podcastIdentity.contains("let section: IOSAudioSection"))
+        #expect(podcastIdentity.contains("let categoryID: Int64?"))
+        #expect(podcastIdentity.contains("let credentialRevision: UInt64"))
+        #expect(broadcastIdentity.contains("let section: IOSAudioSection"))
+        #expect(broadcastIdentity.contains("let categoryID: String"))
+        #expect(broadcastIdentity.contains("let regionID: String"))
+        #expect(broadcastIdentity.contains("let credentialRevision: UInt64"))
+        #expect(broadcastIdentity.contains("let retryRevision: Int"))
+        let cancelBeforeReset = try #require(channelLoad.range(of: "cancelLoadMore()")?.lowerBound)
+        let pageReset = try #require(channelLoad.range(of: "channelPage = nil")?.lowerBound)
+        let taskCancel = try #require(cancelLoadMore.range(of: "loadMoreTask?.cancel()")?.lowerBound)
+        let taskNil = try #require(cancelLoadMore.range(of: "loadMoreTask = nil")?.lowerBound)
+        #expect(cancelBeforeReset < pageReset)
+        #expect(taskCancel < taskNil)
+    }
+
+    @MainActor
+    @Test("Podcast, broadcast, and section replacement cancel superseded result tasks")
+    func audioFilterReplacementCancelsSupersededRequest() async {
+        await expectAudioFilterReplacement(prefix: "podcast-category")
+        await expectAudioFilterReplacement(prefix: "broadcast-region")
+        await expectAudioFilterReplacement(prefix: "audio-section")
     }
 
     @MainActor
@@ -717,6 +849,14 @@ struct MediaLifecyclePerformanceTests {
         return try String(contentsOf: root.appending(path: name), encoding: .utf8)
     }
 
+    private func iosSource(_ path: String) throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        return try String(contentsOf: root.appending(path: "iOS").appending(path: path), encoding: .utf8)
+    }
+
     private func slice(_ value: String, from start: String, to end: String) throws -> String {
         let lower = try #require(value.range(of: start)?.lowerBound)
         let upper = try #require(value.range(of: end, range: lower..<value.endIndex)?.lowerBound)
@@ -751,6 +891,46 @@ struct MediaLifecyclePerformanceTests {
             try? await Task.sleep(for: .milliseconds(5))
         }
         return false
+    }
+
+    @MainActor
+    private func expectAudioFilterReplacement(prefix: String) async {
+        let old = "\(prefix)-A"
+        let replacement = "\(prefix)-B"
+        let fixture = MediaFilterTaskFixture(old: old)
+        let hosting = NSHostingView(rootView: MediaFilterTaskProbe(identity: old, fixture: fixture))
+        let window = mediaWindow(hosting: hosting)
+
+        #expect(await eventually { await fixture.hasEntered(old) })
+        hosting.rootView = MediaFilterTaskProbe(identity: replacement, fixture: fixture)
+        hosting.layoutSubtreeIfNeeded()
+        #expect(await eventually { await fixture.hasEntered(replacement) })
+        #expect(await eventually {
+            let oldState = await fixture.snapshot(for: old)
+            let replacementState = await fixture.snapshot(for: replacement)
+            return oldState.cancellations == 1 && replacementState.requests == 1
+        })
+
+        await fixture.releaseReplacement()
+        #expect(await eventually { await fixture.snapshot(for: replacement).commits == 1 })
+        await fixture.releaseOld()
+        #expect(await eventually { await fixture.snapshot(for: old).finishes == 1 })
+
+        let oldState = await fixture.snapshot(for: old)
+        let replacementState = await fixture.snapshot(for: replacement)
+        #expect(oldState.requests == 1)
+        #expect(oldState.cancellations == 1)
+        #expect(oldState.parses == 0)
+        #expect(oldState.commits == 0)
+        #expect(oldState.loadingFinishes == 0)
+        #expect(oldState.errors == 0)
+        #expect(replacementState.requests == 1)
+        #expect(replacementState.parses == 1)
+        #expect(replacementState.commits == 1)
+        #expect(replacementState.loadingFinishes == 1)
+        #expect(replacementState.errors == 0)
+        window.contentView = NSView()
+        window.close()
     }
 }
 
@@ -842,6 +1022,71 @@ private actor MediaCounter {
     func next() -> Int {
         count += 1
         return count
+    }
+}
+
+private struct MediaFilterTaskSnapshot: Sendable {
+    var requests = 0
+    var cancellations = 0
+    var parses = 0
+    var commits = 0
+    var loadingFinishes = 0
+    var errors = 0
+    var finishes = 0
+}
+
+private actor MediaFilterTaskFixture {
+    private let old: String
+    private let oldGate = MediaGate()
+    private let replacementGate = MediaGate()
+    private var snapshots: [String: MediaFilterTaskSnapshot] = [:]
+
+    init(old: String) {
+        self.old = old
+    }
+
+    func load(_ identity: String) async {
+        snapshots[identity, default: .init()].requests += 1
+        do {
+            try await withTaskCancellationHandler {
+                await (identity == old ? oldGate : replacementGate).wait()
+                try Task.checkCancellation()
+                snapshots[identity, default: .init()].parses += 1
+                try Task.checkCancellation()
+                snapshots[identity, default: .init()].commits += 1
+                snapshots[identity, default: .init()].loadingFinishes += 1
+            } onCancel: {
+                Task { await self.recordCancellation(identity) }
+            }
+        } catch is CancellationError {
+        } catch {
+            snapshots[identity, default: .init()].errors += 1
+        }
+        snapshots[identity, default: .init()].finishes += 1
+    }
+
+    func snapshot(for identity: String) -> MediaFilterTaskSnapshot {
+        snapshots[identity, default: .init()]
+    }
+
+    func hasEntered(_ identity: String) async -> Bool {
+        await (identity == old ? oldGate : replacementGate).hasEntered
+    }
+
+    func releaseOld() async { await oldGate.release() }
+    func releaseReplacement() async { await replacementGate.release() }
+
+    private func recordCancellation(_ identity: String) {
+        snapshots[identity, default: .init()].cancellations += 1
+    }
+}
+
+private struct MediaFilterTaskProbe: View {
+    let identity: String
+    let fixture: MediaFilterTaskFixture
+
+    var body: some View {
+        Color.clear.task(id: identity) { await fixture.load(identity) }
     }
 }
 

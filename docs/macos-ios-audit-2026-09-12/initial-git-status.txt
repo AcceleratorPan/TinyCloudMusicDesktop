@@ -1,0 +1,57 @@
+ M Sources/TinyCloudMusic/AppModel.swift
+ M Sources/TinyCloudMusic/AudioContentViews.swift
+ M Sources/TinyCloudMusic/AudioUploadManager.swift
+ M Sources/TinyCloudMusic/AudioUploadModels.swift
+ M Sources/TinyCloudMusic/EAPITransport.swift
+ M Sources/TinyCloudMusic/ListenTogetherController.swift
+ M Sources/TinyCloudMusic/LiveMusicRepository+Detail.swift
+ M Sources/TinyCloudMusic/LiveMusicRepository.swift
+ M Sources/TinyCloudMusic/LiveVideoLibrary.swift
+ M Sources/TinyCloudMusic/Models.swift
+ M Sources/TinyCloudMusic/MusicDownload.swift
+ M Sources/TinyCloudMusic/MusicDownloadInfrastructure.swift
+ M Sources/TinyCloudMusic/MusicDownloadModels.swift
+ M Sources/TinyCloudMusic/MusicExtraModels.swift
+ M Sources/TinyCloudMusic/MusicLibraryModels.swift
+ M Sources/TinyCloudMusic/MusicSheetWorker.swift
+ M Sources/TinyCloudMusic/PlayerController.swift
+ M Sources/TinyCloudMusic/Repository.swift
+ M Sources/TinyCloudMusic/SessionController.swift
+ M Sources/TinyCloudMusic/TinyCloudMusicApp.swift
+ M Sources/TinyCloudMusic/TrackRangeCache.swift
+ M Tests/TinyCloudMusicTests/AppShellPerformanceTests.swift
+ M Tests/TinyCloudMusicTests/AudioUploadIntegrityTests.swift
+ M Tests/TinyCloudMusicTests/CoreTests.swift
+ M Tests/TinyCloudMusicTests/DownloadTransferPerformanceTests.swift
+ M Tests/TinyCloudMusicTests/KnowledgeListeningPerformanceTests.swift
+ M Tests/TinyCloudMusicTests/LibraryMutationPerformanceTests.swift
+ M Tests/TinyCloudMusicTests/ListenTogetherTests.swift
+ M Tests/TinyCloudMusicTests/LiveMusicExtrasTests.swift
+ M Tests/TinyCloudMusicTests/MediaLifecyclePerformanceTests.swift
+ M Tests/TinyCloudMusicTests/MusicDownloadTests.swift
+ M Tests/TinyCloudMusicTests/MusicKnowledgeTests.swift
+ M Tests/TinyCloudMusicTests/PlayerCachePerformanceTests.swift
+ M Tests/TinyCloudMusicTests/RecommendationMemoryTests.swift
+ M Tests/TinyCloudMusicTests/TrackRangeCacheTests.swift
+ M Tests/TinyCloudMusicTests/TransportSessionPerformanceTests.swift
+ M iOS/TinyCloudMusicIOS.xcodeproj/project.pbxproj
+ M iOS/TinyCloudMusicIOS/App/IOSAppContainer.swift
+ M iOS/TinyCloudMusicIOS/App/TinyCloudMusicIOSApp.swift
+ M iOS/TinyCloudMusicIOS/Platform/IOSAudioSessionCoordinator.swift
+ M iOS/TinyCloudMusicIOS/SharedOverrides/AppModel.swift
+ M iOS/TinyCloudMusicIOS/SharedOverrides/AudioUploadModels.swift
+ M iOS/TinyCloudMusicIOS/SharedOverrides/MusicDownloadInfrastructure.swift
+ M iOS/TinyCloudMusicIOS/UI/DiscoverSearch/IOSRouteDestinationView.swift
+ M iOS/TinyCloudMusicIOS/UI/IOSRootView.swift
+ M iOS/TinyCloudMusicIOS/UI/LibraryMedia/IOSAccountView.swift
+ M iOS/TinyCloudMusicIOS/UI/LibraryMedia/IOSLibraryView.swift
+ M iOS/TinyCloudMusicIOS/UI/LibraryMedia/IOSMediaView.swift
+ M iOS/TinyCloudMusicIOSTests/IOSNavigationTests.swift
+?? Tests/TinyCloudMusicTests/AuditRemediationTests.swift
+?? docs/ios-code-audit-2026-09-12/
+?? docs/ios-playback-resilience-market-research-report-2026-08-26.md
+?? docs/ios-safe-exit-remediation-plan-2026-08-23.md
+?? docs/ios-search-audio-stutter-root-cause-review-2026-08-25.md
+?? docs/ios-search-focus-console-error-report-2026-08-26.md
+?? docs/macos-ios-audit-2026-09-12/
+?? iOS/TinyCloudMusicIOS/PrivacyInfo.xcprivacy

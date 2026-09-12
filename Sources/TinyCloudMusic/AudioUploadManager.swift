@@ -552,28 +552,33 @@ final class AudioUploadManager {
                 return
             }
             do {
-                var manifest = try await AudioUploadInspector.inspect(
+                let inspection = try await AudioUploadInspector.inspect(
                     url,
                     accountID: accountID,
                     destination: destination,
                     podcastForm: podcastForm
                 )
                 try validate(context)
-                manifest = AudioUploadManifest(
+                let inspected = inspection.manifest
+                let manifest = AudioUploadManifest(
                     id: id,
-                    accountID: manifest.accountID,
-                    destination: manifest.destination,
-                    bookmark: manifest.bookmark,
-                    filename: manifest.filename,
-                    fileExtension: manifest.fileExtension,
-                    contentType: manifest.contentType,
-                    byteCount: manifest.byteCount,
-                    modificationTime: manifest.modificationTime,
-                    md5: manifest.md5,
-                    metadata: manifest.metadata,
-                    podcastForm: manifest.podcastForm
+                    accountID: inspected.accountID,
+                    destination: inspected.destination,
+                    bookmark: inspected.bookmark,
+                    filename: inspected.filename,
+                    fileExtension: inspected.fileExtension,
+                    contentType: inspected.contentType,
+                    byteCount: inspected.byteCount,
+                    modificationTime: inspected.modificationTime,
+                    md5: inspected.md5,
+                    metadata: inspected.metadata,
+                    podcastForm: inspected.podcastForm
                 )
                 _ = try await persist(manifest, context: context)
+                try validate(context, id: id)
+                try commit(context) {
+                    sourceIdentities[id] = inspection.identity
+                }
             } catch is CancellationError {
                 _ = try? commit(context) {
                     self.items.removeValue(forKey: id)

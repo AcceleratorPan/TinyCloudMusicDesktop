@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import OSLog
 
 #if canImport(Testing)
 import Testing
@@ -156,6 +157,41 @@ struct DownloadTransferPerformanceTests {
         await restarted.pauseAll()
     }
 
+    @Test("iOS download body computes each order once")
+    func iosDownloadBodyOrderSourceBoundary() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appending(
+                path: "iOS/TinyCloudMusicIOS/UI/LibraryMedia/IOSLibraryView.swift"
+            ),
+            encoding: .utf8
+        )
+        let viewStart = try #require(source.range(of: "struct IOSDownloadsView: View")?.lowerBound)
+        let viewEnd = try #require(
+            source.range(of: "private struct IOSDownloadRow", range: viewStart..<source.endIndex)?.lowerBound
+        )
+        let view = String(source[viewStart..<viewEnd])
+        let bodyStart = try #require(view.range(of: "var body: some View")?.lowerBound)
+        let gettersStart = try #require(
+            view.range(of: "private var orderedSongIDs", range: bodyStart..<view.endIndex)?.lowerBound
+        )
+        let body = String(view[bodyStart..<gettersStart])
+
+        #expect(body.contains("let songIDs = orderedSongIDs"))
+        #expect(body.contains("let videoIDs = orderedVideoIDs"))
+        #expect(body.components(separatedBy: "orderedSongIDs").count == 2)
+        #expect(body.components(separatedBy: "orderedVideoIDs").count == 2)
+        #expect(body.contains("if !songIDs.isEmpty"))
+        #expect(body.contains("ForEach(songIDs, id: \\.self)"))
+        #expect(body.contains("if !videoIDs.isEmpty"))
+        #expect(body.contains("ForEach(videoIDs, id: \\.self)"))
+        #expect(body.components(separatedBy: "songIDs").count == 4)
+        #expect(body.components(separatedBy: "videoIDs").count == 4)
+    }
+
     @MainActor
     @Test("Pause all reports a failed durable barrier")
     func pauseAllReportsPersistenceFailure() async throws {
@@ -193,6 +229,189 @@ struct DownloadTransferPerformanceTests {
 
         #expect(values.values.count < 100)
         #expect(values.values.last == 1)
+    }
+
+    @MainActor
+    @Test("Five hundred terminal downloads keep stable order during ten progress ticks")
+    func terminalDownloadHistoryProgressWorkload() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DownloadWorkloadProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        DownloadWorkloadProtocol.reset()
+        let workload = DownloadProgressWorkloadGate()
+        let manager = MusicDownloadManager(
+            transport: EAPITransport(session: session, cookie: "", musicU: ""),
+            session: session,
+            maximumConcurrentDownloads: 5,
+            resumeStore: MusicDownloadResumeStore(directory: root.appending(path: "resume")),
+            targetAllocator: MusicDownloadTargetAllocator(),
+            videoTransfer: { request, _, progress in
+                await workload.waitForProgressRelease()
+                try Task.checkCancellation()
+                for tick in 1...10 {
+                    progress(Int64(tick), 10, 10)
+                    if tick < 10 { try await Task.sleep(for: .milliseconds(100)) }
+                }
+                await workload.holdAfterProgress()
+                try Task.checkCancellation()
+                return try mp4Result(for: request)
+            }
+        )
+        let songs = (1...500).map(song)
+        let songIDs = songs.map(\.id)
+        #expect(manager.enqueue(
+            songs: songs,
+            to: root.appending(path: "songs"),
+            quality: .standard,
+            includeLyrics: false
+        ) == 500)
+        for _ in 0..<500 {
+            if manager.runningDownloadCount == 5 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(manager.runningDownloadCount == 5)
+
+        let terminalVideos = (1...500).map {
+            VideoPageResource.mv(Int64(10_000 + $0))
+        }
+        let acceptedVideos = terminalVideos.reduce(into: 0) { count, resource in
+            if manager.enqueue(
+                video: resource,
+                title: resource.identity,
+                creator: "Fixture",
+                availableResolutions: [720],
+                to: root.appending(path: "videos"),
+                quality: .high
+            ) {
+                count += 1
+            }
+        }
+        #expect(acceptedVideos == 500)
+        let terminalVideoIDs = terminalVideos.map(\.identity)
+        terminalVideoIDs.forEach { manager.cancelVideo(id: $0) }
+        songIDs.forEach { manager.cancel(songID: $0) }
+        for _ in 0..<500 {
+            if manager.runningDownloadCount == 0 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(manager.runningDownloadCount == 0)
+        #expect(manager.itemOrder == songIDs)
+        #expect(manager.videoItemOrder == terminalVideoIDs)
+        #expect(songIDs.allSatisfy { manager.states[$0] == .cancelled })
+        #expect(terminalVideoIDs.allSatisfy { manager.videoStates[$0] == .cancelled })
+
+        let activeVideos = (1...5).map { VideoPageResource.mv(Int64(20_000 + $0)) }
+        for resource in activeVideos {
+            #expect(manager.enqueue(
+                video: resource,
+                title: resource.identity,
+                creator: "Fixture",
+                availableResolutions: [720],
+                to: root.appending(path: "active-videos"),
+                quality: .high
+            ))
+        }
+        let activeVideoIDs = activeVideos.map(\.identity)
+        for _ in 0..<500 {
+            if await workload.progressReadyCount == 5 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await workload.progressReadyCount == 5)
+        #expect(DownloadWorkloadProtocol.playbackRequestCount == 5)
+        let stableSongOrder = manager.itemOrder
+        let stableVideoOrder = manager.videoItemOrder
+        #expect(stableSongOrder == songIDs)
+        #expect(stableVideoOrder == terminalVideoIDs + activeVideoIDs)
+
+        let songStateChanges = LockedCounter()
+        let songOrderChanges = LockedCounter()
+        let videoStateChanges = LockedCounter()
+        let videoOrderChanges = LockedCounter()
+        withObservationTracking {
+            _ = manager.states
+        } onChange: {
+            songStateChanges.increment()
+        }
+        withObservationTracking {
+            _ = manager.itemOrder
+        } onChange: {
+            songOrderChanges.increment()
+        }
+        withObservationTracking {
+            _ = manager.videoStates
+        } onChange: {
+            videoStateChanges.increment()
+        }
+        withObservationTracking {
+            _ = manager.videoItemOrder
+        } onChange: {
+            videoOrderChanges.increment()
+        }
+
+        let mergeFixture = DownloadMeasurementSignposts.interval("PERF-B07.ManagerMerge.500x10") {
+            var throttles = Array(
+                repeating: MusicDownloadProgressThrottle(minimumInterval: 0.1),
+                count: songIDs.count
+            )
+            var states: [Int64: MusicDownloadState] = Dictionary(
+                uniqueKeysWithValues: songIDs.map { ($0, .running(progress: nil)) }
+            )
+            var acceptedUpdates = 0
+            var mergeCopies = 0
+            for tick in 1...10 {
+                var updates: [Int64: Double] = [:]
+                updates.reserveCapacity(songIDs.count)
+                for index in songIDs.indices {
+                    if let value = throttles[index].update(
+                        totalBytesWritten: Int64(tick),
+                        totalBytesExpectedToWrite: 10,
+                        now: Double(tick)
+                    ) {
+                        updates[songIDs[index]] = value
+                    }
+                }
+                acceptedUpdates += updates.count
+                states = MusicDownloadManager.mergingProgress(updates, into: states)
+                mergeCopies += 1
+            }
+            return (states, acceptedUpdates, mergeCopies)
+        }
+        #expect(mergeFixture.1 == 5_000)
+        #expect(mergeFixture.2 == 10)
+        #expect(songIDs.allSatisfy { mergeFixture.0[$0] == .running(progress: 1) })
+
+        try await DownloadMeasurementSignposts.asyncInterval("PERF-B07.ManagerVideoProgress.5x10") {
+            await workload.releaseProgress()
+            for _ in 0..<500 {
+                if await workload.completedProgressCount == 5 { break }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+        }
+        #expect(await workload.completedProgressCount == 5)
+        for _ in 0..<500 {
+            if activeVideoIDs.allSatisfy({ manager.videoStates[$0] == .running(progress: 1) }) {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(activeVideoIDs.allSatisfy { manager.videoStates[$0] == .running(progress: 1) })
+        #expect(manager.itemOrder == stableSongOrder)
+        #expect(manager.videoItemOrder == stableVideoOrder)
+        #expect(songStateChanges.value == 0)
+        #expect(songOrderChanges.value == 0)
+        #expect(videoStateChanges.value == 1)
+        #expect(videoOrderChanges.value == 0)
+
+        manager.cancelAll()
+        await workload.releaseAll()
+        for _ in 0..<500 {
+            if manager.runningDownloadCount == 0 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        await manager.pauseAll()
     }
 
     @Test("Managed identity never guesses by title, size, or legacy filename")
@@ -374,6 +593,84 @@ struct DownloadTransferPerformanceTests {
         #expect(!FileManager.default.fileExists(
             atPath: oldRoot.appending(path: "DownloadCache/Videos").path
         ))
+    }
+
+    @Test("Controlled cache inventory aggregates size age activity and video pairs")
+    func controlledCacheAggregateInventory() throws {
+        let root = FileManager.default.temporaryDirectory.appending(
+            path: "TinyCloudMusicTests.\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = root.appending(path: "DownloadCache", directoryHint: .isDirectory)
+        let videos = cache.appending(path: "Videos/identity", directoryHint: .isDirectory)
+        let lyrics = cache.appending(path: "Lyrics/catalog", directoryHint: .isDirectory)
+        let sheets = cache.appending(path: "Sheets/archive", directoryHint: .isDirectory)
+        let referenceDate = Date(timeIntervalSince1970: 2_000_000_000)
+        let recent = referenceDate.addingTimeInterval(-3_600)
+        let middle = referenceDate.addingTimeInterval(-3 * 24 * 60 * 60)
+        let old = referenceDate.addingTimeInterval(-30 * 24 * 60 * 60)
+
+        let pairedVideo = videos.appending(path: "720.mp4")
+        let pairedSize = pairedVideo.appendingPathExtension("size")
+        let orphanedVideo = videos.appending(path: "1080.mp4")
+        let activeLyric = lyrics.appending(path: "active.lrc")
+        try writeControlledCacheFile(pairedVideo, bytes: 64, modifiedAt: recent)
+        try writeControlledCacheFile(pairedSize, bytes: 2, modifiedAt: recent)
+        try Data("64".utf8).write(to: pairedSize)
+        try FileManager.default.setAttributes([.modificationDate: recent], ofItemAtPath: pairedSize.path)
+        try writeControlledCacheFile(orphanedVideo, bytes: 32, modifiedAt: middle)
+        try writeControlledCacheFile(activeLyric, bytes: 7, modifiedAt: recent)
+        try writeControlledCacheFile(lyrics.appending(path: "old.lrc"), bytes: 13, modifiedAt: old)
+        try writeControlledCacheFile(sheets.appending(path: "middle.pdf"), bytes: 17, modifiedAt: middle)
+        try writeControlledCacheFile(sheets.appending(path: "old.pdf"), bytes: 23, modifiedAt: old)
+
+        let outside = root.appending(path: "OutsideCache", directoryHint: .isDirectory)
+        try writeControlledCacheFile(
+            outside.appending(path: "must-not-count.lrc"),
+            bytes: 101,
+            modifiedAt: old
+        )
+        try FileManager.default.createSymbolicLink(
+            at: lyrics.appending(path: "outside-link", directoryHint: .isDirectory),
+            withDestinationURL: outside
+        )
+
+        let readHandle = try FileHandle(forReadingFrom: activeLyric)
+        defer { try? readHandle.close() }
+        let writeHandle = try FileHandle(forWritingTo: pairedVideo)
+        defer { try? writeHandle.close() }
+        let activePaths = Set([activeLyric, pairedVideo].map { $0.standardizedFileURL.path })
+        let inventory = try DownloadMeasurementSignposts.interval("PERF-A15.CacheInventory") {
+            try controlledCacheInventory(
+                at: cache,
+                referenceDate: referenceDate,
+                activePaths: activePaths
+            )
+        }
+
+        #expect(inventory.roots["Videos"] == ControlledCacheAggregate(
+            fileCount: 3,
+            logicalBytes: 98,
+            ageBuckets: [2, 1, 0],
+            activeFileCount: 1
+        ))
+        #expect(inventory.roots["Lyrics"] == ControlledCacheAggregate(
+            fileCount: 2,
+            logicalBytes: 20,
+            ageBuckets: [1, 0, 1],
+            activeFileCount: 1
+        ))
+        #expect(inventory.roots["Sheets"] == ControlledCacheAggregate(
+            fileCount: 2,
+            logicalBytes: 40,
+            ageBuckets: [0, 1, 1],
+            activeFileCount: 0
+        ))
+        #expect(inventory.roots.values.reduce(0) { $0 + $1.fileCount } == 7)
+        #expect(inventory.roots.values.reduce(0) { $0 + $1.logicalBytes } == 158)
+        #expect(inventory.pairedVideoCount == 1)
+        #expect(inventory.unpairedVideoCount == 1)
     }
 
     @MainActor
@@ -757,6 +1054,10 @@ struct DownloadTransferPerformanceTests {
                 return try mp4Result(for: request)
             }
         )
+        await restarted.pauseAll() // Wait for startup recovery without starting paused transfers.
+        #expect(restarted.videoStates[request.resource.identity] == .paused(progress: nil))
+        #expect(restartOffsets.values.isEmpty)
+        restarted.retryVideo(id: request.resource.identity)
         try await waitForVideo(restarted, id: request.resource.identity)
         #expect(restartOffsets.values.first == 48)
 
@@ -849,6 +1150,10 @@ struct DownloadTransferPerformanceTests {
                 return try mp4Result(for: request)
             }
         )
+        await restarted.pauseAll()
+        #expect(restarted.videoStates[request.resource.identity] == .paused(progress: nil))
+        #expect(restartedOffsets.values.isEmpty)
+        restarted.retryVideo(id: request.resource.identity)
         try await waitForVideo(restarted, id: request.resource.identity)
         #expect(restartedOffsets.values.first == 96)
     }
@@ -1064,6 +1369,179 @@ struct DownloadTransferPerformanceTests {
         #expect(FileManager.default.fileExists(atPath: rebuiltAudioURL.path))
         #expect(FileManager.default.fileExists(atPath: rebuiltVideoURL.path))
     }
+}
+
+private enum DownloadMeasurementSignposts {
+    private static let signposter = OSSignposter(
+        subsystem: "com.tinycloudmusic.app.tests",
+        category: "W5-FX2A"
+    )
+
+    static func interval<T>(_ name: StaticString, _ operation: () throws -> T) rethrows -> T {
+        let state = signposter.beginInterval(name)
+        defer { signposter.endInterval(name, state) }
+        return try operation()
+    }
+
+    @MainActor
+    static func asyncInterval<T>(
+        _ name: StaticString,
+        _ operation: () async throws -> T
+    ) async rethrows -> T {
+        let state = signposter.beginInterval(name)
+        defer { signposter.endInterval(name, state) }
+        return try await operation()
+    }
+}
+
+private struct ControlledCacheAggregate: Equatable {
+    let fileCount: Int
+    let logicalBytes: Int64
+    let ageBuckets: [Int]
+    let activeFileCount: Int
+}
+
+private struct ControlledCacheInventory {
+    let roots: [String: ControlledCacheAggregate]
+    let pairedVideoCount: Int
+    let unpairedVideoCount: Int
+}
+
+private func writeControlledCacheFile(_ url: URL, bytes: Int, modifiedAt: Date) throws {
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try Data(repeating: 0x41, count: bytes).write(to: url)
+    try FileManager.default.setAttributes(
+        [.modificationDate: modifiedAt],
+        ofItemAtPath: url.path
+    )
+}
+
+private func controlledCacheInventory(
+    at cacheRoot: URL,
+    referenceDate: Date,
+    activePaths: Set<String>
+) throws -> ControlledCacheInventory {
+    let keys: Set<URLResourceKey> = [
+        .isRegularFileKey,
+        .isSymbolicLinkKey,
+        .fileSizeKey,
+        .contentModificationDateKey
+    ]
+    var roots: [String: ControlledCacheAggregate] = [:]
+    var videoPaths = Set<String>()
+    for name in ["Videos", "Lyrics", "Sheets"] {
+        let root = cacheRoot.appending(path: name, directoryHint: .isDirectory)
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles]
+        ) else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        var fileCount = 0
+        var logicalBytes: Int64 = 0
+        var ageBuckets = [0, 0, 0]
+        var activeFileCount = 0
+        for case let url as URL in enumerator {
+            let values = try url.resourceValues(forKeys: keys)
+            if values.isSymbolicLink == true {
+                enumerator.skipDescendants()
+                continue
+            }
+            guard values.isRegularFile == true else { continue }
+            let path = url.standardizedFileURL.path
+            fileCount += 1
+            logicalBytes += Int64(values.fileSize ?? 0)
+            if activePaths.contains(path) { activeFileCount += 1 }
+            let age = max(0, referenceDate.timeIntervalSince(
+                values.contentModificationDate ?? referenceDate
+            ))
+            ageBuckets[age < 24 * 60 * 60 ? 0 : age < 7 * 24 * 60 * 60 ? 1 : 2] += 1
+            if name == "Videos" { videoPaths.insert(path) }
+        }
+        roots[name] = ControlledCacheAggregate(
+            fileCount: fileCount,
+            logicalBytes: logicalBytes,
+            ageBuckets: ageBuckets,
+            activeFileCount: activeFileCount
+        )
+    }
+    let videoFiles = videoPaths.filter { $0.hasSuffix(".mp4") }
+    let pairedVideoCount = videoFiles.count { videoPaths.contains($0 + ".size") }
+    return ControlledCacheInventory(
+        roots: roots,
+        pairedVideoCount: pairedVideoCount,
+        unpairedVideoCount: videoFiles.count - pairedVideoCount
+    )
+}
+
+private actor DownloadProgressWorkloadGate {
+    private(set) var progressReadyCount = 0
+    private(set) var completedProgressCount = 0
+    private var progressReleased = false
+    private var finishReleased = false
+    private var progressWaiters: [CheckedContinuation<Void, Never>] = []
+    private var finishWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func waitForProgressRelease() async {
+        progressReadyCount += 1
+        guard !progressReleased else { return }
+        await withCheckedContinuation { progressWaiters.append($0) }
+    }
+
+    func releaseProgress() {
+        progressReleased = true
+        let waiters = progressWaiters
+        progressWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    func holdAfterProgress() async {
+        completedProgressCount += 1
+        guard !finishReleased else { return }
+        await withCheckedContinuation { finishWaiters.append($0) }
+    }
+
+    func releaseAll() {
+        releaseProgress()
+        finishReleased = true
+        let waiters = finishWaiters
+        finishWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+}
+
+private final class DownloadWorkloadProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var playbackRequests = 0
+
+    static var playbackRequestCount: Int { lock.withLock { playbackRequests } }
+    static func reset() { lock.withLock { playbackRequests = 0 } }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard request.url?.path == "/weapi/song/enhance/play/mv/url" else { return }
+        Self.lock.withLock { Self.playbackRequests += 1 }
+        let body = Data(
+            #"{"code":200,"data":{"url":"https://vod.126.net/perf-b07.mp4","r":720}}"#.utf8
+        )
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json", "Content-Length": String(body.count)]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 
 private final class LockedCounter: @unchecked Sendable {

@@ -202,6 +202,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             playbackControlFadeEnabled: model.settings.playbackControlFadeEnabled
         )
         self.player = player
+        let mediaPlayback = MacMediaPlaybackCoordinator.shared
+        mediaPlayback.pauseMusic = { [weak player] in player?.pauseForVideo() }
+        player.onPlaybackRequested = { [weak mediaPlayback] in mediaPlayback?.musicPlaybackWillStart() }
         installPlaybackKeyMonitor()
         let listenTogether = ListenTogetherController(
             service: LiveListenTogetherService(transport: transport),
@@ -573,7 +576,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         if terminationCleanupTask == nil {
             terminationCleanupTask = Task { @MainActor [weak self] in
-                async let downloadCleanup: Void? = downloads?.pauseAll()
+                async let downloadCleanup: Void? = downloads?.pauseAll(resumesOnLaunch: true)
                 async let uploadCleanup: Void? = uploads?.pauseAll()
                 async let listenTogetherCleanup: Void? = listenTogether?.prepareForLogout()
                 _ = await (downloadCleanup, uploadCleanup, listenTogetherCleanup)

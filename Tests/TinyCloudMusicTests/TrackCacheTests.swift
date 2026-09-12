@@ -695,6 +695,8 @@ private func verifyInvalidation(root: URL) async throws {
     guard let invalidatedPinned = await invalidateCache.readyPinnedFile(for: 128) else {
         throw TrackCacheCheckError.failedAt("invalidate full pin")
     }
+    // A decode failure can include a damaged header after the file was pinned.
+    try Data("broken-header".utf8).write(to: invalidatedPinned)
     await invalidateCache.invalidateCachedFile(invalidatedPinned)
     guard await invalidateCache.readyFile(for: 128) == nil,
           FileManager.default.fileExists(atPath: invalidatedPinned.path)

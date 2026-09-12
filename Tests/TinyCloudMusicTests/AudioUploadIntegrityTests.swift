@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import Testing
 @testable import TinyCloudMusic
 
@@ -218,6 +219,22 @@ private final class UploadIntegrityProtocol: URLProtocol, @unchecked Sendable {
 private enum UploadIntegrityError: Error {
     case injectedSaveFailure
     case injectedRemoveFailure
+}
+
+private enum UploadMeasurementSignposts {
+    private static let signposter = OSSignposter(
+        subsystem: "com.tinycloudmusic.app.tests",
+        category: "W5-FX2A"
+    )
+
+    static func markTerminalScale(_ itemCount: Int) {
+        switch itemCount {
+        case 100: signposter.emitEvent("PERF-B13.Scale.100")
+        case 500: signposter.emitEvent("PERF-B13.Scale.500")
+        case 1_000: signposter.emitEvent("PERF-B13.Scale.1000")
+        default: preconditionFailure("Unsupported upload fixture scale")
+        }
+    }
 }
 
 @Suite("Audio upload integrity", .serialized)
@@ -703,6 +720,151 @@ struct AudioUploadIntegrityTests {
         }
     }
 
+    @Test("Inspection and first resolve hash an unchanged new source once")
+    func inspectionIdentityAvoidsSecondHashOnFirstRun() async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appending(path: "source.wav")
+        try writeWAV(to: file)
+        let counter = IntegrityCounter()
+        let hash: @Sendable (URL) throws -> String = {
+            counter.increment()
+            return try AudioUploadInspector.hashFile($0)
+        }
+
+        let inspection = try await AudioUploadInspector.inspect(
+            file,
+            accountID: 7,
+            destination: .cloud,
+            podcastForm: nil,
+            hash: hash
+        )
+        _ = try #require(inspection.identity.fileNumber)
+        #expect(inspection.manifest.byteCount == inspection.identity.byteCount)
+        #expect(inspection.manifest.modificationTime == inspection.identity.modificationTime)
+        #expect(inspection.manifest.md5.count == 32)
+
+        _ = try await AudioUploadInspector.resolve(
+            inspection.manifest,
+            cachedIdentity: inspection.identity,
+            hash: hash
+        )
+        #expect(counter.snapshot().count == 1)
+    }
+
+    @Test("Restored manifests rehash without persisting transient identity")
+    func restoredUploadDoesNotReuseTransientIdentity() async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appending(path: "source.mp3")
+        try Data("abc".utf8).write(to: file)
+        let manifest = try makeManifest(file: file)
+        let directory = root.appending(path: "store")
+        let store = AudioUploadStore(directory: directory)
+        try await store.save(manifest)
+        let loaded = try await store.load()
+        let restored = try #require(loaded.manifests.first)
+        let persisted = try String(
+            contentsOf: directory.appending(path: "\(manifest.id.uuidString).json"),
+            encoding: .utf8
+        )
+        #expect(!persisted.contains("SourceIdentity"))
+        #expect(!persisted.contains("fileNumber"))
+        #expect(!persisted.contains("changeTimeNanoseconds"))
+
+        let counter = IntegrityCounter()
+        _ = try await AudioUploadInspector.resolve(restored, hash: {
+            counter.increment()
+            return try AudioUploadInspector.hashFile($0)
+        })
+        #expect(counter.snapshot().count == 1)
+    }
+
+    @Test("Preparation identity requires durable persistence and a current context")
+    func preparationIdentityCommitBoundary() async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appending(path: "source.wav")
+        try writeWAV(to: file)
+        let gate = UploadStoreGate(
+            saveTarget: .paused,
+            saveBlocks: 1,
+            failBlockedSaves: true
+        )
+        let store = AudioUploadStore(
+            directory: root.appending(path: "store"),
+            beforeSave: { try await gate.beforeSave($0) }
+        )
+        let manager = await makeManager(store: store)
+        await manager.waitUntilLoaded()
+        await manager.setAccount(7)
+        let preparedID = await manager.prepareCloudFile(file)
+        let id = try #require(preparedID)
+        await gate.waitForSaveEntry()
+        await gate.releaseNextSave()
+
+        #expect(await eventually { await manager.isActive == false })
+        guard case .failed? = await manager.items[id]?.phase else {
+            Issue.record("A failed preparation persist published prepared state")
+            return
+        }
+        #expect(try await store.load().manifests.isEmpty)
+
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appending(path: "Sources/TinyCloudMusic/AudioUploadManager.swift"),
+            encoding: .utf8
+        )
+        let prepareStart = try #require(source.range(of: "    private func prepare(")?.lowerBound)
+        let prepareEnd = try #require(
+            source.range(of: "    private func schedule()", range: prepareStart..<source.endIndex)?.lowerBound
+        )
+        let prepare = String(source[prepareStart..<prepareEnd])
+        let persist = try #require(
+            prepare.range(of: "_ = try await persist(manifest, context: context)")?.lowerBound
+        )
+        let identity = try #require(
+            prepare.range(of: "sourceIdentities[id] = inspection.identity")?.lowerBound
+        )
+        let guardedCommit = String(prepare[persist..<identity])
+        #expect(persist < identity)
+        #expect(guardedCommit.contains("try validate(context, id: id)"))
+        #expect(guardedCommit.contains("try commit(context)"))
+        #expect(!prepare.contains("sourceIdentity("))
+    }
+
+    @Test("Nil file number remains a full-hash fallback")
+    func nilFileNumberRequiresHashBoundary() throws {
+        let identity = AudioUploadInspector.SourceIdentity(
+            byteCount: 3,
+            modificationTime: 1,
+            fileNumber: nil,
+            changeTimeNanoseconds: 2
+        )
+        let cached = identity
+        #expect(cached == identity)
+        #expect(cached != identity || identity.fileNumber == nil)
+
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appending(path: "Sources/TinyCloudMusic/AudioUploadModels.swift"),
+            encoding: .utf8
+        )
+        let resolveStart = try #require(source.range(of: "    static func resolve(")?.lowerBound)
+        let resolveEnd = try #require(
+            source.range(of: "    static func sourceIdentity", range: resolveStart..<source.endIndex)?.lowerBound
+        )
+        let resolve = String(source[resolveStart..<resolveEnd])
+        #expect(resolve.contains("if cachedIdentity != identity || identity.fileNumber == nil"))
+        #expect(resolve.contains("guard try hash(url).caseInsensitiveCompare(manifest.md5)"))
+    }
+
     @Test("Resume rehashes changed content and caches only a stable file identity")
     func resumeMD5Validation() async throws {
         let root = try temporaryRoot()
@@ -737,6 +899,10 @@ struct AudioUploadIntegrityTests {
             [.modificationDate: Date(timeIntervalSince1970: manifest.modificationTime)],
             ofItemAtPath: file.path
         )
+        let replacementIdentity = try await AudioUploadInspector.sourceIdentity(file)
+        #expect(replacementIdentity.byteCount == first.identity.byteCount)
+        #expect(abs(replacementIdentity.modificationTime - first.identity.modificationTime) < 1)
+        #expect(replacementIdentity != first.identity)
         do {
             _ = try await AudioUploadInspector.resolve(
                 manifest,
@@ -747,6 +913,7 @@ struct AudioUploadIntegrityTests {
         } catch let error as AudioUploadError {
             #expect(error == .fileChanged)
         }
+        #expect(counter.snapshot().count == 2)
 
         let store = AudioUploadStore(directory: root.appending(path: "store"))
         try await store.save(manifest)
@@ -923,6 +1090,97 @@ struct AudioUploadIntegrityTests {
         #expect(UploadIntegrityProtocol.count() == 1)
     }
 
+    @Test("One thousand terminal upload failures preserve durable boundary work")
+    func terminalUploadHistoryWorkload() async throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let activeFile = root.appending(path: "active.mp3")
+        let queuedFile = root.appending(path: "queued.mp3")
+        let failedFile = root.appending(path: "retryable.mp3")
+        try Data("active".utf8).write(to: activeFile)
+        try Data("queued".utf8).write(to: queuedFile)
+        try Data("failed".utf8).write(to: failedFile)
+        let savedAt = Date(timeIntervalSince1970: 2_000_000_000)
+        var active = try makeManifest(file: activeFile)
+        var queued = try makeManifest(file: queuedFile)
+        var retryable = try makeManifest(file: failedFile)
+        active.savedAt = savedAt
+        queued.savedAt = savedAt.addingTimeInterval(1)
+        retryable.savedAt = savedAt.addingTimeInterval(2)
+        retryable.phase = .failed("controlled retryable failure")
+        let durable = [active, queued, retryable]
+        let durableIDs = durable.map(\.id)
+        let store = AudioUploadStore(directory: root.appending(path: "store"))
+        for manifest in durable { try await store.save(manifest) }
+
+        let snapshot = CredentialSnapshot(.authenticated(try credentials("terminal-history")))
+        let gate = UploadGate()
+        let manager = await makeManager(
+            store: store,
+            transport: transport(snapshot: snapshot, gate: gate)
+        )
+        await manager.waitUntilLoaded()
+        await manager.setAccount(
+            active.accountID,
+            credentialRevision: snapshot.load().revision
+        )
+        #expect(await manager.itemOrder == durableIDs)
+        UploadIntegrityProtocol.reset(.countOnly)
+        await manager.start(active.id)
+        #expect(await eventually { await gate.hasEntered() })
+        await manager.start(queued.id)
+        #expect(await gate.hasEntered())
+        #expect(!(await gate.hasEntered(2)))
+        #expect(UploadIntegrityProtocol.count() == 0)
+        #expect(await manager.items[active.id]?.phase == .allocating)
+        #expect(await manager.items[queued.id]?.phase == .allocating)
+        #expect(await manager.items[retryable.id]?.phase == retryable.phase)
+
+        var terminalIDs: [UUID] = []
+        let missingRoot = root.appending(path: "missing", directoryHint: .isDirectory)
+        for checkpoint in [100, 500, 1_000] {
+            let additions = checkpoint - durableIDs.count - terminalIDs.count
+            for _ in 0..<additions {
+                let ordinal = terminalIDs.count + 1
+                let id = await manager.prepareCloudFile(
+                    missingRoot.appending(path: "terminal-\(ordinal).mp3")
+                )
+                if let id {
+                    terminalIDs.append(id)
+                } else {
+                    Issue.record("Missing-file fixture was not accepted")
+                }
+            }
+            #expect(await eventually {
+                let items = await manager.items
+                return terminalIDs.allSatisfy { id in
+                    if case .failed? = items[id]?.phase { return true }
+                    return false
+                }
+            })
+            let order = await manager.itemOrder
+            let items = await manager.items
+            #expect(items.count == checkpoint)
+            #expect(Array(order.prefix(durableIDs.count)) == durableIDs)
+            #expect(Array(order.dropFirst(durableIDs.count)) == terminalIDs)
+            #expect(items[active.id]?.phase == .allocating)
+            #expect(items[queued.id]?.phase == .allocating)
+            #expect(items[retryable.id]?.phase == retryable.phase)
+            let loaded = try await store.load().manifests
+            let loadedByID = Dictionary(uniqueKeysWithValues: loaded.map { ($0.id, $0) })
+            #expect(loaded.count == durableIDs.count)
+            #expect(Set(loadedByID.keys) == Set(durableIDs))
+            #expect(loadedByID[retryable.id]?.phase == retryable.phase)
+            UploadMeasurementSignposts.markTerminalScale(checkpoint)
+        }
+
+        #expect(UploadIntegrityProtocol.count() == 0)
+        await manager.pauseAll()
+        await gate.releaseAll()
+        #expect(await eventually { await manager.isActive == false })
+        for id in durableIDs { await manager.cancel(id) }
+    }
+
     @Test("Podcast completion advances only the podcast refresh revision")
     func podcastCompletionRevisionIsTargeted() async throws {
         let root = try temporaryRoot()
@@ -1024,6 +1282,30 @@ struct AudioUploadIntegrityTests {
             .appending(path: "TinyCloudMusicAudioIntegrity.\(UUID().uuidString)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root
+    }
+
+    private func writeWAV(to url: URL) throws {
+        let sampleRate: UInt32 = 8_000
+        let dataSize: UInt32 = sampleRate / 10 * 2
+        var data = Data("RIFF".utf8)
+        appendLittleEndian(36 + dataSize, to: &data)
+        data.append(Data("WAVEfmt ".utf8))
+        appendLittleEndian(UInt32(16), to: &data)
+        appendLittleEndian(UInt16(1), to: &data)
+        appendLittleEndian(UInt16(1), to: &data)
+        appendLittleEndian(sampleRate, to: &data)
+        appendLittleEndian(sampleRate * 2, to: &data)
+        appendLittleEndian(UInt16(2), to: &data)
+        appendLittleEndian(UInt16(16), to: &data)
+        data.append(Data("data".utf8))
+        appendLittleEndian(dataSize, to: &data)
+        data.append(Data(repeating: 0, count: Int(dataSize)))
+        try data.write(to: url)
+    }
+
+    private func appendLittleEndian<T: FixedWidthInteger>(_ value: T, to data: inout Data) {
+        var value = value.littleEndian
+        withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
     }
 
     private func makeManifest(

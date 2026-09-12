@@ -1,5 +1,6 @@
 import AVFoundation
 import Observation
+import UIKit
 
 @MainActor
 @Observable
@@ -12,10 +13,14 @@ final class IOSAppContainer {
 
     private let credentialStore: CredentialStore
     private let credentialSnapshot: CredentialSnapshot
-    private let audioSession = IOSAudioSessionCoordinator()
+    private let audioSession: IOSAudioSessionCoordinator
     private let isTesting: Bool
     private var credentialStartupError: String?
     private var audioStartupError: String?
+    private var credentialObserver: NSObjectProtocol?
+    @ObservationIgnored private var backgroundCheckpointTask: Task<Void, Never>?
+    @ObservationIgnored private var backgroundCheckpointID: UUID?
+    @ObservationIgnored private var backgroundTaskIdentifier: UIBackgroundTaskIdentifier = .invalid
 
     init(isTesting: Bool = false) {
         let service = isTesting
@@ -37,11 +42,7 @@ final class IOSAppContainer {
             credentialSnapshot: credentialSnapshot,
             transport: transport,
             validator: { credentials in
-                let validator = LiveMusicLibrary(
-                    transport: EAPITransport(cookie: credentials.cookie, musicU: "")
-                )
-                guard case .loggedIn = try await validator.loginState() else { return false }
-                return true
+                try await Self.validatedAccount(for: credentials) != nil
             },
             vipValidator: { musicU in
                 try await LiveMusicLibrary(
@@ -86,7 +87,113 @@ final class IOSAppContainer {
         self.isTesting = isTesting
         self.model = model
         self.player = player
+        self.audioSession = model.audioSession
+        credentialObserver = NotificationCenter.default.addObserver(
+            forName: .neteaseCredentialIssue,
+            object: nil,
+            queue: .main
+        ) { [weak session] notification in
+            guard let event = notification.object as? SessionCredentialIssueEvent else { return }
+            Task { @MainActor in
+                guard let session, session.invalidate(event) else { return }
+                if event.issue == .cookie { await session.restore() }
+            }
+        }
         audioSession.player = player
+        player.onPlaybackRequested = { [weak audioSession] in audioSession?.musicPlaybackWillStart() }
+    }
+
+    isolated deinit {
+        backgroundCheckpointTask?.cancel()
+        endBackgroundTask()
+        if let credentialObserver {
+            NotificationCenter.default.removeObserver(credentialObserver)
+        }
+    }
+
+    func didEnterBackground() {
+        guard backgroundCheckpointTask == nil else { return }
+
+        let checkpointID = UUID()
+        backgroundCheckpointID = checkpointID
+        backgroundTaskIdentifier = UIApplication.shared.beginBackgroundTask(
+            withName: "TinyCloudMusic persistence checkpoint"
+        ) { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.expireBackgroundCheckpoint(checkpointID)
+            }
+        }
+
+        let downloads = model.downloads
+        let uploads = model.uploads
+        let listenTogether = model.listenTogether
+        let checkpointPlayer = player
+        backgroundCheckpointTask = Task { [weak self] in
+            await Self.checkpoint(
+                downloads: downloads,
+                uploads: uploads,
+                listenTogether: listenTogether,
+                player: checkpointPlayer
+            )
+            self?.finishBackgroundCheckpoint(checkpointID)
+        }
+    }
+
+    func didBecomeActive() {
+        endBackgroundTask()
+        if let listenTogether = model.listenTogether, listenTogether.isSleeping {
+            listenTogether.wake()
+        }
+    }
+
+    private static func checkpoint(
+        downloads: MusicDownloadManager?,
+        uploads: AudioUploadManager?,
+        listenTogether: ListenTogetherController?,
+        player: PlayerController
+    ) async {
+        async let downloadCheckpoint: Void = checkpointDownloads(downloads)
+        async let uploadCheckpoint: Void = checkpointUploads(uploads)
+        async let realtimeCheckpoint: Void = checkpointRealtime(listenTogether, player: player)
+        _ = await (downloadCheckpoint, uploadCheckpoint, realtimeCheckpoint)
+    }
+
+    private static func checkpointDownloads(_ downloads: MusicDownloadManager?) async {
+        guard let downloads else { return }
+        try? await downloads.flushPersistence(timeout: .seconds(3))
+    }
+
+    private static func checkpointUploads(_ uploads: AudioUploadManager?) async {
+        await uploads?.flushEdits()
+    }
+
+    private static func checkpointRealtime(
+        _ listenTogether: ListenTogetherController?,
+        player: PlayerController
+    ) async {
+        guard player.isPlaybackRequested == false else { return }
+        await listenTogether?.sleep()
+    }
+
+    private func finishBackgroundCheckpoint(_ checkpointID: UUID) {
+        guard backgroundCheckpointID == checkpointID else { return }
+        backgroundCheckpointTask = nil
+        backgroundCheckpointID = nil
+        endBackgroundTask()
+    }
+
+    private func expireBackgroundCheckpoint(_ checkpointID: UUID) {
+        guard backgroundCheckpointID == checkpointID else { return }
+        backgroundCheckpointTask?.cancel()
+        backgroundCheckpointTask = nil
+        backgroundCheckpointID = nil
+        endBackgroundTask()
+    }
+
+    private func endBackgroundTask() {
+        guard backgroundTaskIdentifier != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTaskIdentifier)
+        backgroundTaskIdentifier = .invalid
     }
 
     func start() async {
@@ -109,15 +216,24 @@ final class IOSAppContainer {
             audioStartupError = "音频会话启动失败：\(error.localizedDescription)"
             canRetryAudioSession = true
         }
-        await model.session?.restore()
+        let confirmedAccount = await model.session?.restore(accountValidator: { credentials in
+            try await Self.validatedAccount(for: credentials)
+        })
         player.setAccountCredentialRevision(model.session?.credentialRevision ?? 0)
         if model.session != nil {
-            await model.refreshAccountState { [model] in model.loadHome() }
+            await model.refreshAccountState(
+                confirmedAccount: confirmedAccount
+            ) { [model] in model.loadHome() }
         } else {
             model.loadHome()
         }
         updateStartupError()
         isStarting = false
+        _ = Task.detached(priority: .utility) {
+            await MusicSheetWorker.shared.cleanupExpired(
+                additionalRoots: [IOSExportFileStore.directory]
+            )
+        }
     }
 
     func retryAudioSession() {
@@ -139,5 +255,15 @@ final class IOSAppContainer {
     private func updateStartupError() {
         let messages = [credentialStartupError, audioStartupError].compactMap { $0 }
         startupError = messages.isEmpty ? nil : messages.joined(separator: "\n")
+    }
+
+    nonisolated private static func validatedAccount(
+        for credentials: SessionCredentials
+    ) async throws -> MusicLibraryUser? {
+        let validator = LiveMusicLibrary(
+            transport: EAPITransport(cookie: credentials.cookie, musicU: "")
+        )
+        guard case let .loggedIn(user) = try await validator.loginState() else { return nil }
+        return user
     }
 }

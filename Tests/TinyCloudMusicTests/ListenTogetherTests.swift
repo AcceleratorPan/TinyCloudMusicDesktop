@@ -876,7 +876,7 @@ struct ListenTogetherControllerLifecycleTests {
         await controller.prepareForLogout()
     }
 
-    @Test("Reconciliation drops a superseded command and remote end clears the session")
+    @Test("Remote end hints require authoritative confirmation before clearing the session")
     func reconciliationDropsSupersededCommand() async {
         ListenTogetherControllerProtocol.reset([
             "/weapi/listen/together/status/get": .init(Self.inRoom),
@@ -904,9 +904,18 @@ struct ListenTogetherControllerLifecycleTests {
         #expect(player.currentSongID == 1)
 
         realtime.send(Self.remoteEnded)
+        await wait { !controller.isReconciling }
+        #expect(controller.isConnected)
+        #expect(controller.room != nil)
+        #expect(realtime.disconnectCount == 0)
+
+        ListenTogetherControllerProtocol.reset([
+            "/weapi/listen/together/status/get": .init(Self.notInRoom)
+        ])
+        realtime.send(Self.remoteEnded)
         await wait { controller.room == nil }
         await wait { realtime.disconnectCount == 1 }
-        #expect(controller.phase == .ended(reason: nil))
+        #expect(controller.phase == .ended(reason: "房间已结束"))
         #expect(controller.errorMessage == nil)
         #expect(!player.isControlInteractionLocked)
         #expect(!player.isSharedControlActive)
@@ -933,6 +942,9 @@ struct ListenTogetherControllerLifecycleTests {
         controller.recover()
         await wait { controller.isConnected }
 
+        ListenTogetherControllerProtocol.reset([
+            "/weapi/listen/together/status/get": .init(Self.notInRoom)
+        ])
         realtime.send(Self.remoteEnded)
         await gate.waitUntilBlocked()
         #expect(controller.requiresShutdown)

@@ -5,6 +5,18 @@ extension LiveMusicRepository {
         for route: Route,
         expectedCredentialRevision: UInt64?
     ) async throws -> DetailContent {
+        try await detail(
+            for: route,
+            expectedCredentialRevision: expectedCredentialRevision,
+            forceRefresh: false
+        )
+    }
+
+    func detail(
+        for route: Route,
+        expectedCredentialRevision: UInt64?,
+        forceRefresh: Bool
+    ) async throws -> DetailContent {
         switch route {
         case let .artist(id):
             return try await artistDetail(id: id)
@@ -16,7 +28,8 @@ extension LiveMusicRepository {
         case let .playlist(id):
             return try await playlistDetail(
                 id: id,
-                expectedCredentialRevision: expectedCredentialRevision
+                expectedCredentialRevision: expectedCredentialRevision,
+                forceRefresh: forceRefresh
             )
         case let .user(id):
             return try await userDetail(
@@ -96,7 +109,8 @@ extension LiveMusicRepository {
 
     private func playlistDetail(
         id: Int64,
-        expectedCredentialRevision: UInt64?
+        expectedCredentialRevision: UInt64?,
+        forceRefresh: Bool
     ) async throws -> DetailContent {
         let root = try await request(
             EAPIEndpoint(
@@ -114,6 +128,7 @@ extension LiveMusicRepository {
                 "s": "5"
             ],
             cache: .detail,
+            refreshCache: forceRefresh,
             expectedCredentialRevision: expectedCredentialRevision
         )
         let value = root.object("playlist")

@@ -385,6 +385,224 @@ struct AppShellPerformanceTests {
         #expect(defaults.crossfadeWrites == 1)
     }
 
+    @Test("Wave 1 mirrors account, detail, and iOS credential lifecycle contracts")
+    func sessionNetworkIntegrationStructure() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sharedModel = try source(
+            "AppModel.swift",
+            in: repositoryRoot.appending(path: "Sources/TinyCloudMusic")
+        )
+        let iosModel = try source(
+            "AppModel.swift",
+            in: repositoryRoot.appending(path: "iOS/TinyCloudMusicIOS/SharedOverrides")
+        )
+        let container = try source(
+            "IOSAppContainer.swift",
+            in: repositoryRoot.appending(path: "iOS/TinyCloudMusicIOS/App")
+        )
+        let signature = """
+        func refreshAccountState(
+                confirmedAccount: ValidatedMusicLibraryAccount? = nil,
+                whenAccountReady: @MainActor () -> Void = {}
+            ) async
+        """
+
+        for model in [sharedModel, iosModel] {
+            let accountRefresh = try slice(
+                model,
+                from: "func refreshAccountState(",
+                to: "func showAddToPlaylist"
+            )
+            let detailRefresh = try slice(
+                model,
+                from: "func loadDetail(",
+                to: "func playlistContentsDidChange"
+            )
+            #expect(model.contains(signature))
+            #expect(accountRefresh.contains("confirmedAccount.credentialRevision == credentialRevision"))
+            #expect(accountRefresh.contains("session?.credentialRevision == credentialRevision"))
+            #expect(accountRefresh.contains("session?.state == .authenticated"))
+            #expect(accountRefresh.components(separatedBy: "invalidateAllCachedResponses()").count == 3)
+            #expect(detailRefresh.contains("forceRefresh: needsRefresh"))
+            #expect(detailRefresh.contains("forceRefresh: true"))
+            #expect(!detailRefresh.contains("refreshPlaylistDetail("))
+        }
+
+        #expect(sharedModel.contains("private(set) var cacheConfigurationRevision: UInt64 = 0"))
+        #expect(sharedModel.contains("guard detailCache.count > 64"))
+        #expect(sharedModel.contains("options: .withSecurityScope"))
+        #expect(!sharedModel.contains("homeLoadRevision"))
+        #expect(iosModel.contains("private(set) var homeLoadRevision = 0"))
+        #expect(iosModel.contains("pendingHomeSectionIDs"))
+        #expect(iosModel.contains("guard detailCache.count > 12"))
+        #expect(iosModel.contains("options: []"))
+
+        let start = try slice(container, from: "func start() async", to: "func retryAudioSession")
+        #expect(container.components(separatedBy: "Self.validatedAccount(for: credentials)").count == 3)
+        #expect(container.contains("nonisolated private static func validatedAccount("))
+        #expect(start.contains("restore(accountValidator:"))
+        #expect(start.contains("confirmedAccount: confirmedAccount"))
+        #expect(start.range(of: "restore(accountValidator:")!.lowerBound
+            < start.range(of: "refreshAccountState(")!.lowerBound)
+
+        #expect(container.contains("private var credentialObserver: NSObjectProtocol?"))
+        #expect(container.contains("forName: .neteaseCredentialIssue"))
+        #expect(container.contains("queue: .main"))
+        #expect(container.contains("notification.object as? SessionCredentialIssueEvent"))
+        #expect(container.contains("guard let session, session.invalidate(event) else { return }"))
+        #expect(container.contains("if event.issue == .cookie { await session.restore() }"))
+        #expect(container.contains("isolated deinit"))
+        #expect(container.contains("NotificationCenter.default.removeObserver(credentialObserver)"))
+        #expect(!container.contains("Set<UInt64>"))
+    }
+
+    @Test("Account view leaves root as sole account refresh owner")
+    func accountViewLeavesRootAsSoleRefreshOwner() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let iosUI = repositoryRoot.appending(path: "iOS/TinyCloudMusicIOS/UI")
+        let account = try source(
+            "IOSAccountView.swift",
+            in: iosUI.appending(path: "LibraryMedia")
+        )
+        let root = try source("IOSRootView.swift", in: iosUI)
+        let saveCookie = try slice(account, from: "private func saveCookie(", to: "private func refresh(")
+        let refresh = try slice(account, from: "private func refresh(", to: "private func logout()")
+        let logout = try slice(account, from: "private func logout()", to: "private func verifyMusicU(")
+        let qrSuccess = try slice(account, from: "private func poll(_ key:", to: "private func cancel()")
+        let phoneSuccess = try slice(account, from: "private func login()", to: "private func startCooldown()")
+        let rootOwner = try slice(
+            root,
+            from: ".onChange(of: sessionIdentity)",
+            to: ".onChange(of: model.path)"
+        )
+        let rootIdentity = try slice(
+            root,
+            from: "private var sessionIdentity:",
+            to: "private var cacheConfiguration:"
+        )
+
+        #expect(!account.contains("sessionDidChange"))
+        #expect(!account.contains("refreshAccountState"))
+        #expect(!account.contains("setAccountCredentialRevision"))
+
+        #expect(saveCookie.contains("let saved = await session.save(cookie: value)"))
+        #expect(saveCookie.contains("isSavingCookie = false"))
+        #expect(saveCookie.contains("model.showToast(\"登录成功\")"))
+        #expect(saveCookie.contains("Cookie 未通过验证"))
+        #expect(refresh.contains("defer { isRefreshing = false }"))
+        #expect(refresh.contains("if try await session.refresh()"))
+        #expect(refresh.contains("model.showToast(\"登录已刷新\")"))
+        #expect(refresh.contains("message = error.localizedDescription"))
+        #expect(logout.contains("let warning = await session.logout()"))
+        #expect(logout.contains("isLoggingOut = false"))
+        #expect(logout.contains("if let warning"))
+        #expect(logout.contains("model.showToast(\"已退出登录\")"))
+        #expect(qrSuccess.contains("onSuccess()"))
+        #expect(qrSuccess.contains("dismiss()"))
+        #expect(qrSuccess.contains("phase = .failed(error.localizedDescription)"))
+        #expect(phoneSuccess.contains("defer {\n                isLoggingIn = false"))
+        #expect(phoneSuccess.contains("guard await session.save(cookie: cookie)"))
+        #expect(phoneSuccess.contains("onSuccess()"))
+        #expect(phoneSuccess.contains("dismiss()"))
+        #expect(phoneSuccess.contains("showError(error.localizedDescription"))
+
+        #expect(rootIdentity.contains("state: $0.state"))
+        #expect(rootIdentity.contains("credentialRevision: $0.credentialRevision"))
+        #expect(rootOwner.contains("player.setAccountCredentialRevision(identity.credentialRevision)"))
+        #expect(rootOwner.contains("model.invalidateAccountDomainIfNeeded"))
+        #expect(rootOwner.contains("await model.refreshAccountState"))
+    }
+
+    @Test("iOS startup schedules one shared temporary cleanup only after normal readiness")
+    func iosTemporaryCleanupStructure() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let container = try source(
+            "IOSAppContainer.swift",
+            in: repositoryRoot.appending(path: "iOS/TinyCloudMusicIOS/App")
+        )
+        let media = try source(
+            "IOSMediaView.swift",
+            in: repositoryRoot.appending(path: "iOS/TinyCloudMusicIOS/UI/LibraryMedia")
+        )
+        let start = try slice(container, from: "func start() async", to: "func retryAudioSession")
+        let testing = try slice(start, from: "guard !isTesting else {", to: "do {")
+        let maintenance = try #require(start.range(of: "Task.detached(priority: .utility)"))
+        let normalReady = try #require(start.range(of: "isStarting = false", options: .backwards))
+        let exportStore = try slice(
+            media,
+            from: "enum IOSExportFileStore",
+            to: "private struct IOSPDFView"
+        )
+
+        #expect(testing.range(of: "isStarting = false")!.lowerBound
+            < testing.range(of: "return")!.lowerBound)
+        #expect(!testing.contains("cleanupExpired"))
+        #expect(!testing.contains("IOSExportFileStore.directory"))
+        #expect(normalReady.lowerBound < maintenance.lowerBound)
+        #expect(!start[..<maintenance.lowerBound].contains("cleanupExpired"))
+        #expect(start.components(separatedBy: "Task.detached(priority: .utility)").count == 2)
+        #expect(start.components(separatedBy: "MusicSheetWorker.shared.cleanupExpired(").count == 2)
+        #expect(start.contains("additionalRoots: [IOSExportFileStore.directory]"))
+
+        #expect(!media.contains("private enum IOSExportFileStore"))
+        #expect(exportStore.contains("static let directory = FileManager.default.temporaryDirectory"))
+        #expect(exportStore.contains("let directory = Self.directory"))
+        #expect(media.components(separatedBy: "TinyCloudMusicExports").count == 2)
+    }
+
+    @Test("iOS background checkpoint preserves resumable work")
+    func iosBackgroundCheckpointStructure() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let appRoot = repositoryRoot.appending(path: "iOS/TinyCloudMusicIOS/App")
+        let app = try source("TinyCloudMusicIOSApp.swift", in: appRoot)
+        let container = try source("IOSAppContainer.swift", in: appRoot)
+        let lifecycle = try slice(
+            container,
+            from: "func didEnterBackground()",
+            to: "func start() async"
+        )
+
+        #expect(app.components(separatedBy: "@Environment(\\.scenePhase)").count == 2)
+        #expect(app.components(separatedBy: ".onChange(of: scenePhase)").count == 2)
+        #expect(app.contains("case .active:\n                container.didBecomeActive()"))
+        #expect(app.contains("case .background:\n                container.didEnterBackground()"))
+        #expect(app.contains("case .inactive:\n                break"))
+
+        #expect(lifecycle.contains("guard backgroundCheckpointTask == nil else { return }"))
+        #expect(lifecycle.components(separatedBy: "beginBackgroundTask(").count == 2)
+        #expect(lifecycle.contains("expireBackgroundCheckpoint(checkpointID)"))
+        #expect(lifecycle.contains("flushPersistence(timeout: .seconds(3))"))
+        #expect(lifecycle.contains("flushEdits()"))
+        #expect(lifecycle.contains("player.isPlaybackRequested == false"))
+        #expect(lifecycle.contains("listenTogether?.sleep()"))
+        #expect(lifecycle.contains("listenTogether.wake()"))
+        #expect(lifecycle.contains("guard backgroundCheckpointID == checkpointID else { return }"))
+        #expect(lifecycle.contains("backgroundCheckpointTask?.cancel()"))
+        #expect(lifecycle.contains("UIApplication.shared.endBackgroundTask(backgroundTaskIdentifier)"))
+
+        for forbidden in [
+            "pauseAll()",
+            "prepareForLogout()",
+            "shutdown()",
+            "setPlayback(false)",
+            "setActive(false)"
+        ] {
+            #expect(!lifecycle.contains(forbidden))
+        }
+    }
+
     @Test("App shell uses event-driven and owner-managed lifecycle paths")
     func sourceStructure() throws {
         let sourceRoot = URL(fileURLWithPath: #filePath)

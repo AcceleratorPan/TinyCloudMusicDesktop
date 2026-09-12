@@ -79,6 +79,96 @@ private func verifyStyleFixtures() throws {
     }
 }
 
+private func verifyTemporaryCleanupBoundaries() async throws {
+    let manager = FileManager.default
+    let root = manager.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+    let sheetRoot = root.appending(path: "sheet", directoryHint: .isDirectory)
+    let exportRoot = root.appending(path: "export", directoryHint: .isDirectory)
+    defer { try? manager.removeItem(at: root) }
+    try manager.createDirectory(at: sheetRoot, withIntermediateDirectories: true)
+    try manager.createDirectory(at: exportRoot, withIntermediateDirectories: true)
+
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let cutoff = now.addingTimeInterval(-24 * 60 * 60)
+    @discardableResult
+    func write(_ name: String, to directory: URL, modifiedAt date: Date) throws -> URL {
+        let url = directory.appending(path: name)
+        try Data([1]).write(to: url)
+        try manager.setAttributes([.modificationDate: date], ofItemAtPath: url.path)
+        return url
+    }
+
+    let oldSheet = try write("old.pdf", to: sheetRoot, modifiedAt: cutoff.addingTimeInterval(-1))
+    let recent = try write("recent.pdf", to: sheetRoot, modifiedAt: cutoff.addingTimeInterval(1))
+    let boundary = try write("boundary.pdf", to: sheetRoot, modifiedAt: cutoff)
+    let future = try write("future.pdf", to: sheetRoot, modifiedAt: now.addingTimeInterval(1))
+    let directory = sheetRoot.appending(path: "nested", directoryHint: .isDirectory)
+    try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+    let nested = try write("old.pdf", to: directory, modifiedAt: cutoff.addingTimeInterval(-1))
+    try manager.setAttributes([.modificationDate: cutoff.addingTimeInterval(-1)], ofItemAtPath: directory.path)
+    let symlinkTarget = try write("symlink-target.pdf", to: root, modifiedAt: cutoff.addingTimeInterval(-1))
+    let symlink = sheetRoot.appending(path: "old-link.pdf")
+    try manager.createSymbolicLink(at: symlink, withDestinationURL: symlinkTarget)
+    let linkedRootTarget = root.appending(path: "linked-root-target", directoryHint: .isDirectory)
+    try manager.createDirectory(at: linkedRootTarget, withIntermediateDirectories: true)
+    let linkedRootFile = try write("old.pdf", to: linkedRootTarget, modifiedAt: cutoff.addingTimeInterval(-1))
+    let linkedRoot = root.appending(path: "linked-root")
+    try manager.createSymbolicLink(at: linkedRoot, withDestinationURL: linkedRootTarget)
+    let oldExport = try write("old-export.jpg", to: exportRoot, modifiedAt: cutoff.addingTimeInterval(-1))
+
+    let worker = MusicSheetWorker(temporaryRoot: sheetRoot)
+    await worker.cleanupExpired(now: now)
+    guard !manager.fileExists(atPath: oldSheet.path),
+          manager.fileExists(atPath: oldExport.path),
+          manager.fileExists(atPath: recent.path),
+          manager.fileExists(atPath: boundary.path),
+          manager.fileExists(atPath: future.path),
+          manager.fileExists(atPath: directory.path),
+          manager.fileExists(atPath: nested.path),
+          manager.fileExists(atPath: symlink.path),
+          manager.fileExists(atPath: symlinkTarget.path)
+    else { throw MusicKnowledgeCheckError.failed }
+
+    await worker.cleanupExpired(
+        now: now,
+        additionalRoots: [root.appending(path: "missing"), linkedRoot, exportRoot]
+    )
+    guard !manager.fileExists(atPath: oldExport.path),
+          manager.fileExists(atPath: linkedRootFile.path)
+    else {
+        throw MusicKnowledgeCheckError.failed
+    }
+
+    let blockedRoot = root.appending(path: "blocked", directoryHint: .isDirectory)
+    let healthyRoot = root.appending(path: "healthy", directoryHint: .isDirectory)
+    try manager.createDirectory(at: blockedRoot, withIntermediateDirectories: true)
+    try manager.createDirectory(at: healthyRoot, withIntermediateDirectories: true)
+    let blocked = try write("blocked.pdf", to: blockedRoot, modifiedAt: cutoff.addingTimeInterval(-1))
+    let healthy = try write("healthy.pdf", to: healthyRoot, modifiedAt: cutoff.addingTimeInterval(-1))
+    try manager.setAttributes([.posixPermissions: 0o555], ofItemAtPath: blockedRoot.path)
+    defer { try? manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: blockedRoot.path) }
+    await worker.cleanupExpired(now: now, additionalRoots: [blockedRoot, healthyRoot])
+    try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: blockedRoot.path)
+    guard manager.fileExists(atPath: blocked.path),
+          !manager.fileExists(atPath: healthy.path)
+    else { throw MusicKnowledgeCheckError.failed }
+
+    let cancelledFile = try write(
+        "cancelled.pdf",
+        to: sheetRoot,
+        modifiedAt: cutoff.addingTimeInterval(-1)
+    )
+    let cancelledCleanup = Task {
+        try? await Task.sleep(for: .seconds(60))
+        await worker.cleanupExpired(now: now, additionalRoots: [exportRoot])
+    }
+    cancelledCleanup.cancel()
+    await cancelledCleanup.value
+    guard manager.fileExists(atPath: cancelledFile.path) else {
+        throw MusicKnowledgeCheckError.failed
+    }
+}
+
 private func verifySheetAndKnowledgeFixtures() async throws {
     let sheets = MusicKnowledgeDecoder.sheets([
         "data": ["musicSheetSimpleInfoVOS": [[
@@ -180,6 +270,8 @@ private func verifySheetAndKnowledgeFixtures() async throws {
     try Data("damaged".utf8).write(to: firstSave.url)
     let repairedSave = try await worker.savePDF(at: updatedPDF, song: song, sheet: sheets[0], to: downloadRoot)
     guard repairedSave.saved,
+          repairedSave.url != firstSave.url,
+          try Data(contentsOf: firstSave.url) == Data("damaged".utf8),
           try Data(contentsOf: repairedSave.url) == Data("%PDF-updated\n%%EOF".utf8)
     else { throw MusicKnowledgeCheckError.failed }
 
@@ -295,6 +387,7 @@ private func verifySheetAndKnowledgeFixtures() async throws {
 private enum MusicKnowledgeCheck {
     static func main() async throws {
         try verifyStyleFixtures()
+        try await verifyTemporaryCleanupBoundaries()
         try await verifySheetAndKnowledgeFixtures()
         print("Music knowledge check passed")
     }
@@ -304,6 +397,11 @@ private enum MusicKnowledgeCheck {
 struct MusicKnowledgeTests {
     @Test("Style hierarchy, cursor, and deduplication are retained")
     func styles() throws { try verifyStyleFixtures() }
+
+    @Test("Temporary cleanup is direct, age-strict, symlink-safe, cancellable, and shared across roots")
+    func temporaryCleanupBoundaries() async throws {
+        try await verifyTemporaryCleanupBoundaries()
+    }
 
     @Test("Sheet and knowledge content are safely decoded")
     func sheetsAndKnowledge() async throws { try await verifySheetAndKnowledgeFixtures() }

@@ -136,7 +136,11 @@ final class PlayerController {
     @ObservationIgnored private var standbyPlayer = AVPlayer()
     @ObservationIgnored private var activeSongID: Int64?
     @ObservationIgnored private var playbackGeneration = 0
-    @ObservationIgnored private var wantsPlayback = false
+    @ObservationIgnored var onPlaybackRequested: (@MainActor () -> Void)?
+    @ObservationIgnored private var wantsPlayback = false {
+        willSet { if newValue { onPlaybackRequested?() } }
+    }
+    @ObservationIgnored private var stallRecoveryPending = false
     @ObservationIgnored private var seekInProgress = false
     @ObservationIgnored private var seekInFlightTarget: TimeInterval?
     @ObservationIgnored private var loadTask: Task<Void, Never>?
@@ -175,7 +179,9 @@ final class PlayerController {
     @ObservationIgnored private var qualityBeforeSwitch: String?
     @ObservationIgnored private var reportedPodcastPlaybackGeneration = -1
     @ObservationIgnored private var timedPlaybackSongID: Int64?
+    @ObservationIgnored private var timedPlaybackPodcastEpisodeID: Int64?
     @ObservationIgnored private var timedPlaybackSourceID: Int64?
+    @ObservationIgnored private var timedPlaybackDuration: TimeInterval = 0
     @ObservationIgnored private var timedPlaybackTotalSeconds: Int?
     @ObservationIgnored private var timedPlaybackCredentialRevision: UInt64?
     @ObservationIgnored private var playbackStartReportTask: Task<Bool, Never>?
@@ -202,8 +208,11 @@ final class PlayerController {
     @ObservationIgnored private var standbyStatusObservation: NSKeyValueObservation?
     @ObservationIgnored private var itemStatusObservation: NSKeyValueObservation?
     @ObservationIgnored private var itemDurationObservation: NSKeyValueObservation?
+    @ObservationIgnored private var itemBufferEmptyObservation: NSKeyValueObservation?
+    @ObservationIgnored private var itemLikelyToKeepUpObservation: NSKeyValueObservation?
     @ObservationIgnored private var itemEndObserver: NSObjectProtocol?
     @ObservationIgnored private var itemFailureObserver: NSObjectProtocol?
+    @ObservationIgnored private var itemStalledObserver: NSObjectProtocol?
     @ObservationIgnored var controlInterceptor: ControlInterceptor? {
         didSet {
             isSharedControlActive = controlInterceptor != nil
@@ -351,7 +360,9 @@ final class PlayerController {
         playbackTimingStartedAt = nil
         listenedDuration = .zero
         // Keep the song ID so a delayed .playing callback cannot report it under the new account.
+        timedPlaybackPodcastEpisodeID = nil
         timedPlaybackSourceID = nil
+        timedPlaybackDuration = 0
         timedPlaybackTotalSeconds = nil
         timedPlaybackCredentialRevision = nil
     }
@@ -403,8 +414,11 @@ final class PlayerController {
         standbyStatusObservation?.invalidate()
         itemStatusObservation?.invalidate()
         itemDurationObservation?.invalidate()
+        itemBufferEmptyObservation?.invalidate()
+        itemLikelyToKeepUpObservation?.invalidate()
         if let itemEndObserver { NotificationCenter.default.removeObserver(itemEndObserver) }
         if let itemFailureObserver { NotificationCenter.default.removeObserver(itemFailureObserver) }
+        if let itemStalledObserver { NotificationCenter.default.removeObserver(itemStalledObserver) }
         if let timeObserver { avPlayer.removeTimeObserver(timeObserver) }
     }
 
@@ -711,6 +725,11 @@ final class PlayerController {
 
     func pauseForVideo() {
         if wantsPlayback { setPlayback(false) }
+        // A room command can await the server; local media still needs an immediate handoff.
+        pauseLocally()
+        finishPlaybackControlFade()
+        avPlayer.pause()
+        standbyPlayer.pause()
     }
 
     func previous() {
@@ -1023,6 +1042,7 @@ final class PlayerController {
 
     private func seekLocally(to seconds: TimeInterval) {
         guard currentSongID != nil, currentSong != nil else { return }
+        stallRecoveryPending = false
         if isSwitchingPlaybackQuality, standbyPlayer.currentItem != nil {
             invalidateStandbyPreparation()
         }
@@ -1632,6 +1652,7 @@ final class PlayerController {
             cancelStandbyHandoff()
         }
         wantsPlayback = false
+        stallRecoveryPending = false
         stopPlaybackTiming()
         if retargetsStandbyHandoff {
             avPlayer.pause()
@@ -2086,29 +2107,45 @@ final class PlayerController {
         guard isCurrent(generation: generation, songID: songID),
               avPlayer.currentItem === item
         else { return }
-        if let item = item as? RangeCachingPlayerItem {
-            startActiveRangeFallback(item, generation: generation, songID: songID)
-            return
-        }
+        stallRecoveryPending = false
+        if startActiveCacheFallback(item, generation: generation, songID: songID) { return }
         if case .failed = state { return }
         activeRangeFallback = nil
         failAndAdvance(generation: generation, songID: songID, message: message)
     }
 
-    private func startActiveRangeFallback(
-        _ failedItem: RangeCachingPlayerItem,
+    private func cacheFallback(
+        for item: AVPlayerItem,
+        songID: Int64
+    ) -> (cache: TrackCache, key: TrackRangeCacheKey, invalidatedURL: URL?)? {
+        if let item = item as? RangeCachingPlayerItem {
+            return (item.rangeCache.trackCache, item.key, nil)
+        }
+        guard let url = (item.asset as? AVURLAsset)?.url,
+              url.isFileURL,
+              let reference = pinnedCaches[url.standardizedFileURL.path],
+              url.deletingPathExtension().lastPathComponent == String(songID)
+        else { return nil }
+        let quality = url.deletingLastPathComponent().lastPathComponent
+        guard SongQualityDetail.orderedLevels.contains(quality) else { return nil }
+        return (reference.cache, TrackRangeCacheKey(songID: songID, quality: quality), url)
+    }
+
+    private func startActiveCacheFallback(
+        _ failedItem: AVPlayerItem,
         generation: Int,
         songID: Int64
-    ) {
+    ) -> Bool {
+        guard let fallback = cacheFallback(for: failedItem, songID: songID) else { return false }
         let failedItemID = ObjectIdentifier(failedItem)
-        guard rangeFallbackAttempts.insert(failedItemID).inserted else { return }
+        guard rangeFallbackAttempts.insert(failedItemID).inserted else { return true }
         if isSwitchingPlaybackQuality { cancelPendingQualitySwitch() }
         let qualityRevision = qualitySwitchRevision
         let currentTime = avPlayer.currentTime().seconds
         let confirmedPosition = currentTime.isFinite && currentTime >= 0 ? currentTime : position
         let initialWantsPlayback = wantsPlayback
-        let cache = failedItem.rangeCache.trackCache
-        let key = failedItem.key
+        let cache = fallback.cache
+        let key = fallback.key
         avPlayer.pause()
         avPlayer.volume = 0
 
@@ -2116,8 +2153,12 @@ final class PlayerController {
             defer { self?.rangeFallbackTasks[failedItemID] = nil }
             var pinnedURL: URL?
             do {
+                if let invalidatedURL = fallback.invalidatedURL {
+                    await cache.invalidateCachedFile(invalidatedURL)
+                }
                 let directItem: AVPlayerItem
-                if let ready = await cache.readyPinnedFile(for: key.songID, quality: key.quality) {
+                if fallback.invalidatedURL == nil,
+                   let ready = await cache.readyPinnedFile(for: key.songID, quality: key.quality) {
                     pinnedURL = ready
                     guard let self,
                           self.isCurrentActiveRangeFallback(
@@ -2195,10 +2236,11 @@ final class PlayerController {
             }
         }
         rangeFallbackTasks[failedItemID] = task
+        return true
     }
 
     private func isCurrentActiveRangeFallback(
-        _ item: RangeCachingPlayerItem,
+        _ item: AVPlayerItem,
         generation: Int,
         songID: Int64,
         qualityRevision: Int
@@ -2232,16 +2274,17 @@ final class PlayerController {
         state = .preparing(songID: songID)
     }
 
-    private func startStandbyRangeFallback(
-        _ failedItem: RangeCachingPlayerItem,
+    private func startStandbyCacheFallback(
+        _ failedItem: AVPlayerItem,
         generation: Int,
         songID: Int64,
         qualityRevision: Int?
-    ) {
+    ) -> Bool {
+        guard let fallback = cacheFallback(for: failedItem, songID: songID) else { return false }
         let failedItemID = ObjectIdentifier(failedItem)
-        guard rangeFallbackAttempts.insert(failedItemID).inserted else { return }
-        let cache = failedItem.rangeCache.trackCache
-        let key = failedItem.key
+        guard rangeFallbackAttempts.insert(failedItemID).inserted else { return true }
+        let cache = fallback.cache
+        let key = fallback.key
         let seekPosition = standbySeekPosition
         let transitionDuration = standbyTransitionDuration
         let availability = standbyPlaybackAvailability
@@ -2252,8 +2295,12 @@ final class PlayerController {
             defer { self?.rangeFallbackTasks[failedItemID] = nil }
             var pinnedURL: URL?
             do {
+                if let invalidatedURL = fallback.invalidatedURL {
+                    await cache.invalidateCachedFile(invalidatedURL)
+                }
                 let directItem: AVPlayerItem
-                if let ready = await cache.readyPinnedFile(for: key.songID, quality: key.quality) {
+                if fallback.invalidatedURL == nil,
+                   let ready = await cache.readyPinnedFile(for: key.songID, quality: key.quality) {
                     pinnedURL = ready
                     guard let self,
                           self.isCurrentStandbyRangeFallback(
@@ -2338,10 +2385,11 @@ final class PlayerController {
             }
         }
         rangeFallbackTasks[failedItemID] = task
+        return true
     }
 
     private func isCurrentStandbyRangeFallback(
-        _ item: RangeCachingPlayerItem,
+        _ item: AVPlayerItem,
         generation: Int,
         songID: Int64,
         qualityRevision: Int?
@@ -2453,13 +2501,13 @@ final class PlayerController {
                         qualityRevision: qualityRevision,
                         preparationRevision: preparationRevision
                     )
-                } else if let item = item as? RangeCachingPlayerItem {
-                    self.startStandbyRangeFallback(
-                        item,
-                        generation: generation,
-                        songID: songID,
-                        qualityRevision: qualityRevision
-                    )
+                } else if self.startStandbyCacheFallback(
+                    item,
+                    generation: generation,
+                    songID: songID,
+                    qualityRevision: qualityRevision
+                ) {
+                    return
                 } else {
                     self.failQualitySwitch("无法定位新的音频流")
                 }
@@ -2502,13 +2550,12 @@ final class PlayerController {
         case .failed:
             standbyStatusObservation?.invalidate()
             standbyStatusObservation = nil
-            if let item = item as? RangeCachingPlayerItem {
-                startStandbyRangeFallback(
-                    item,
-                    generation: generation,
-                    songID: songID,
-                    qualityRevision: qualityRevision
-                )
+            if startStandbyCacheFallback(
+                item,
+                generation: generation,
+                songID: songID,
+                qualityRevision: qualityRevision
+            ) {
                 return
             }
             let message = item.error?.localizedDescription ?? "音频流预缓冲失败"
@@ -2583,13 +2630,14 @@ final class PlayerController {
                     }
                 } else {
                     let message = item.error?.localizedDescription ?? "音频流预缓冲失败"
-                    if let item = item as? RangeCachingPlayerItem {
-                        self.startStandbyRangeFallback(
-                            item,
-                            generation: generation,
-                            songID: songID,
-                            qualityRevision: qualityRevision
-                        )
+                    if (item is RangeCachingPlayerItem || item.error != nil),
+                       self.startStandbyCacheFallback(
+                           item,
+                           generation: generation,
+                           songID: songID,
+                           qualityRevision: qualityRevision
+                    ) {
+                        return
                     } else if let qualityRevision, !self.wantsPlayback, item.error == nil {
                         self.promotePausedQualitySwitch(
                             item,
@@ -2947,8 +2995,9 @@ final class PlayerController {
             do {
                 let source = try await repository.lyrics(for: songID)
                 try Task.checkCancellation()
+                let lines = try await LRCParser.parseOffMain(source)
                 guard let self, self.isCurrent(generation: generation, songID: songID) else { return }
-                self.lyrics = LRCParser.parse(source)
+                self.lyrics = lines
                 self.isLoadingLyrics = false
                 self.lyricErrorMessage = nil
                 self.updateCurrentLyricIndex()
@@ -2966,7 +3015,7 @@ final class PlayerController {
     private func installPlayerObservers() {
         let observedPlayer = avPlayer
         timeObserver = observedPlayer.addPeriodicTimeObserver(
-            forInterval: CMTime(seconds: 0.1, preferredTimescale: 600),
+            forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
             queue: .main
         ) { [weak self] time in
             MainActor.assumeIsolated {
@@ -3012,6 +3061,41 @@ final class PlayerController {
             Task { @MainActor [weak self] in
                 guard let self, self.avPlayer.currentItem === item else { return }
                 self.updateDuration(seconds, generation: generation, songID: songID)
+            }
+        }
+        itemBufferEmptyObservation = item.observe(
+            \.isPlaybackBufferEmpty,
+            options: [.initial, .new]
+        ) { [weak self] item, _ in
+            let isEmpty = item.isPlaybackBufferEmpty
+            Task { @MainActor [weak self] in
+                guard let self, self.avPlayer.currentItem === item else { return }
+                if isEmpty {
+                    self.markStallRecoveryPending(item, generation: generation, songID: songID)
+                } else {
+                    self.recoverFromStallIfPossible(item, generation: generation, songID: songID)
+                }
+            }
+        }
+        itemLikelyToKeepUpObservation = item.observe(
+            \.isPlaybackLikelyToKeepUp,
+            options: [.initial, .new]
+        ) { [weak self] item, _ in
+            let likelyToKeepUp = item.isPlaybackLikelyToKeepUp
+            guard likelyToKeepUp else { return }
+            Task { @MainActor [weak self] in
+                guard let self, self.avPlayer.currentItem === item else { return }
+                self.recoverFromStallIfPossible(item, generation: generation, songID: songID)
+            }
+        }
+        itemStalledObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemPlaybackStalled,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.avPlayer.currentItem === item else { return }
+                self.markStallRecoveryPending(item, generation: generation, songID: songID)
             }
         }
         itemEndObserver = NotificationCenter.default.addObserver(
@@ -3063,14 +3147,53 @@ final class PlayerController {
     }
 
     private func removeItemObservers() {
+        stallRecoveryPending = false
         itemStatusObservation?.invalidate()
         itemStatusObservation = nil
         itemDurationObservation?.invalidate()
         itemDurationObservation = nil
+        itemBufferEmptyObservation?.invalidate()
+        itemBufferEmptyObservation = nil
+        itemLikelyToKeepUpObservation?.invalidate()
+        itemLikelyToKeepUpObservation = nil
         if let itemEndObserver { NotificationCenter.default.removeObserver(itemEndObserver) }
         itemEndObserver = nil
         if let itemFailureObserver { NotificationCenter.default.removeObserver(itemFailureObserver) }
         itemFailureObserver = nil
+        if let itemStalledObserver { NotificationCenter.default.removeObserver(itemStalledObserver) }
+        itemStalledObserver = nil
+    }
+
+    private func markStallRecoveryPending(
+        _ item: AVPlayerItem,
+        generation: Int,
+        songID: Int64
+    ) {
+        guard wantsPlayback,
+              isCurrent(generation: generation, songID: songID),
+              avPlayer.currentItem === item
+        else { return }
+        stallRecoveryPending = true
+        stopPlaybackTiming()
+        state = .preparing(songID: songID)
+        recoverFromStallIfPossible(item, generation: generation, songID: songID)
+    }
+
+    private func recoverFromStallIfPossible(
+        _ item: AVPlayerItem,
+        generation: Int,
+        songID: Int64
+    ) {
+        guard stallRecoveryPending,
+              wantsPlayback,
+              isCurrent(generation: generation, songID: songID),
+              avPlayer.currentItem === item,
+              item.status == .readyToPlay,
+              !item.isPlaybackBufferEmpty,
+              item.isPlaybackLikelyToKeepUp,
+              avPlayer.timeControlStatus != .playing
+        else { return }
+        avPlayer.play()
     }
 
     func updatePosition(_ seconds: TimeInterval) {
@@ -3104,7 +3227,11 @@ final class PlayerController {
             prefetchNext(generation: playbackGeneration, index: nextIndex)
         }
 
-        if !crossfadeTriggered,
+        if wantsPlayback,
+           avPlayer.timeControlStatus == .playing,
+           !seekInProgress,
+           pendingSeekPosition == nil,
+           !crossfadeTriggered,
            CrossfadeTransition.shouldStart(
                position: position,
                duration: duration,
@@ -3239,6 +3366,7 @@ final class PlayerController {
               avPlayer.currentItem === item,
               let status = AVPlayerItem.Status(rawValue: rawValue)
         else { return }
+        if case .failed = state { return }
 
         switch status {
         case .readyToPlay:
@@ -3277,9 +3405,12 @@ final class PlayerController {
               avPlayer.timeControlStatus.rawValue == rawValue,
               let status = AVPlayer.TimeControlStatus(rawValue: rawValue)
         else { return }
+        // Retry/replacement enters .preparing; late callbacks cannot erase a terminal error.
+        if case .failed = state { return }
 
         switch status {
         case .playing:
+            stallRecoveryPending = false
             if pendingPlaybackFadeIn { startPlaybackControlFade(to: 1) }
             state = .playing(songID: songID)
             let startedNewSession = startPlaybackTiming(for: songID)
@@ -3303,7 +3434,11 @@ final class PlayerController {
             if wantsPlayback { state = .preparing(songID: songID) }
         case .paused:
             stopPlaybackTiming()
-            if !wantsPlayback { state = .paused(songID: songID) }
+            if stallRecoveryPending, wantsPlayback {
+                state = .preparing(songID: songID)
+            } else if !wantsPlayback {
+                state = .paused(songID: songID)
+            }
         @unknown default:
             break
         }
@@ -3450,8 +3585,10 @@ final class PlayerController {
         if timedPlaybackSongID != songID {
             submitPlaybackIfNeeded()
             timedPlaybackSongID = songID
+            timedPlaybackPodcastEpisodeID = currentSong?.podcastEpisodeID
             timedPlaybackSourceID = currentPlaybackSourceID
-            timedPlaybackTotalSeconds = max(1, Int(duration))
+            timedPlaybackDuration = duration
+            timedPlaybackTotalSeconds = max(1, Int(timedPlaybackDuration))
             timedPlaybackCredentialRevision = accountCredentialRevision
         }
         if playbackTimingStartedAt == nil { playbackTimingStartedAt = ContinuousClock.now }
@@ -3472,11 +3609,14 @@ final class PlayerController {
         let revision = timedPlaybackCredentialRevision
         let startReportTask = playbackStartReportTask
         let seconds = Int(listenedDuration.components.seconds)
-        let podcastEpisodeID = currentSong?.podcastEpisodeID
+        let podcastEpisodeID = timedPlaybackPodcastEpisodeID
         let positionMilliseconds = Int(position * 1_000)
+        let duration = mediaDuration > 0 ? mediaDuration : timedPlaybackDuration
         let completed = duration > 0 && position >= duration - 1
         timedPlaybackSongID = nil
+        timedPlaybackPodcastEpisodeID = nil
         timedPlaybackSourceID = nil
+        timedPlaybackDuration = 0
         timedPlaybackTotalSeconds = nil
         timedPlaybackCredentialRevision = nil
         playbackStartReportTask = nil

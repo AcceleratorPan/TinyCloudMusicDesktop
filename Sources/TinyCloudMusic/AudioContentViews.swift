@@ -894,7 +894,7 @@ struct PodcastEpisodeDetailView: View {
             let source = try await library.voiceLyrics(programID: episodeID)
             try Task.checkCancellation()
             guard loadGeneration == generation, lyricGeneration == requestGeneration else { return }
-            lyricsPhase = .loaded(LRCParser.parse(source))
+            lyricsPhase = .loaded(try await LRCParser.parseOffMain(source))
         } catch is CancellationError {
         } catch {
             guard loadGeneration == generation, lyricGeneration == requestGeneration else { return }
@@ -1000,9 +1000,7 @@ struct BroadcastChannelDetailView: View {
                                         isStreamActive ? stopPlayback() : startPlayback()
                                     } label: {
                                         Label(
-                                            playbackTask != nil || streamPlayer.isLoading
-                                                ? "连接中"
-                                                : streamPlayer.isPlaying ? "停止" : "播放",
+                                            playbackTask != nil ? "连接中" : streamPlayer.controlTitle,
                                             systemImage: isStreamActive ? "stop.fill" : "play.fill"
                                         )
                                     }
@@ -1084,6 +1082,7 @@ struct BroadcastChannelDetailView: View {
     }
 
     private func startPlayback() {
+        if streamPlayer.resume() { return }
         stopPlayback()
         let taskID = UUID()
         let generation = loadGeneration
@@ -1116,7 +1115,6 @@ struct BroadcastChannelDetailView: View {
                       playbackTaskID == taskID,
                       broadcastAccountMatches(accountID, credentialRevision)
                 else { return }
-                songPlayer.pauseForVideo()
                 info = withoutStream(current)
                 streamPlayer.play(url)
             } catch is CancellationError {
@@ -1514,61 +1512,136 @@ struct AudioArtwork: View {
     }
 }
 
+enum BroadcastPlaybackState: Equatable {
+    case idle, connecting, buffering, playing, paused
+    case failed(String)
+
+    static func current(itemStatus: AVPlayerItem.Status, timeControlStatus: AVPlayer.TimeControlStatus) -> Self {
+        switch timeControlStatus {
+        case .playing: .playing
+        case .waitingToPlayAtSpecifiedRate: itemStatus == .readyToPlay ? .buffering : .connecting
+        case .paused: .paused
+        @unknown default: .paused
+        }
+    }
+}
+
 @MainActor
 @Observable
-private final class BroadcastPagePlayer {
-    private(set) var isPlaying = false
-    private(set) var isLoading = false
-    private(set) var errorMessage: String?
-    @ObservationIgnored private let player = AVPlayer()
+final class BroadcastPagePlayer {
+    private(set) var state: BroadcastPlaybackState = .idle
+    var isPlaying: Bool { state == .playing }
+    var isLoading: Bool { state == .connecting || state == .buffering }
+    var errorMessage: String? {
+        if case let .failed(message) = state { message } else { nil }
+    }
+    var controlTitle: String {
+        switch state {
+        case .idle: "播放"
+        case .connecting: "连接中"
+        case .buffering: "缓冲中"
+        case .playing: "停止"
+        case .paused: "继续"
+        case .failed: "重试"
+        }
+    }
+
+    @ObservationIgnored private let player: AVPlayer
+    @ObservationIgnored private let mediaPlayback: MacMediaPlaybackCoordinator
     @ObservationIgnored private var statusObservation: NSKeyValueObservation?
+    @ObservationIgnored private var playbackObservation: NSKeyValueObservation?
+    @ObservationIgnored private var failureObserver: NSObjectProtocol?
     @ObservationIgnored private var timeoutTask: Task<Void, Never>?
 
+    init(player: AVPlayer = AVPlayer(), mediaPlayback: MacMediaPlaybackCoordinator = .shared) {
+        self.player = player
+        self.mediaPlayback = mediaPlayback
+    }
+
+    isolated deinit {
+        timeoutTask?.cancel()
+        if let failureObserver { NotificationCenter.default.removeObserver(failureObserver) }
+        mediaPlayback.endExternalPlayback(player)
+        player.pause()
+    }
+
     func play(_ url: URL) {
-        errorMessage = nil
-        isLoading = true
+        stop()
+        state = .connecting
         let item = AVPlayerItem(url: url)
-        statusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
-            let status = item.status
-            let message = item.error?.localizedDescription
-            Task { @MainActor [weak self] in
-                switch status {
-                case .readyToPlay:
-                    self?.timeoutTask?.cancel()
-                    self?.timeoutTask = nil
-                    self?.isLoading = false
-                    self?.isPlaying = true
-                case .failed:
-                    self?.fail(message ?? "直播流播放失败")
-                case .unknown:
-                    break
-                @unknown default:
-                    self?.fail("直播流状态无法识别")
-                }
+        player.replaceCurrentItem(with: item)
+        statusObservation = item.observe(\.status, options: [.new]) { [weak self, weak item] _, _ in
+            Task { @MainActor in
+                if let item { self?.refreshState(for: item) }
             }
         }
-        player.replaceCurrentItem(with: item)
-        player.play()
-        timeoutTask = Task { @MainActor [weak self] in
-            do { try await Task.sleep(for: .seconds(12)) } catch { return }
-            guard self?.isLoading == true else { return }
-            self?.fail("连接直播流超时，请稍后重试")
+        playbackObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self, weak item] _, _ in
+            Task { @MainActor in
+                if let item { self?.refreshState(for: item) }
+            }
+        }
+        failureObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
+        ) { [weak self, weak item] notification in
+            let message = (notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?
+                .localizedDescription ?? "直播流播放中断，请重试"
+            Task { @MainActor in
+                if let item { self?.fail(message, for: item) }
+            }
+        }
+        mediaPlayback.beginExternalPlayback(player)
+        refreshState(for: item)
+    }
+
+    func resume() -> Bool {
+        guard state == .paused, let item = player.currentItem else { return false }
+        mediaPlayback.beginExternalPlayback(player)
+        refreshState(for: item)
+        return true
+    }
+
+    func refreshState(for item: AVPlayerItem) {
+        guard player.currentItem === item else { return }
+        if item.status == .failed {
+            fail(item.error?.localizedDescription ?? "直播流播放失败", for: item)
+            return
+        }
+        state = .current(itemStatus: item.status, timeControlStatus: player.timeControlStatus)
+        if isLoading {
+            guard timeoutTask == nil else { return }
+            timeoutTask = Task { @MainActor [weak self, weak item] in
+                do { try await Task.sleep(for: .seconds(12)) } catch { return }
+                guard let self, let item, self.player.currentItem === item, self.isLoading else { return }
+                self.fail("直播流连接或缓冲超时，请稍后重试", for: item)
+            }
+        } else {
+            timeoutTask?.cancel()
+            timeoutTask = nil
         }
     }
 
     func stop() {
         statusObservation?.invalidate()
         statusObservation = nil
+        playbackObservation?.invalidate()
+        playbackObservation = nil
+        if let failureObserver { NotificationCenter.default.removeObserver(failureObserver) }
+        failureObserver = nil
         timeoutTask?.cancel()
         timeoutTask = nil
+        mediaPlayback.endExternalPlayback(player)
         player.pause()
         player.replaceCurrentItem(with: nil)
-        isPlaying = false
-        isLoading = false
+        state = .idle
+    }
+
+    func fail(_ message: String, for item: AVPlayerItem) {
+        guard player.currentItem === item else { return }
+        fail(message)
     }
 
     func fail(_ message: String) {
         stop()
-        errorMessage = message
+        state = .failed(message)
     }
 }

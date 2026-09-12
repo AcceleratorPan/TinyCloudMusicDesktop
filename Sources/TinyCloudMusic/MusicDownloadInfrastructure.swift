@@ -194,6 +194,7 @@ struct MusicDownloadRecovery: Equatable, Sendable {
     let request: MusicDownloadRequest
     let resumeData: Data?
     let savedAt: Date
+    var restoredState: MusicDownloadState? = nil
 }
 
 struct MusicDownloadVideoRecovery: Equatable, Sendable {
@@ -203,6 +204,7 @@ struct MusicDownloadVideoRecovery: Equatable, Sendable {
     let sourceURL: URL?
     let sourceExpiresAt: Date?
     let savedAt: Date
+    var restoredState: MusicDownloadState? = nil
 }
 
 struct MusicDownloadRecoveryResult: Sendable {
@@ -214,6 +216,8 @@ struct MusicDownloadRecoveryResult: Sendable {
 struct MusicDownloadResumeEntry: Sendable {
     let request: MusicDownloadRequest
     let resumeData: Data?
+    var isPaused = false
+    var completion: MusicDownloadResult? = nil
 }
 
 struct MusicDownloadVideoResumeEntry: Sendable {
@@ -222,6 +226,8 @@ struct MusicDownloadVideoResumeEntry: Sendable {
     let resolution: Int?
     let sourceURL: URL?
     let sourceExpiresAt: Date?
+    var isPaused = false
+    var completion: MusicDownloadResult? = nil
 }
 
 enum MusicDownloadPersistenceError: LocalizedError, Equatable, Sendable {
@@ -254,6 +260,8 @@ final class MusicDownloadResumeStore: @unchecked Sendable {
         let expectedBytes: Int64?
 
         init(_ request: MusicDownloadRequest) {
+            let scoped = request.destination.startAccessingSecurityScopedResource()
+            defer { if scoped { request.destination.stopAccessingSecurityScopedResource() } }
             songID = request.songID
             songName = request.songName
             artists = request.artists
@@ -325,6 +333,8 @@ final class MusicDownloadResumeStore: @unchecked Sendable {
         let sourceExpiresAt: Date?
         let savedAt: Date
         let updatedAt: Date?
+        let isPaused: Bool?
+        let completion: MusicDownloadResult?
 
         init(
             signature: String,
@@ -335,7 +345,9 @@ final class MusicDownloadResumeStore: @unchecked Sendable {
             sourceURL: URL? = nil,
             sourceExpiresAt: Date? = nil,
             savedAt: Date,
-            updatedAt: Date?
+            updatedAt: Date?,
+            isPaused: Bool = false,
+            completion: MusicDownloadResult? = nil
         ) {
             self.signature = signature
             self.request = request
@@ -346,6 +358,8 @@ final class MusicDownloadResumeStore: @unchecked Sendable {
             self.sourceExpiresAt = sourceExpiresAt
             self.savedAt = savedAt
             self.updatedAt = updatedAt
+            self.isPaused = isPaused
+            self.completion = completion
         }
     }
 
@@ -364,6 +378,8 @@ final class MusicDownloadResumeStore: @unchecked Sendable {
         let availableResolutions: [Int]
 
         init(_ request: VideoDownloadRequest) {
+            let scoped = request.destination.startAccessingSecurityScopedResource()
+            defer { if scoped { request.destination.stopAccessingSecurityScopedResource() } }
             resource = switch request.resource {
             case let .mv(id): .mv(id)
             case let .video(id): .video(id)
@@ -489,7 +505,13 @@ final class MusicDownloadResumeStore: @unchecked Sendable {
                         return
                     }
                     let record = try self.record(at: url)
-                    guard record.signature == self.signature(for: request),
+                    let movedDestinationMatches = record.request?.restored()?.destination.resolvingSymlinksInPath()
+                        == request.destination.resolvingSymlinksInPath()
+                    let signatureMatches = record.signature == self.signature(for: request)
+                        || (movedDestinationMatches && record.signature == self.signature(
+                            for: request, destinationPath: record.request?.destinationPath
+                        ))
+                    guard signatureMatches,
                           !self.isExpired(record, now: Date())
                     else {
                         try FileManager.default.removeItem(at: url)
@@ -516,10 +538,12 @@ final class MusicDownloadResumeStore: @unchecked Sendable {
     func save(
         _ request: MusicDownloadRequest,
         resumeData: Data? = nil,
+        isPaused: Bool = false,
+        completion: MusicDownloadResult? = nil,
         onFailure: FailureHandler? = nil
     ) {
         save(
-            [MusicDownloadResumeEntry(request: request, resumeData: resumeData)],
+            [MusicDownloadResumeEntry(request: request, resumeData: resumeData, isPaused: isPaused, completion: completion)],
             onFailure: onFailure
         )
     }
@@ -640,12 +664,7 @@ final class MusicDownloadResumeStore: @unchecked Sendable {
     private func perform(_ command: PendingCommand) throws {
         switch command {
         case let .save(audio, videos, _):
-            for entry in audio {
-                try saveRecord(
-                    entry.request,
-                    resumeData: entry.resumeData.flatMap { $0.isEmpty ? nil : $0 }
-                )
-            }
+            for entry in audio { try saveRecord(entry) }
             for entry in videos { try saveRecord(entry) }
         case let .remove(songIDs, videoIDs, _):
             for songID in songIDs {
@@ -675,17 +694,20 @@ final class MusicDownloadResumeStore: @unchecked Sendable {
         return directory.appending(path: "video-\(key).resume.plist", directoryHint: .notDirectory)
     }
 
-    private func saveRecord(_ request: MusicDownloadRequest, resumeData: Data?) throws {
+    private func saveRecord(_ entry: MusicDownloadResumeEntry) throws {
+        let request = entry.request
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let signature = signature(for: request)
         let storedRequest = StoredRequest(request)
-        let resumeData = resumeData.flatMap { $0.isEmpty ? nil : $0 }
+        let resumeData = entry.resumeData.flatMap { $0.isEmpty ? nil : $0 }
         let now = Date()
         let url = recordURL(songID: request.songID)
         let existing = try? record(at: url)
         if existing?.signature == signature,
            existing?.request?.matches(storedRequest) == true,
-           existing?.resumeData == resumeData {
+           existing?.resumeData == resumeData,
+           existing?.isPaused == entry.isPaused,
+           existing?.completion == entry.completion {
             return
         }
         let record = Record(
@@ -693,7 +715,9 @@ final class MusicDownloadResumeStore: @unchecked Sendable {
             request: storedRequest,
             resumeData: resumeData,
             savedAt: existing?.signature == signature ? existing?.savedAt ?? now : now,
-            updatedAt: now
+            updatedAt: now,
+            isPaused: entry.isPaused,
+            completion: entry.completion
         )
         try PropertyListEncoder().encode(record).write(to: url, options: .atomic)
     }
@@ -711,7 +735,9 @@ final class MusicDownloadResumeStore: @unchecked Sendable {
            existing?.resumeData == resumeData,
            existing?.resolution == entry.resolution,
            existing?.sourceURL == entry.sourceURL,
-           existing?.sourceExpiresAt == entry.sourceExpiresAt {
+           existing?.sourceExpiresAt == entry.sourceExpiresAt,
+           existing?.isPaused == entry.isPaused,
+           existing?.completion == entry.completion {
             return
         }
         let record = Record(
@@ -722,7 +748,9 @@ final class MusicDownloadResumeStore: @unchecked Sendable {
             sourceURL: entry.sourceURL,
             sourceExpiresAt: entry.sourceExpiresAt,
             savedAt: existing?.signature == signature ? existing?.savedAt ?? now : now,
-            updatedAt: now
+            updatedAt: now,
+            isPaused: entry.isPaused,
+            completion: entry.completion
         )
         try PropertyListEncoder().encode(record).write(to: url, options: .atomic)
     }
@@ -762,7 +790,7 @@ final class MusicDownloadResumeStore: @unchecked Sendable {
                     continue
                 }
                 if let request = record.request?.restored() {
-                    guard record.signature == signature(for: request) else {
+                    guard record.signature == signature(for: request, destinationPath: record.request?.destinationPath) else {
                         throw DecodingError.dataCorrupted(.init(
                             codingPath: [],
                             debugDescription: "Download request signature mismatch"
@@ -771,10 +799,11 @@ final class MusicDownloadResumeStore: @unchecked Sendable {
                     downloads.append(MusicDownloadRecovery(
                         request: request,
                         resumeData: record.resumeData,
-                        savedAt: record.savedAt
+                        savedAt: record.savedAt,
+                        restoredState: restoredState(record, in: request.destination)
                     ))
                 } else if let request = record.videoRequest?.restored() {
-                    guard record.signature == signature(for: request) else {
+                    guard record.signature == signature(for: request, destinationPath: record.videoRequest?.destinationPath) else {
                         throw DecodingError.dataCorrupted(.init(
                             codingPath: [],
                             debugDescription: "Video request signature mismatch"
@@ -786,7 +815,8 @@ final class MusicDownloadResumeStore: @unchecked Sendable {
                         resolution: record.resolution,
                         sourceURL: record.sourceURL,
                         sourceExpiresAt: record.sourceExpiresAt,
-                        savedAt: record.savedAt
+                        savedAt: record.savedAt,
+                        restoredState: restoredState(record, in: request.destination)
                     ))
                 } else {
                     throw DecodingError.dataCorrupted(.init(
@@ -809,26 +839,45 @@ final class MusicDownloadResumeStore: @unchecked Sendable {
     }
 
     private func isExpired(_ record: Record, now: Date) -> Bool {
-        now.timeIntervalSince(record.updatedAt ?? record.savedAt) > maximumAge
+        record.completion == nil && record.isPaused == false
+            && now.timeIntervalSince(record.updatedAt ?? record.savedAt) > maximumAge
     }
 
-    private func signature(for request: MusicDownloadRequest) -> String {
+    private func restoredState(_ record: Record, in directory: URL) -> MusicDownloadState? {
+        guard let completion = record.completion else {
+            // Legacy records did not store user intent; require an explicit resume after migration.
+            return record.isPaused != false ? .paused(progress: nil) : nil
+        }
+        let scoped = directory.startAccessingSecurityScopedResource()
+        defer { if scoped { directory.stopAccessingSecurityScopedResource() } }
+        // Rebase file names onto the restored bookmark; the app's sandbox path can change.
+        let audioURL = directory.appending(path: completion.audioURL.lastPathComponent)
+        guard FileManager.default.fileExists(atPath: audioURL.path) else {
+            return .failed("已下载文件已移动、删除或无法访问，可重新下载")
+        }
+        let lyricURL = completion.lyricURL
+            .map { directory.appending(path: $0.lastPathComponent) }
+            .flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+        return .completed(audioURL: audioURL, lyricURL: lyricURL)
+    }
+
+    private func signature(for request: MusicDownloadRequest, destinationPath: String? = nil) -> String {
         let source: String = switch request.source {
         case .catalog: "catalog"
         case let .cloud(userID, fileName): "cloud:\(userID):\(fileName)"
         }
         return [
             String(request.songID), request.quality.rawValue, source,
-            request.destination.standardizedFileURL.path,
+            destinationPath ?? request.destination.standardizedFileURL.path,
             request.includeLyrics ? "lyrics" : "audio"
         ].joined(separator: "|")
     }
 
-    private func signature(for request: VideoDownloadRequest) -> String {
+    private func signature(for request: VideoDownloadRequest, destinationPath: String? = nil) -> String {
         [
             request.resource.identity,
             request.quality.rawValue,
-            request.destination.standardizedFileURL.path,
+            destinationPath ?? request.destination.standardizedFileURL.path,
             request.availableResolutions.map(String.init).joined(separator: ",")
         ].joined(separator: "|")
     }

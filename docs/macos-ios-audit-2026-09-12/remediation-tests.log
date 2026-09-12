@@ -1,0 +1,144 @@
+Building for debugging...
+[0/6] Write swift-version--58304C5D6DBC2206.txt
+[1/6] Write sources
+[4/7] Emitting module TinyCloudMusic
+[5/8] Compiling TinyCloudMusic PlayerController.swift
+[5/10] Write Objects.LinkFileList
+[6/10] Linking TinyCloudMusic
+[8/11] Emitting module TinyCloudMusicTests
+[9/12] Compiling TinyCloudMusicTests PlayerCachePerformanceTests.swift
+[9/12] Applying TinyCloudMusic
+[10/12] Write Objects.LinkFileList
+[11/12] Linking TinyCloudMusicPackageTests
+Build complete! (27.19s)
+Test Suite 'Selected tests' started at 2026-09-12 11:24:36.111.
+Test Suite 'TinyCloudMusicPackageTests.xctest' started at 2026-09-12 11:24:36.112.
+Test Suite 'TinyCloudMusicPackageTests.xctest' passed at 2026-09-12 11:24:36.112.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-09-12 11:24:36.112.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1501
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Suite "AudioRangeIntegrationTests" started.
+◇ Test "I12 an active Range failure resumes once through exact direct playback" started.
+◇ Test case passing 1 argument scenario → .playing to "I12 an active Range failure resumes once through exact direct playback" started.
+◇ Test case passing 1 argument scenario → .paused to "I12 an active Range failure resumes once through exact direct playback" started.
+◇ Test case passing 1 argument scenario → .changesWhileWaiting to "I12 an active Range failure resumes once through exact direct playback" started.
+✔ Test "I12 an active Range failure resumes once through exact direct playback" with 3 test cases passed after 19.431 seconds.
+✔ Suite "AudioRangeIntegrationTests" passed after 19.432 seconds.
+◇ Suite "iOS audit remediation" started.
+◇ Test "Malformed lyric timestamps cannot overflow and valid boundary values remain intact" started.
+✔ Test "Malformed lyric timestamps cannot overflow and valid boundary values remain intact" passed after 0.001 seconds.
+◇ Test "Off-main lyrics retain results, bound oversized inputs and propagate cancellation" started.
+✔ Test "Off-main lyrics retain results, bound oversized inputs and propagate cancellation" passed after 0.024 seconds.
+◇ Test "Unique artwork saves preserve existing files, including concurrent saves" started.
+✔ Test "Unique artwork saves preserve existing files, including concurrent saves" passed after 0.001 seconds.
+◇ Test "Paused and completed audio/video records survive restart without transfer" started.
+✔ Test "Paused and completed audio/video records survive restart without transfer" passed after 0.020 seconds.
+◇ Test "Legacy records with unknown pause intent require explicit resume" started.
+✔ Test "Legacy records with unknown pause intent require explicit resume" passed after 0.005 seconds.
+◇ Test "Completed cloud downloads wait for their owner and survive logout" started.
+✔ Test "Completed cloud downloads wait for their owner and survive logout" passed after 0.002 seconds.
+◇ Test "Same-account credential replacement notifies observers without a state change" started.
+✔ Test "Same-account credential replacement notifies observers without a state change" passed after 0.001 seconds.
+◇ Test "Video subscription writes invalidate cached subscription lists" started.
+✔ Test "Video subscription writes invalidate cached subscription lists" passed after 0.003 seconds.
+✔ Suite "iOS audit remediation" passed after 0.059 seconds.
+◇ Suite "Knowledge, sheet, and listening performance" started.
+◇ Test "Sheet exports preserve invalid existing files and concurrent exports" started.
+✔ Test "Sheet exports preserve invalid existing files and concurrent exports" passed after 0.002 seconds.
+◇ Test "Remote PDF staging uses the shared helper and retains atomic final installation" started.
+✔ Test "Remote PDF staging uses the shared helper and retains atomic final installation" passed after 0.001 seconds.
+◇ Test "Clear is a custom-root barrier and generated files cannot reappear" started.
+✔ Test "Clear is a custom-root barrier and generated files cannot reappear" passed after 0.012 seconds.
+✔ Suite "Knowledge, sheet, and listening performance" passed after 0.016 seconds.
+◇ Suite "Library mutation ownership and cache" started.
+◇ Test "Loaded details honor expiry and macOS evicts inactive payloads" started.
+✔ Test "Loaded details honor expiry and macOS evicts inactive payloads" passed after 0.497 seconds.
+◇ Test "Playlist read and reload each send one accepted detail payload" started.
+✔ Test "Playlist read and reload each send one accepted detail payload" passed after 0.024 seconds.
+◇ Test "Playlist mutation reload keeps one request and rejects the old generation" started.
+✔ Test "Playlist mutation reload keeps one request and rejects the old generation" passed after 0.006 seconds.
+✔ Suite "Library mutation ownership and cache" passed after 0.529 seconds.
+◇ Suite "Audio, FM, and video lifecycle" started.
+◇ Test "macOS media ownership handles music, native video resume, and stale cleanup" started.
+✔ Test "macOS media ownership handles music, native video resume, and stale cleanup" passed after 0.001 seconds.
+◇ Test "Broadcast readiness does not imply playback and waiting distinguishes connection from buffering" started.
+✔ Test "Broadcast readiness does not imply playback and waiting distinguishes connection from buffering" passed after 0.001 seconds.
+◇ Test "Delayed broadcast item callbacks cannot revive stopped playback or stop a replacement" started.
+✔ Test "Delayed broadcast item callbacks cannot revive stopped playback or stop a replacement" passed after 0.001 seconds.
+✔ Suite "Audio, FM, and video lifecycle" passed after 0.001 seconds.
+◇ Suite "Music download infrastructure" started.
+◇ Test "Retry delay honors server backoff and paused resume data" started.
+✔ Test "Retry delay honors server backoff and paused resume data" passed after 0.001 seconds.
+◇ Test "Allocator reserves lyric targets across audio extensions" started.
+✔ Test "Allocator reserves lyric targets across audio extensions" passed after 0.001 seconds.
+◇ Test "Pending requests and resume data survive a new store instance" started.
+✔ Test "Pending requests and resume data survive a new store instance" passed after 0.006 seconds.
+◇ Test "Enumeration prunes expired records" started.
+✔ Test "Enumeration prunes expired records" passed after 0.001 seconds.
+◇ Test "Resume updates preserve original FIFO order" started.
+✔ Test "Resume updates preserve original FIFO order" passed after 0.039 seconds.
+◇ Test "Stale cleanup only removes UUID part files" started.
+✔ Test "Stale cleanup only removes UUID part files" passed after 0.001 seconds.
+✔ Suite "Music download infrastructure" passed after 0.049 seconds.
+◇ Suite "Music knowledge" started.
+◇ Test "Sheet and knowledge content are safely decoded" started.
+✔ Test "Sheet and knowledge content are safely decoded" passed after 0.005 seconds.
+✔ Suite "Music knowledge" passed after 0.005 seconds.
+◇ Suite "Player queue and bounded work" started.
+◇ Test "Playback resumes only after a current-item stall while intent remains active" started.
+✔ Test "Playback resumes only after a current-item stall while intent remains active" passed after 0.647 seconds.
+◇ Test "Active seeks chase only the latest of twenty targets" started.
+✔ Test "Active seeks chase only the latest of twenty targets" passed after 0.051 seconds.
+◇ Test "A seek requested before item readiness is retained and executed" started.
+✔ Test "A seek requested before item readiness is retained and executed" passed after 0.078 seconds.
+◇ Test "Same queue identity sends only play and FM sessions stay distinct" started.
+✔ Test "Same queue identity sends only play and FM sessions stay distinct" passed after 0.001 seconds.
+◇ Test "Clear unions old Range owners and pinned full-file owners after configure" started.
+✔ Test "Clear unions old Range owners and pinned full-file owners after configure" passed after 0.119 seconds.
+◇ Test "Player routes exact full hits before repository and best hits by actual level" started.
+✔ Test "Player routes exact full hits before repository and best hits by actual level" passed after 0.125 seconds.
+◇ Test "Invalid direct fallback URLs fail before ordinary item installation" started.
+✔ Test "Invalid direct fallback URLs fail before ordinary item installation" passed after 0.099 seconds.
+◇ Test "An unverifiable Range item falls back to exact direct only once" started.
+✔ Test "An unverifiable Range item falls back to exact direct only once" passed after 0.142 seconds.
+◇ Test "Pausing in the future handoff window retargets once and promotes silently" started.
+✔ Test "Pausing in the future handoff window retargets once and promotes silently" passed after 0.109 seconds.
+◇ Test "A real standby failure preserves the active item and playback intent" started.
+✔ Test "A real standby failure preserves the active item and playback intent" passed after 0.035 seconds.
+◇ Test "Paused tail seeks and in-flight seeks do not advance the queue" started.
+✔ Test "Paused tail seeks and in-flight seeks do not advance the queue" passed after 0.209 seconds.
+◇ Test "Queue replacement settles the outgoing media identity" started.
+◇ Test case passing 1 argument outgoingIsPodcast → true to "Queue replacement settles the outgoing media identity" started.
+◇ Test case passing 1 argument outgoingIsPodcast → false to "Queue replacement settles the outgoing media identity" started.
+✔ Test "Queue replacement settles the outgoing media identity" with 2 test cases passed after 2.660 seconds.
+◇ Test "A corrupt full cache recovers once for active and standby items" started.
+◇ Test case passing 1 argument useStandby → false to "A corrupt full cache recovers once for active and standby items" started.
+◇ Test case passing 1 argument useStandby → true to "A corrupt full cache recovers once for active and standby items" started.
+✔ Test "A corrupt full cache recovers once for active and standby items" with 2 test cases passed after 0.386 seconds.
+◇ Test "Playback history events and report tasks are fenced by account revision" started.
+✔ Test "Playback history events and report tasks are fenced by account revision" passed after 0.083 seconds.
+◇ Test "Settlement keeps a blocked start report owned across account reset" started.
+✔ Test "Settlement keeps a blocked start report owned across account reset" passed after 1.130 seconds.
+◇ Test "New account reports progress while cancelled old calls stay blocked" started.
+✔ Test "New account reports progress while cancelled old calls stay blocked" passed after 2.254 seconds.
+◇ Test "Settlement success preserves a failed start report error" started.
+✔ Test "Settlement success preserves a failed start report error" passed after 1.189 seconds.
+✔ Suite "Player queue and bounded work" passed after 9.327 seconds.
+◇ Suite "Recommendation history" started.
+◇ Test "Only the latest selector request can update state" started.
+✔ Test "Only the latest selector request can update state" passed after 0.001 seconds.
+◇ Test "Delayed account requests cannot update the current account" started.
+✔ Test "Delayed account requests cannot update the current account" passed after 0.001 seconds.
+✔ Suite "Recommendation history" passed after 0.001 seconds.
+◇ Suite "Track cache" started.
+◇ Test "Only a non-empty finalized file is a cache hit" started.
+✔ Test "Only a non-empty finalized file is a cache hit" passed after 0.843 seconds.
+✔ Suite "Track cache" passed after 0.843 seconds.
+◇ Suite "Transport, credential snapshot, and response cache" started.
+◇ Test "All playback report kinds reject a revision change before HTTP" started.
+✔ Test "All playback report kinds reject a revision change before HTTP" passed after 0.019 seconds.
+✔ Suite "Transport, credential snapshot, and response cache" passed after 0.019 seconds.
+✔ Test run with 46 tests in 11 suites passed after 30.284 seconds.

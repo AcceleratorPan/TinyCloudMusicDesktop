@@ -7,7 +7,7 @@ import SwiftUI
 import Testing
 @testable import TinyCloudMusic
 
-@Suite("Player queue and bounded work")
+@Suite("Player queue and bounded work", .serialized)
 struct PlayerCachePerformanceTests {
     @Test("Now Playing isolates progress observation and has no fixed root height")
     func nowPlayingStructure() throws {
@@ -467,6 +467,44 @@ struct PlayerCachePerformanceTests {
         await waitUntil { player.pendingSeekPosition == nil }
         #expect(abs(player.position - 1.25) <= 0.15)
         #expect(player.currentLyric?.text == "second")
+    }
+
+    @MainActor
+    @Test("Playback resumes only after a current-item stall while intent remains active")
+    func playbackStallRecovery() async throws {
+        let root = performanceCacheRoot()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "stall-recovery.wav")
+        try performanceWAV(seconds: 4).write(to: source)
+        let song = performanceSong(1)
+        let player = PlayerController(
+            repository: PlayerPerformanceRepository(songs: [song], sourceURL: source),
+            cacheRoot: root.appending(path: "cache"),
+            crossfadeDuration: 0
+        )
+        player.play(song, in: [song])
+        await waitUntil { player.isPlaying && player.position > 0.05 }
+        let active = try #require(performanceAVPlayer(player, named: "avPlayer"))
+        let stalledItem = try #require(active.currentItem)
+
+        active.pause()
+        await waitUntil { active.timeControlStatus == .paused }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(active.rate == 0)
+        #expect(player.isPlaybackRequested)
+
+        let stalledPosition = player.position
+        NotificationCenter.default.post(name: .AVPlayerItemPlaybackStalled, object: stalledItem)
+        await waitUntil { player.isPlaying && player.position > stalledPosition + 0.05 }
+        #expect(active.rate > 0)
+
+        player.setPlayback(false)
+        await waitUntil { active.timeControlStatus == .paused }
+        NotificationCenter.default.post(name: .AVPlayerItemPlaybackStalled, object: stalledItem)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(!player.isPlaybackRequested)
+        #expect(active.rate == 0)
     }
 
     @MainActor
@@ -1958,6 +1996,202 @@ struct PlayerCachePerformanceTests {
     }
 
     @MainActor
+    @Test("Paused tail seeks and in-flight seeks do not advance the queue")
+    func pausedTailSeekKeepsQueue() async throws {
+        let root = performanceCacheRoot()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "tail-seek.wav")
+        try performanceWAV(seconds: 8).write(to: source)
+        let songs = [performanceSong(1), performanceSong(2)]
+        let player = PlayerController(
+            repository: PlayerPerformanceRepository(songs: songs, sourceURL: source),
+            cacheRoot: root.appending(path: "cache"),
+            crossfadeDuration: 3
+        )
+        player.play(songs[0], in: songs)
+        await waitUntil { player.isPlaying && player.duration < 10 }
+        try #require(player.isPlaying)
+        player.setPlayback(false)
+        let target = player.duration - 1
+        player.seek(to: target)
+        player.updatePosition(target)
+        #expect(player.currentSongID == songs[0].id)
+        #expect(!player.isPlaybackRequested)
+        await waitUntil { player.pendingSeekPosition == nil }
+        player.updatePosition(target)
+        #expect(player.currentSongID == songs[0].id)
+        #expect(!player.isPlaybackRequested)
+
+        player.seek(to: 0)
+        await waitUntil { player.pendingSeekPosition == nil }
+        player.setPlayback(true)
+        await waitUntil { player.isPlaying }
+        player.seek(to: 1)
+        // Simulate a tail callback from the old position before the seek confirms.
+        player.updatePosition(target)
+        #expect(player.currentSongID == songs[0].id)
+        await waitUntil {
+            player.pendingSeekPosition == nil
+                && performanceAVPlayer(player, named: "avPlayer")?.timeControlStatus == .playing
+        }
+        player.updatePosition(target)
+        #expect(player.currentSongID == songs[1].id)
+        player.setPlayback(false)
+    }
+
+    @MainActor
+    @Test("Queue replacement settles the outgoing media identity", arguments: [true, false])
+    func playbackSettlementKeepsOutgoingIdentity(outgoingIsPodcast: Bool) async throws {
+        let root = performanceCacheRoot()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appending(path: "settlement.wav")
+        try performanceWAV(seconds: 8).write(to: source)
+        let outgoing = performanceSong(1, podcastEpisodeID: outgoingIsPodcast ? 101 : nil)
+        let incoming = performanceSong(2, podcastEpisodeID: 202)
+        let repository = PlayerPerformanceRepository(songs: [outgoing, incoming], sourceURL: source)
+        let player = PlayerController(
+            repository: repository,
+            cacheRoot: root.appending(path: "cache"),
+            crossfadeDuration: 0
+        )
+        player.play(outgoing, in: [outgoing])
+        await waitUntil { player.isPlaying && player.position >= 1.2 }
+        try #require(player.position >= 1.2)
+        player.setPlayback(false)
+        let settledPosition = Int(player.position * 1_000)
+        player.play(incoming, in: [incoming])
+        player.setPlayback(false)
+        await waitUntil { player.pendingPlaybackReportCount == 0 }
+        try #require(player.pendingPlaybackReportCount == 0)
+        let reports = await repository.podcastPlaybackReports
+        if outgoingIsPodcast {
+            #expect(reports.count == 2)
+            #expect(reports.last?.episodeID == 101)
+            #expect(reports.last?.positionMilliseconds == settledPosition)
+            #expect(reports.last?.completed == false)
+            #expect(reports.allSatisfy { $0.episodeID == 101 })
+            #expect(await repository.settledSongIDs.isEmpty)
+        } else {
+            #expect(reports.isEmpty)
+            #expect(await repository.settledSongIDs == [outgoing.id])
+        }
+    }
+
+    @MainActor
+    @Test("A corrupt full cache recovers once for active and standby items", arguments: [false, true])
+    func corruptFullCacheRecoversOnce(useStandby: Bool) async throws {
+        let root = performanceCacheRoot()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let audio = performanceWAV(seconds: 8)
+        let source = root.appending(path: "current.wav")
+        try audio.write(to: source)
+        let server = try LocalHTTPFixture(rangedBody: audio, contentType: "audio/wav")
+        let port = try await server.start()
+        defer { server.stop() }
+        let directURL = URL(string: "http://127.0.0.1:\(port)/recovered.wav")!
+        let first = performanceSong(1)
+        let damaged = performanceSong(2)
+        let sources = PlayerPrefetchGate(songID: damaged.id)
+        let repository = PlayerPerformanceRepository(
+            songs: [first, damaged],
+            sourceURL: source,
+            prefetchGate: sources
+        )
+        let cache = TrackCache(directory: root.appending(path: "cache"))
+        let badSource = root.appending(path: "damaged.tmp")
+        try Data("ID3broken-cache".utf8).write(to: badSource)
+        let badCache = try await cache.finalize(badSource, for: damaged.id)
+        #expect(await cache.readyFile(for: damaged.id) == badCache)
+        let player = PlayerController(
+            repository: repository,
+            cache: cache,
+            crossfadeDuration: useStandby ? 0.5 : 0
+        )
+        if useStandby {
+            player.play(first, in: [first, damaged])
+            await waitUntil { player.isPlaying }
+            try #require(player.isPlaying)
+            player.next()
+        } else {
+            player.play(damaged, in: [damaged])
+        }
+        await waitUntil { await sources.invocationCount == 1 }
+        try #require(await sources.invocationCount == 1)
+        #expect(await cache.readyFile(for: damaged.id) == nil)
+        if !useStandby { player.setPlayback(false) }
+        await sources.release(1, with: .success(PlaybackSource(
+            url: directURL,
+            availability: .playable(level: "standard"),
+            format: "wav"
+        )))
+        await waitUntil {
+            guard let active = performanceAVPlayer(player, named: "avPlayer"),
+                  let item = active.currentItem,
+                  (item.asset as? AVURLAsset)?.url == directURL,
+                  item.status == .readyToPlay
+            else { return false }
+            return useStandby ? player.isPlaying : player.state == .paused(songID: damaged.id)
+        }
+        let active = try #require(performanceAVPlayer(player, named: "avPlayer"))
+        let recovered = try #require(active.currentItem)
+        try #require(recovered.status == .readyToPlay)
+        if useStandby {
+            try #require(player.isPlaying)
+            try #require(active.timeControlStatus == .playing)
+        } else {
+            try #require(player.state == .paused(songID: damaged.id))
+            try #require(active.timeControlStatus == .paused)
+        }
+        #expect((recovered.asset as? AVURLAsset)?.url == directURL)
+        #expect(player.isPlaybackRequested == useStandby)
+        #expect(player.currentSongID == damaged.id)
+        await waitUntil { !FileManager.default.fileExists(atPath: badCache.path) }
+        #expect(!FileManager.default.fileExists(atPath: badCache.path))
+
+        let message = "fixture direct recovery failure"
+        NotificationCenter.default.post(
+            name: .AVPlayerItemFailedToPlayToEndTime,
+            object: recovered,
+            userInfo: [AVPlayerItemFailedToPlayToEndTimeErrorKey: NSError(
+                domain: "TinyCloudMusicTests",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: message]
+            )]
+        )
+        let failedState = PlaybackState.failed(songID: damaged.id, message: message)
+        await waitUntil { player.state == failedState }
+        try #require(player.state == failedState)
+        // Drain the asynchronous pause/status callbacks caused by the failure.
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await sources.invocationCount == 1)
+        #expect(await cache.readyFile(for: damaged.id) == nil)
+        #expect(player.state == failedState)
+        #expect(!player.isPlaybackRequested)
+        #expect(active.timeControlStatus == .paused)
+
+        if useStandby {
+            player.play(first, in: [first])
+        } else {
+            player.retryPlayback()
+            await waitUntil { await sources.invocationCount == 2 }
+            try #require(await sources.invocationCount == 2)
+            await sources.release(2, with: .success(PlaybackSource(
+                url: source,
+                availability: .playable(level: "standard"),
+                format: "wav"
+            )))
+        }
+        let resumedSongID = useStandby ? first.id : damaged.id
+        await waitUntil { player.currentSongID == resumedSongID && player.isPlaying }
+        #expect(player.currentSongID == resumedSongID)
+        #expect(player.isPlaying)
+        player.setPlayback(false)
+    }
+
+    @MainActor
     @Test("Playback controls fade only while the setting is enabled")
     func playbackControlFadeToggle() async throws {
         let root = performanceCacheRoot()
@@ -2602,6 +2836,10 @@ private actor PlayerPerformanceRepository: MusicRepository {
     private var songResolutionCancellations = 0
     private var reportRevisions: [UInt64] = []
     private var startReportCancellations = 0
+    private(set) var settledSongIDs: [Int64] = []
+    private(set) var podcastPlaybackReports: [
+        (episodeID: Int64, positionMilliseconds: Int, completed: Bool)
+    ] = []
 
     init(
         songs: [Song],
@@ -2712,6 +2950,7 @@ private actor PlayerPerformanceRepository: MusicRepository {
         totalSeconds: Int,
         expectedCredentialRevision: UInt64
     ) async throws {
+        settledSongIDs.append(songID)
         try await reportGate?.run(.settlement, revision: expectedCredentialRevision)
     }
     func recordPodcastPlayback(
@@ -2720,6 +2959,7 @@ private actor PlayerPerformanceRepository: MusicRepository {
         completed: Bool,
         expectedCredentialRevision: UInt64
     ) async throws {
+        podcastPlaybackReports.append((episodeID, positionMilliseconds, completed))
         try await reportGate?.run(.podcast, revision: expectedCredentialRevision)
     }
     func homeSection(

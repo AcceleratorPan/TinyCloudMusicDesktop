@@ -371,7 +371,7 @@ final actor TrackCache {
         let path = url.path
         guard manages(url),
               Self.supportedExtensions.contains(url.pathExtension.lowercased()),
-              Self.audioFileInfo(at: url) != nil
+              (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
         else {
             return
         }

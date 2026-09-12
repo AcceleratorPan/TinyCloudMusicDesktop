@@ -211,8 +211,9 @@ enum AudioUploadInspector {
         _ url: URL,
         accountID: Int64,
         destination: AudioUploadDestination,
-        podcastForm: PodcastUploadForm?
-    ) async throws -> AudioUploadManifest {
+        podcastForm: PodcastUploadForm?,
+        hash: @Sendable (URL) throws -> String = { try hashFile($0) }
+    ) async throws -> Inspection {
         guard accountID > 0, url.isFileURL else { throw AudioUploadError.unreadableFile }
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
@@ -235,8 +236,13 @@ enum AudioUploadInspector {
             includingResourceValuesForKeys: nil,
             relativeTo: nil
         )
+        let initialIdentity = try await sourceIdentity(url)
         let metadata = try await mediaMetadata(url: url, fallbackTitle: url.deletingPathExtension().lastPathComponent)
-        return AudioUploadManifest(
+        let md5 = try hash(url)
+        let identity = try await sourceIdentity(url)
+        guard identity == initialIdentity else { throw AudioUploadError.fileChanged }
+        try Task.checkCancellation()
+        let manifest = AudioUploadManifest(
             id: UUID(),
             accountID: accountID,
             destination: destination,
@@ -244,12 +250,13 @@ enum AudioUploadInspector {
             filename: sanitizedFilename(url.lastPathComponent),
             fileExtension: ext,
             contentType: type.preferredMIMEType ?? "audio/\(ext)",
-            byteCount: Int64(size),
-            modificationTime: values.contentModificationDate?.timeIntervalSince1970 ?? 0,
-            md5: try hashFile(url),
+            byteCount: identity.byteCount,
+            modificationTime: identity.modificationTime,
+            md5: md5,
             metadata: metadata,
             podcastForm: podcastForm
         )
+        return Inspection(manifest: manifest, identity: identity)
     }
 
     struct SourceIdentity: Equatable, Sendable {
@@ -257,6 +264,11 @@ enum AudioUploadInspector {
         let modificationTime: TimeInterval
         let fileNumber: UInt64?
         let changeTimeNanoseconds: Int64
+    }
+
+    struct Inspection: Sendable {
+        let manifest: AudioUploadManifest
+        let identity: SourceIdentity
     }
 
     struct ResolvedSource: Sendable {

@@ -2,6 +2,51 @@ import AppKit
 import AVKit
 import SwiftUI
 
+@MainActor
+final class MacMediaPlaybackCoordinator {
+    static let shared = MacMediaPlaybackCoordinator()
+
+    var pauseMusic: () -> Void = {}
+    private(set) weak var externalPlayer: AVPlayer?
+    private(set) var ownsExternalPlayback = false
+    private var playbackObservation: NSKeyValueObservation?
+
+    func beginExternalPlayback(_ player: AVPlayer, shouldPlay: Bool = true) {
+        endExternalPlayback(externalPlayer)
+        externalPlayer = player
+        playbackObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self, weak player] _, _ in
+            Task { @MainActor in
+                guard let player, player.timeControlStatus != .paused else { return }
+                self?.externalPlaybackWillStart(player)
+            }
+        }
+        if shouldPlay {
+            externalPlaybackWillStart(player)
+            player.play()
+        }
+    }
+
+    func externalPlaybackWillStart(_ player: AVPlayer) {
+        guard player === externalPlayer, !ownsExternalPlayback else { return }
+        ownsExternalPlayback = true
+        pauseMusic()
+    }
+
+    func musicPlaybackWillStart() {
+        ownsExternalPlayback = false
+        externalPlayer?.pause()
+    }
+
+    func endExternalPlayback(_ player: AVPlayer?) {
+        guard let player, player === externalPlayer else { return }
+        playbackObservation?.invalidate()
+        playbackObservation = nil
+        externalPlayer = nil
+        ownsExternalPlayback = false
+        player.pause()
+    }
+}
+
 private enum VideoPageDetail: Equatable {
     case mv(MVDetail)
     case video(VideoDetail)
@@ -1058,7 +1103,6 @@ struct VideoDetailView: View {
                 let playbackURL = try await VideoPlaybackURLResolver.resolve(source.url)
                 try Task.checkCancellation()
                 guard generation == requestGeneration, playbackTaskID == taskID else { return }
-                songPlayer.pauseForVideo()
                 let player = AVPlayer(playerItem: AVPlayerItem(url: playbackURL))
                 if let position = previousPlayer?.currentTime(), position.isNumeric {
                     _ = await player.seek(to: position, toleranceBefore: .zero, toleranceAfter: .zero)
@@ -1075,7 +1119,7 @@ struct VideoDetailView: View {
                 }
                 selectedResolution = source.resolution
                 installPlaybackObservers(for: player, generation: requestGeneration)
-                if shouldPlay { player.play() }
+                MacMediaPlaybackCoordinator.shared.beginExternalPlayback(player, shouldPlay: shouldPlay)
             } catch is CancellationError {
             } catch {
                 guard generation == requestGeneration, playbackTaskID == taskID else { return }
@@ -1128,6 +1172,7 @@ struct VideoDetailView: View {
     @MainActor
     private func failPlayback(_ player: AVPlayer, message: String) {
         clearPlaybackObservers()
+        MacMediaPlaybackCoordinator.shared.endExternalPlayback(player)
         player.pause()
         player.replaceCurrentItem(with: nil)
         videoPlayer = nil
@@ -1336,6 +1381,7 @@ struct VideoDetailView: View {
         subscriptionTask = nil
         subscriptionTaskID = nil
         clearPlaybackObservers()
+        MacMediaPlaybackCoordinator.shared.endExternalPlayback(videoPlayer)
         videoPlayer?.pause()
         videoPlayer?.replaceCurrentItem(with: nil)
         videoPlayer = nil

@@ -161,6 +161,75 @@ struct RecommendationMemoryTests {
         ))
     }
 
+    @Test("Library bootstrap reuses confirmed user and playlists for liked songs")
+    func libraryBootstrapReusesConfirmedUserAndPlaylists() throws {
+        let load = try sourceSlice(
+            iosLibrarySource(),
+            from: "private func load(force: Bool) async {\n        guard let library, let extras",
+            to: "private func publishLibraryProgress("
+        )
+        let store = try #require(load.range(of: "model.storeLibrarySnapshot(snapshot"))
+        let likedSongs = try #require(load.range(of: "await model.refreshLikedSongIDs("))
+
+        #expect(load.contains("let snapshot = LibrarySnapshot("))
+        #expect(store.lowerBound < likedSongs.lowerBound)
+        #expect(load.contains("userID: snapshot.user.id"))
+        #expect(load.contains("playlists: snapshot.playlists"))
+        #expect(load.contains("credentialRevision: revision"))
+        #expect(!load.contains("refreshAccountState"))
+    }
+
+    @Test("iOS history tasks have separate identities, retries, and terminal states")
+    func historyTaskIdentitiesAndTerminalStates() throws {
+        let source = try iosLibrarySource()
+        let identities = try sourceSlice(
+            source,
+            from: "private struct IOSRecommendationDatesTaskIdentity",
+            to: "struct IOSRecommendationHistoryView"
+        )
+        let history = try sourceSlice(
+            source,
+            from: "struct IOSRecommendationHistoryView",
+            to: "struct IOSListeningFootprintsView"
+        )
+        let picker = try sourceSlice(history, from: "Picker(\"日期\"", to: ".pickerStyle(.menu)")
+        let loadDates = try sourceSlice(
+            history,
+            from: "private func loadDates(",
+            to: "private func loadSongs("
+        )
+        let loadSongs = try sourceSlice(
+            history,
+            from: "private func loadSongs(",
+            to: "private func acceptsDates("
+        )
+
+        #expect(identities.contains("let accountID: Int64?"))
+        #expect(identities.components(separatedBy: "let credentialRevision: UInt64").count == 3)
+        #expect(identities.contains("let reloadRevision: Int"))
+        #expect(identities.contains("let acceptedDatesRevision: Int"))
+        #expect(identities.contains("let selectedDate: RecommendationHistoryDate?"))
+        #expect(identities.contains("let detailRetryRevision: Int"))
+        #expect(history.contains(".task(id: datesIdentity)"))
+        #expect(history.contains(".task(id: songsIdentity)"))
+        #expect(history.components(separatedBy: ".task(id:").count == 3)
+        #expect(!picker.contains("Task {"))
+        #expect(!history.contains("Task {"))
+        #expect(!loadDates.contains("loadSongs("))
+        #expect(loadDates.contains("requestState.beginDates(reload:"))
+        #expect(loadDates.contains("decodeRecommendationHistoryDates(root)"))
+        #expect(loadDates.contains("requestState.acceptDates(values, force: force)"))
+        #expect(loadDates.contains("acceptedDatesRevision &+= 1"))
+        #expect(loadDates.components(separatedBy: "guard acceptsDates(identity, generation: generation)").count == 3)
+        #expect(loadSongs.contains("requestState.consumeDetailForce(for: selectedDate)"))
+        #expect(loadSongs.contains("decodeHistoricalDailyRecommendations(root)"))
+        #expect(loadSongs.components(separatedBy: "guard acceptsSongs(identity, generation: generation)").count == 3)
+        #expect(history.contains("datesReloadRevision &+= 1"))
+        #expect(history.contains("detailRetryRevision &+= 1"))
+        #expect(history.contains("IOSLibraryEmptyState(title: \"暂无历史日推\""))
+        #expect(history.components(separatedBy: "catch is CancellationError").count == 3)
+    }
+
     @MainActor
     @Test("Production loader consumes initial and reload force once")
     func productionLoaderForceSequence() async throws {
@@ -416,6 +485,68 @@ struct RecommendationMemoryTests {
         #expect(!loader.hasDatesTask)
         #expect(!loader.hasSongsTask)
     }
+
+    @MainActor
+    @Test("Selector replacement cancels the old historical request")
+    func selectorReplacementCancelsHistoricalRequest() async throws {
+        let dates = fixtureDates("2025-07-31", "2025-07-30")
+        let loader = RecommendationHistoryLoader()
+        let credential = RecommendationCredentialContext()
+        let cancellation = RecommendationCancellationProbe()
+        let oldGate = RecommendationGate<Void>()
+        let currentGate = RecommendationGate<[Song]>()
+
+        let initialDates = try #require(loader.startDates(
+            accountID: 1,
+            credentialRevision: credential.revision,
+            reload: 0,
+            currentAccountID: { 1 },
+            currentCredentialRevision: { credential.revision }
+        ) { _ in dates })
+        await initialDates.value
+
+        loader.selectedDate = dates[0]
+        let old = try #require(loader.startSongs(
+            accountID: 1,
+            credentialRevision: credential.revision,
+            currentAccountID: { 1 },
+            currentCredentialRevision: { credential.revision }
+        ) { date, _, _ in
+            #expect(date == dates[0])
+            return try await cancellation.load(after: oldGate)
+        })
+        await oldGate.waitUntilEntered()
+
+        loader.selectedDate = dates[1]
+        let current = try #require(loader.startSongs(
+            accountID: 1,
+            credentialRevision: credential.revision,
+            currentAccountID: { 1 },
+            currentCredentialRevision: { credential.revision }
+        ) { date, _, _ in
+            #expect(date == dates[1])
+            return await currentGate.wait()
+        })
+        await cancellation.waitUntilCancelled()
+        await oldGate.release(())
+        await currentGate.waitUntilEntered()
+        await old.value
+
+        let oldSnapshot = await cancellation.snapshot()
+        #expect(oldSnapshot.cancellations == 1)
+        #expect(oldSnapshot.parses == 0)
+        #expect(loader.songs.isEmpty)
+        #expect(loader.songsError == nil)
+        #expect(loader.isLoadingSongs)
+        #expect(loader.hasSongsTask)
+
+        await currentGate.release([fixtureSong(42)])
+        await current.value
+        #expect(loader.songs.map(\.id) == [42])
+        #expect(loader.songsError == nil)
+        #expect(!loader.isLoadingSongs)
+        #expect(!loader.hasSongsTask)
+    }
 }
 
 @MainActor
@@ -474,6 +605,56 @@ private actor RecommendationGate<Value: Sendable> {
         valueWaiters = []
         waiters.forEach { $0.resume(returning: value) }
     }
+}
+
+private actor RecommendationCancellationProbe {
+    private var cancellations = 0
+    private var parses = 0
+    private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func load(after gate: RecommendationGate<Void>) async throws -> [Song] {
+        try await withTaskCancellationHandler {
+            await gate.wait()
+            try Task.checkCancellation()
+            parses += 1
+            return [fixtureSong(1)]
+        } onCancel: {
+            Task { await self.recordCancellation() }
+        }
+    }
+
+    func waitUntilCancelled() async {
+        guard cancellations == 0 else { return }
+        await withCheckedContinuation { cancellationWaiters.append($0) }
+    }
+
+    func snapshot() -> (cancellations: Int, parses: Int) {
+        (cancellations, parses)
+    }
+
+    private func recordCancellation() {
+        cancellations += 1
+        let waiters = cancellationWaiters
+        cancellationWaiters = []
+        waiters.forEach { $0.resume() }
+    }
+}
+
+private func iosLibrarySource() throws -> String {
+    let repositoryRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    return try String(
+        contentsOf: repositoryRoot.appending(path: "iOS/TinyCloudMusicIOS/UI/LibraryMedia/IOSLibraryView.swift"),
+        encoding: .utf8
+    )
+}
+
+private func sourceSlice(_ source: String, from start: String, to end: String) throws -> String {
+    let lower = try #require(source.range(of: start)?.lowerBound)
+    let upper = try #require(source.range(of: end, range: lower..<source.endIndex)?.lowerBound)
+    return String(source[lower..<upper])
 }
 
 private func fixtureDates(_ values: String...) -> [RecommendationHistoryDate] {

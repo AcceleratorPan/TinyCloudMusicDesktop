@@ -126,7 +126,6 @@ struct IOSTopTabScrollPositionModifier<Selection: Hashable>: ViewModifier {
     let selection: Selection
     @State private var position = ScrollPosition(edge: .top)
     @State private var positions: TopTabScrollPositions<Selection>
-    @State private var currentOffset: CGFloat = 0
 
     init(selection: Selection) {
         self.selection = selection
@@ -139,10 +138,10 @@ struct IOSTopTabScrollPositionModifier<Selection: Hashable>: ViewModifier {
             .onScrollGeometryChange(for: CGFloat.self) { geometry in
                 max(0, geometry.contentOffset.y + geometry.contentInsets.top)
             } action: { _, offset in
-                currentOffset = offset
+                positions.record(offset, for: positions.selection)
             }
             .onChange(of: selection) { _, selection in
-                position.scrollTo(y: positions.target(for: selection, currentOffset: currentOffset))
+                position.scrollTo(y: positions.select(selection))
             }
     }
 }
@@ -947,7 +946,12 @@ private struct IOSPlaylistDetail: View {
                 guard let library = model.library, context.matches(model: model, library: library) else {
                     throw CancellationError()
                 }
-                preparedCover = IOSPreparedPlaylistCover(cover: cover, context: context)
+                let previewImage = UIImage(data: cover.jpegData)
+                preparedCover = IOSPreparedPlaylistCover(
+                    cover: cover,
+                    context: context,
+                    previewImage: previewImage
+                )
             } catch is CancellationError {
             } catch {
                 managementError = error.localizedDescription
@@ -1999,6 +2003,7 @@ private struct IOSPreparedPlaylistCover: Identifiable {
     let id = UUID()
     let cover: ProcessedPlaylistCover
     let context: IOSPlaylistMutationContext
+    let previewImage: UIImage?
 }
 
 private struct IOSDetailOperationError: LocalizedError, Sendable {
@@ -2428,7 +2433,7 @@ private struct IOSPlaylistCoverUpdateSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if let image = UIImage(data: item.cover.jpegData) {
+                    if let image = item.previewImage {
                         Image(uiImage: image)
                             .resizable()
                             .scaledToFit()

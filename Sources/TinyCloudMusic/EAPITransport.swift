@@ -1129,6 +1129,8 @@ struct EAPITransport: Sendable {
             authenticationSession = session
         } else {
             let configuration = URLSessionConfiguration.default
+            configuration.httpCookieStorage = nil
+            configuration.httpShouldSetCookies = false
             configuration.httpMaximumConnectionsPerHost = 8
             configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
             configuration.timeoutIntervalForRequest = 15

@@ -1,0 +1,391 @@
+{
+  "date": "2026-09-12",
+  "head": "e97eefac09cf2c059d090956dd7db46363fb8e08",
+  "basis": "Current working tree, including pre-existing uncommitted changes",
+  "files": [
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/AudioContentModels.swift",
+      "lines": 703,
+      "sha256": "c3443e49e748a583e218a234635b10bb4cec1ba0fd1af12b5db5aab1c7e8d5a9"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/AudioRangeResourceLoader.swift",
+      "lines": 338,
+      "sha256": "dd98ef1228a47140ff08d4b6780e98ec10295c6c1ee03c0c043b14a812a5590b"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/AudioUploadAPI.swift",
+      "lines": 355,
+      "sha256": "d97c61cbb00928f992ac27eb707cb6f83f113ee43d5a2e89e222993774145b1d"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/AudioUploadManager.swift",
+      "lines": 1200,
+      "sha256": "f3cb00a69bf07e129f4f49e1e0034f0eab606ad96d5c04d687fbe8b01eeca0d4"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/CachedAsyncImage.swift",
+      "lines": 412,
+      "sha256": "d3a683cb20add3b9ca43374c58c2437b4069c75eaaf3e86b8c897bbddb985571"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/CloudMusicModels.swift",
+      "lines": 162,
+      "sha256": "f5cff550ed660094d8af85df2c00cb6add81eced7e40df63ee43d8be171ebed9"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/CommentEmojiText.swift",
+      "lines": 261,
+      "sha256": "378aa7e3a754f681759da77bbadcdb634d6ad7acec052023f7ccb1ebb765a6d5"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/CredentialSnapshot.swift",
+      "lines": 33,
+      "sha256": "cb3af8e7153ec78b6b58193db2163a7eeaf30e187a24c52e734c7caacf328e0f"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/CredentialStore.swift",
+      "lines": 175,
+      "sha256": "81a860df684995ced1f1bfa002e58d2c7762fa7572a219ffd5469a884f2b9ecf"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/EAPITransport.swift",
+      "lines": 2674,
+      "sha256": "980fa2a9356f885a225d999497334b8f76728103f9b16c4f33d246e4e947a62a"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/ListenTogetherController.swift",
+      "lines": 1593,
+      "sha256": "c95a6923647c4519f6bcea41b9a34381dbbe1318752d03b7765140c17db48887"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/ListenTogetherModels.swift",
+      "lines": 620,
+      "sha256": "dd991478a4b9043c6fe61429ca2b1eb130a1452b854da8b081e6c28a2aeec9d4"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/ListeningFootprintsView.swift",
+      "lines": 2496,
+      "sha256": "de725d0b96406bc9e050f13be130831750c2d7fda6ddc544980b6e7cd2a3e6a2"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/ListeningReportModels.swift",
+      "lines": 1112,
+      "sha256": "65a16e1ca59c769a3c3e9271ddc518a97d596c709769822292f517320bbcc65b"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/LiveAudioContentLibrary.swift",
+      "lines": 273,
+      "sha256": "1c6cbd9c00c8b67918233d80dbf34ba03072b36c0bfdb8ef814ce394b911e746"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/LiveListenTogetherService.swift",
+      "lines": 341,
+      "sha256": "eb4e9d17eb6b3e72b0dc6caa12816da5315b275b008c382b7a33e4643937f607"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/LiveMusicExtras.swift",
+      "lines": 314,
+      "sha256": "25aea21455502ebe07f39c79d58d1860436bafbd62860837ff0db3c3da087e57"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/LiveMusicKnowledgeLibrary.swift",
+      "lines": 214,
+      "sha256": "e7794a16bb3e72a0c9715923ac9b498a6e5b9a90c57dfb62ba92ea2d7f58b095"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/LiveMusicLibrary.swift",
+      "lines": 1538,
+      "sha256": "e2b8daefdbbb1f3678ed1840e494f6b00080ecd77215757b2d2a7c6eacf53df7"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/LiveMusicRepository+Detail.swift",
+      "lines": 269,
+      "sha256": "1702f669a669a09aba0da3cdd09003a3b3230aa0d3093c91c301369151b77195"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/LiveMusicRepository+Home.swift",
+      "lines": 391,
+      "sha256": "7b76180998956804e05ce20526505663bcbb704794a9c56f3810be7d69abcdf2"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/LiveMusicRepository+Search.swift",
+      "lines": 242,
+      "sha256": "0becc6d60e5ac9092a1e16dd1567ceb57dfa39929ae7388379ee4466419017a0"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/LiveMusicRepository.swift",
+      "lines": 540,
+      "sha256": "e08aa09fbb8006c672bcb16d4ba11ca27acb22cf9fd8c62d647146b86dab1748"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/LiveVideoLibrary.swift",
+      "lines": 307,
+      "sha256": "ec6aeb61fbb7c0d0d7d2591b954b7e9bdf872945830558f74ee101767523facf"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/Models.swift",
+      "lines": 940,
+      "sha256": "9cbe727275845afdf111efbe919280fd843f224119d22428ad1e23b0ec5a1a5d"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/MusicDownload.swift",
+      "lines": 2294,
+      "sha256": "0cbdef39137a16f7120dcabe8197fae223e8e17ce2a9057764b2ead7d0d2ed0b"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/MusicDownloadModels.swift",
+      "lines": 603,
+      "sha256": "beabc56701bd98ef4e5a56807b1b3b62cad94369376ccd801d55885cb00f6ae4"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/MusicDownloadTransfer.swift",
+      "lines": 304,
+      "sha256": "b7f92cc668f377255ff3dbcd6a3a2ba974a45d4ef8f9a7be572337de9cf191c9"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/MusicExtraModels.swift",
+      "lines": 253,
+      "sha256": "4a550013b7730698757de13675664ce08ef071fe60d5ab8150aecddb4b2a883b"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/MusicKnowledgeModels.swift",
+      "lines": 618,
+      "sha256": "688e1e01497fe9d1b7181a376e042e5ed84b952e773fe453b8ac87dc3738d6c3"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/MusicLibraryModels.swift",
+      "lines": 696,
+      "sha256": "e9aeb0634a23284e3d738c3ce7cf09e853dfd67740503399e63dab8bf46e914e"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/MusicSheetWorker.swift",
+      "lines": 639,
+      "sha256": "33683144742fc2409d69f3138621b179e160fb09479f3a531ea7d57f61e7d68a"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/PlayerController.swift",
+      "lines": 3742,
+      "sha256": "421bae42da6b545745f625783c42d56cd34ab5677d9cb3ba406f81435f5af0b1"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/PlaylistImageUpload.swift",
+      "lines": 202,
+      "sha256": "50af82a419a5a5752aec43c881e6dd8622865fdbd136a1f9a523df83ff26d11d"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/RecommendationMemoryModels.swift",
+      "lines": 86,
+      "sha256": "e1c755e03bf26986863243d3719c291cb8fb13e2c3c5d4c15878b94fc32baed7"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/Repository.swift",
+      "lines": 431,
+      "sha256": "70c859c2347a5a600cc9fbe911c549f3cba33450fada0b8f6733fe3f80f8bd61"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/SessionController.swift",
+      "lines": 596,
+      "sha256": "b65b2890399ee07bd1dac8206b25ef023b29de145a6bd5d7135d12323f974716"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/StreamingByteRange.swift",
+      "lines": 111,
+      "sha256": "f82c7df08903395213f76555ff01d1b2ca32093be1e1ebab4b8848f5a709c816"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/TrackCache.swift",
+      "lines": 787,
+      "sha256": "39d55c3ad9c7d094616b7ed7e9e1fc5d74666cd0b79af9517b0e3d04440c4941"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/TrackRangeCache.swift",
+      "lines": 1904,
+      "sha256": "9ad12aef5533a3d17ce15541756b81d57dcdfd86f250f1f91a73010ee699275a"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/VideoDownload.swift",
+      "lines": 282,
+      "sha256": "f8b552df0ff52700c8e476efb3c9c4b38ae6b041ee3fa49686792d6d333fdc8f"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "Sources/TinyCloudMusic/VideoModels.swift",
+      "lines": 530,
+      "sha256": "318d520b174c1a563ff0b04d59613666fd4c6f282646c66e28d5b3afda88871f"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/App/IOSAppContainer.swift",
+      "lines": 267,
+      "sha256": "c024ea34f49c8d1df2b8b1ec5c3af7716fef5f6e165d4ce1357aa112823f508d"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/App/LibrarySnapshot.swift",
+      "lines": 7,
+      "sha256": "5441188da278cd3384a433dc635eb5d78a02040965ddd06d57753ff9a2907339"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/App/TinyCloudMusicIOSApp.swift",
+      "lines": 29,
+      "sha256": "ba258074f8e24df16875b7d66152ecc468d393028a93964e0eeca26901f4dbee"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/Platform/IOSAudioSessionCoordinator.swift",
+      "lines": 175,
+      "sha256": "a9f37b051eb0e32ab435452c3597591e45d58e94d322d34b798692a4f4b8a2c6"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/Platform/IOSNIMChatroomTransport.swift",
+      "lines": 467,
+      "sha256": "54a8807e9eee54ab07f87e769ace484d6e4c1db57508088c1db514959229b84d"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/SharedOverrides/AppModel.swift",
+      "lines": 1851,
+      "sha256": "ff9cfda244f888c87aa956c948e0723c48f5307c8c28a52122aa0256f6924e1c"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/SharedOverrides/AudioUploadModels.swift",
+      "lines": 593,
+      "sha256": "38307ffd2d0778ae6dfdbf36545d629d4aae6cd236e5baa10d0e1ad266705a05"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/SharedOverrides/MusicDownloadInfrastructure.swift",
+      "lines": 918,
+      "sha256": "e99c2cf8e5eb9318071539c24c5d148dc5fddf4612f61bbed8ae7d9e20d47f9c"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/SharedOverrides/NOSAudioUpload.swift",
+      "lines": 413,
+      "sha256": "4b82ec666c1d9a666c2b91f937d5989bf17aab906c724095fbfbffc7150cde89"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/SharedOverrides/PersonalFMController.swift",
+      "lines": 487,
+      "sha256": "7ffea7a09a79516ac7d3f8e3e470da412e4d52035b4366c91de3bfd73eb356cc"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/UI/DiscoverSearch/IOSDiscoverSearchComponents.swift",
+      "lines": 226,
+      "sha256": "d58450b739c2412765d00b65fae5ea6c5faced33374524a78eda52b7eaae21af"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/UI/DiscoverSearch/IOSDiscoverView.swift",
+      "lines": 206,
+      "sha256": "e76fe908c306264ae5d0cd0a86325c555792c215b5f13525b819518bd06c43d7"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/UI/DiscoverSearch/IOSRouteDestinationView.swift",
+      "lines": 2509,
+      "sha256": "c15c7932c505c0d84017e5a49aa96a42ffbacd30fba2562a4e97294f2dc542b3"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/UI/DiscoverSearch/IOSSearchView.swift",
+      "lines": 407,
+      "sha256": "f0c1598fbcdfc66936bc1cc8c5f1e1b4c0ae6681b574f0219c72a9e2bb67e08f"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/UI/IOSRootView.swift",
+      "lines": 526,
+      "sha256": "66e16958b987193a251bc03038ef413f47fed7538c890a63de94ad94b233a8fd"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/UI/LibraryMedia/IOSAccountView.swift",
+      "lines": 1246,
+      "sha256": "267b3b6b9bfe94ec53b8073a1446c9579fe085c75499beff70140c2fb1040e43"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/UI/LibraryMedia/IOSLibraryView.swift",
+      "lines": 2761,
+      "sha256": "f9608bc33e7cf0898ae08eb127cfc00191b4f19bd7919cb2c2a071c375b3d3a4"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/UI/LibraryMedia/IOSMediaView.swift",
+      "lines": 2849,
+      "sha256": "9f0463dc6bf70b8e5cbf5167fcbc32631199c85925bad96f0ca4a04eae20d3e0"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/UI/Player/IOSDesignSupport.swift",
+      "lines": 86,
+      "sha256": "44b0ab9e73432a81c5d8988d839485a54023a593423f35ba6f313071c8818548"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/UI/Player/IOSListenTogetherView.swift",
+      "lines": 166,
+      "sha256": "1da521c3ab3517a19ebd0133802db3886c73a49b43974c6313b8557dfbd4d7ed"
+    },
+    {
+      "target": "TinyCloudMusicIOS",
+      "path": "iOS/TinyCloudMusicIOS/UI/Player/IOSPlayerViews.swift",
+      "lines": 1282,
+      "sha256": "e201e59957838e788e005da1415b64ab97cf90cc25631911335def5341ca1ded"
+    },
+    {
+      "target": "TinyCloudMusicIOSTests",
+      "path": "iOS/TinyCloudMusicIOSTests/IOSNavigationTests.swift",
+      "lines": 2010,
+      "sha256": "988a1cbdfac32a7e5ac5244f8851134b725d63bde3f523a322fefa9f81455981"
+    }
+  ]
+}

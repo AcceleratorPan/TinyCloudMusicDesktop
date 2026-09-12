@@ -609,6 +609,9 @@ struct LyricLine: Identifiable, Equatable, Sendable {
 
 enum LRCParser {
     private static let wordLineMatchToleranceMilliseconds: Int64 = 750
+    // ponytail: bound untrusted transcripts; larger documents need a streaming parser.
+    private static let maximumSourceBytes = 2 * 1_024 * 1_024
+    private static let maximumLines = 10_000
 
     private struct WordLine {
         var durationMilliseconds: Int64
@@ -623,6 +626,17 @@ enum LRCParser {
 
     static func parse(primary: String, translation: String? = nil) -> [LyricLine] {
         parse(SongLyrics(lineLyrics: primary, translatedLyrics: translation))
+    }
+
+    static func parseOffMain(_ source: SongLyrics) async throws -> [LyricLine] {
+        let task = Task.detached(priority: .userInitiated) { parse(source) }
+        return try await withTaskCancellationHandler {
+            let lines = await task.value
+            try Task.checkCancellation()
+            return lines
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     static func parse(_ source: SongLyrics) -> [LyricLine] {
@@ -698,9 +712,10 @@ enum LRCParser {
     }
 
     private static func timedLines(_ source: String?) -> [Int64: String] {
-        guard let source else { return [:] }
+        guard let source, source.utf8.count <= maximumSourceBytes else { return [:] }
         var values: [Int64: String] = [:]
-        for line in source.split(whereSeparator: \.isNewline) {
+        for line in source.split(whereSeparator: \.isNewline).prefix(maximumLines) {
+            guard !Task.isCancelled, values.count < maximumLines else { break }
             let text = String(line)
             let range = NSRange(text.startIndex..., in: text)
             let matches = lrcRegex.matches(in: text, range: range)
@@ -717,7 +732,7 @@ enum LRCParser {
                 guard let minutesRange = Range(match.range(at: 1), in: text),
                       let secondsRange = Range(match.range(at: 2), in: text),
                       let minutes = Int64(text[minutesRange]),
-                      let seconds = Int64(text[secondsRange])
+                      let seconds = Int64(text[secondsRange]), seconds < 60
                 else { continue }
                 var milliseconds: Int64 = 0
                 if match.range(at: 3).location != NSNotFound,
@@ -726,16 +741,21 @@ enum LRCParser {
                     guard let value = Int64(fraction) else { continue }
                     milliseconds = value * [100, 10, 1][fraction.count - 1]
                 }
-                merge(content, at: (minutes * 60 + seconds) * 1_000 + milliseconds, into: &values)
+                let remainder = seconds * 1_000 + milliseconds
+                guard minutes <= (Int64.max - remainder) / 60_000,
+                      values.count < maximumLines
+                else { continue }
+                merge(content, at: minutes * 60_000 + remainder, into: &values)
             }
         }
         return values
     }
 
     private static func wordLines(_ source: String?) -> [Int64: WordLine] {
-        guard let source else { return [:] }
+        guard let source, source.utf8.count <= maximumSourceBytes else { return [:] }
         var values: [Int64: WordLine] = [:]
-        for rawLine in source.split(whereSeparator: \.isNewline) {
+        for rawLine in source.split(whereSeparator: \.isNewline).prefix(maximumLines) {
+            guard !Task.isCancelled else { break }
             let line = String(rawLine)
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("{"),
@@ -801,8 +821,9 @@ enum LRCParser {
         for (timestamp, line) in wordLines(wordTimed) {
             values[timestamp] = line.words.map(\.text).joined()
         }
-        guard let wordTimed else { return values }
-        for rawLine in wordTimed.split(whereSeparator: \.isNewline) {
+        guard let wordTimed, wordTimed.utf8.count <= maximumSourceBytes else { return values }
+        for rawLine in wordTimed.split(whereSeparator: \.isNewline).prefix(maximumLines) {
+            guard !Task.isCancelled else { break }
             let line = String(rawLine)
             let range = NSRange(line.startIndex..., in: line)
             guard wordRegex.firstMatch(in: line, range: range) == nil,
@@ -828,6 +849,7 @@ enum LRCParser {
         var matches: [Int64: Int64] = [:]
         // ponytail: O(n^2) pairing is fine for song-sized inputs; use a two-pointer merge for long transcripts.
         for wordTimestamp in wordLines.keys.sorted() {
+            guard !Task.isCancelled else { break }
             guard let wordLine = wordLines[wordTimestamp] else { continue }
             let wordText = wordLine.words.map(\.text).joined()
             let textMatches = remaining.filter { lines[$0] == wordText }

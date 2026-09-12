@@ -20,6 +20,11 @@ struct MusicLibraryUser: Identifiable, Equatable, Sendable {
     let followsCurrentUser: Bool
 }
 
+struct ValidatedMusicLibraryAccount: Equatable, Sendable {
+    let user: MusicLibraryUser
+    let credentialRevision: UInt64
+}
+
 enum RecentPlaybackKind: String, CaseIterable, Sendable {
     case song, album, playlist, video, voice, podcast
 

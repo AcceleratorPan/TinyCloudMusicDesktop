@@ -71,7 +71,7 @@ enum MusicDownloadSource: Equatable, Sendable {
     case cloud(userID: Int64, fileName: String)
 }
 
-struct MusicDownloadResult: Sendable {
+struct MusicDownloadResult: Codable, Equatable, Sendable {
     let audioURL: URL
     let lyricURL: URL?
 }
@@ -104,6 +104,28 @@ struct MusicDownloadTargets: Sendable {
 }
 
 enum MusicDownloadFiles {
+    @discardableResult
+    static func writeUnique(_ data: Data, to destination: URL) throws -> URL {
+        let directory = destination.deletingLastPathComponent()
+        var candidate = destination
+        var suffix = 2
+        while true {
+            do {
+                // Exclusive creation also protects against another save choosing the same name.
+                try data.write(to: candidate, options: .withoutOverwriting)
+                return candidate
+            } catch {
+                guard (error as NSError).domain == NSCocoaErrorDomain,
+                      (error as NSError).code == CocoaError.fileWriteFileExists.rawValue
+                else { throw error }
+                candidate = directory
+                    .appending(path: "\(destination.deletingPathExtension().lastPathComponent) (\(suffix))")
+                    .appendingPathExtension(destination.pathExtension)
+                suffix += 1
+            }
+        }
+    }
+
     private struct ManagedIdentity: Codable {
         let version: Int
         let songID: Int64
@@ -269,11 +291,26 @@ enum MusicDownloadFiles {
     static func stageDownloadedFile(
         _ source: URL,
         at partURL: URL,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        moveItem: (FileManager, URL, URL) throws -> Void = { try $0.moveItem(at: $1, to: $2) },
+        copyItem: (FileManager, URL, URL) throws -> Void = { try $0.copyItem(at: $1, to: $2) }
     ) throws {
         try? fileManager.removeItem(at: partURL)
         do {
-            try fileManager.moveItem(at: source, to: partURL)
+            try moveItem(fileManager, source, partURL)
+        } catch {
+            try? fileManager.removeItem(at: partURL)
+            do {
+                try copyItem(fileManager, source, partURL)
+                guard try fileSize(at: partURL) > 0 else { throw MusicDownloadError.emptyFile }
+                try? fileManager.removeItem(at: source)
+                return
+            } catch {
+                try? fileManager.removeItem(at: partURL)
+                throw error
+            }
+        }
+        do {
             guard try fileSize(at: partURL) > 0 else { throw MusicDownloadError.emptyFile }
         } catch {
             try? fileManager.removeItem(at: partURL)
